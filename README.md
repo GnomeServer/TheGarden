@@ -1,5 +1,4 @@
-# TheGarden - Small AI Lab Architecture Using Free and Open-Source Software
-
+# TheGarden - Small AI Lab
 ## Scope
 
 This is the deliberately small first version of the lab.
