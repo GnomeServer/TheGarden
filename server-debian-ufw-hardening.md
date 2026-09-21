@@ -107,15 +107,3 @@ same tailnet inherits access automatically — no rule changes needed.
   UFW is a backstop rather than the only control.
 - **`avahi-daemon` (mDNS, 5353/UDP)** — currently open on `0.0.0.0`/`::`. Low risk,
   but worth deciding whether it's needed on this box or can be disabled.
-
-## Next step
-
-With `server-debian` reachable and locked to the tailnet, the next item in the build
-plan is:
-
-```bash
-sudo apt install docker-compose-v2
-```
-
-...to begin standing up the data-plane stack (Forgejo, PostgreSQL, Garage S3,
-Conduit+Element, Open WebUI, llama.cpp) bound to the tailnet IP only.
