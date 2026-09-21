@@ -1,0 +1,71 @@
+---
+- name: Download Garage binary
+  ansible.builtin.get_url:
+    url: "{{ garage_binary_url }}"
+    dest: "{{ garage_binary_path }}"
+    mode: "0755"
+    owner: root
+    group: root
+  become: true
+  notify: Restart Garage
+
+- name: Create Garage metadata directory
+  ansible.builtin.file:
+    path: "{{ garage_meta_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Create Garage data directory
+  ansible.builtin.file:
+    path: "{{ garage_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Install Garage configuration
+  ansible.builtin.template:
+    src: garage.toml.j2
+    dest: "{{ garage_config_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+  notify: Restart Garage
+
+- name: Install Garage systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/garage.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Garage S3 Object Storage
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart={{ garage_binary_path }} -c {{ garage_config_path }} server
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  become: true
+  notify:
+    - Reload systemd
+    - Restart Garage
+
+- name: Enable and start Garage
+  ansible.builtin.systemd:
+    name: garage
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true

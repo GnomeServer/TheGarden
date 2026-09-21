@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: df-server
+  description: Audit-first baseline for the lab infrastructure
+  license: MIT
+  min_ansible_version: '2.19'
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+dependencies: []

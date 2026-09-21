@@ -1,0 +1,20 @@
+---
+# This file is intentionally not loaded by ansible.cfg.
+# Copy or merge it into an active inventory only after setting each remote
+# operating-system username and verifying SSH access.
+all:
+  children:
+    tailscale_peers:
+      hosts:
+        donatello:
+          ansible_host: 100.94.145.104
+          # ansible_user: <remote-os-user>
+        inkii:
+          ansible_host: 100.98.125.127
+          # ansible_user: <remote-os-user>
+        naruto-dell-pro-max-14-mc14250:
+          ansible_host: 100.88.92.78
+          # ansible_user: <remote-os-user>
+        raphael:
+          ansible_host: 100.116.35.103
+          # ansible_user: <remote-os-user>

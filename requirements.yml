@@ -1,0 +1,7 @@
+---
+# ansible-core supplies the built-in modules used by this project.
+# Add only the collections required by future playbooks, for example:
+# collections:
+#   - name: community.general
+#     version: ">=10.0.0"
+collections: []

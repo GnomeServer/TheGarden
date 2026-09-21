@@ -1,0 +1,17 @@
+---
+garage_version: "v2.4.1"
+garage_binary_url: "https://garagehq.deuxfleurs.fr/_releases/v2.4.1/x86_64-unknown-linux-musl/garage"
+garage_binary_path: "/usr/local/bin/garage"
+
+garage_config_path: "/etc/garage.toml"
+garage_data_dir: "/var/lib/garage/data"
+garage_meta_dir: "/var/lib/garage/meta"
+
+garage_rpc_port: 3901
+garage_s3_port: 3900
+garage_admin_port: 3903
+
+garage_replication_factor: 1
+
+garage_rpc_secret: "{{ lookup('ansible.builtin.password', '/etc/garage_rpc_secret length=64 chars=hexdigits') }}"
+

@@ -1,0 +1,2 @@
+---
+# Keep role constants here; host-specific values belong in inventory/host_vars.

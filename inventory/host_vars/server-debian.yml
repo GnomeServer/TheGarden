@@ -1,0 +1,8 @@
+---
+host_description: Debian 13 lab controller and workstation
+host_os: Debian GNU/Linux 13 (trixie)
+host_architecture: x86_64
+host_lan_address: 10.1.10.156
+host_tailscale_address: 100.102.154.23
+host_tailscale_name: server-debian
+observed_at: '2026-09-21'

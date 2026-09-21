@@ -1,0 +1,20 @@
+---
+- name: Confirm this host is a Debian-family system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'Debian'
+    fail_msg: "This baseline currently expects a Debian-family host."
+
+- name: Report the discovered current host
+  ansible.builtin.debug:
+    msg:
+      - "Host: {{ inventory_hostname }} ({{ ansible_facts.hostname }})"
+      - "OS: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+      - "Kernel: {{ ansible_facts.kernel }}"
+      - "Ansible Python: {{ ansible_facts.python.version.major }}.{{ ansible_facts.python.version.minor }}.{{ ansible_facts.python.version.micro }}"
+      - "Audit-only mode: {{ not (common_apply_changes | bool) }}"
+
+- name: Explain that no mutation tasks are enabled
+  ansible.builtin.debug:
+    msg: "No changes were requested: define the desired lab baseline before adding mutating tasks to the common role."
+  when: not (common_apply_changes | bool)

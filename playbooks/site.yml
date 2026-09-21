@@ -1,0 +1,14 @@
+---
+- name: Evaluate the lab-infra baseline
+  hosts: lab_local
+  gather_facts: true
+  become: true
+  roles:
+    - role: common
+      tags:
+        - common
+        - baseline
+
+    - role: garage
+      tags:
+        - garage

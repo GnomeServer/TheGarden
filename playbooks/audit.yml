@@ -1,0 +1,75 @@
+---
+- name: Capture the current lab host state
+  hosts: lab_local
+  gather_facts: true
+  become: false
+  vars:
+    state_dir: "{{ playbook_dir }}/../state"
+  tasks:
+    - name: Gather installed package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Gather systemd service facts
+      ansible.builtin.service_facts:
+
+    - name: Read Tailscale status when available
+      ansible.builtin.command:
+        argv:
+          - tailscale
+          - status
+      register: tailscale_status
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Save Ansible host facts
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: "{{ ansible_facts | to_nice_json }}\n"
+        dest: "{{ state_dir }}/{{ inventory_hostname }}-facts.json"
+        mode: '0644'
+
+    - name: Save installed package facts
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: "{{ ansible_facts.packages | to_nice_json }}\n"
+        dest: "{{ state_dir }}/{{ inventory_hostname }}-packages.json"
+        mode: '0644'
+
+    - name: Save systemd service facts
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: "{{ ansible_facts.services | to_nice_json }}\n"
+        dest: "{{ state_dir }}/{{ inventory_hostname }}-services.json"
+        mode: '0644'
+
+    - name: Save Tailscale status
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: |
+          rc: {{ tailscale_status.rc | default(1) }}
+          stdout: |
+          {{ tailscale_status.stdout | default('') | indent(2, true) }}
+          stderr: |
+          {{ tailscale_status.stderr | default('') | indent(2, true) }}
+        dest: "{{ state_dir }}/tailscale-status.txt"
+        mode: '0644'
+
+    - name: Save audit metadata
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: |
+          generated_at: {{ ansible_facts["date_time"]["iso8601"] | quote }}
+          inventory_hostname: {{ inventory_hostname | quote }}
+          ansible_hostname: {{ ansible_facts["hostname"] | quote }}
+          ansible_distribution: {{ ansible_facts["distribution"] | quote }}
+          ansible_distribution_version: {{ ansible_facts["distribution_version"] | quote }}
+          ansible_kernel: {{ ansible_facts["kernel"] | quote }}
+          tailscale_rc: {{ tailscale_status.rc | default(1) }}
+        dest: "{{ state_dir }}/audit-meta.yml"
+        mode: '0644'
+
+    - name: Report audit output
+      ansible.builtin.debug:
+        msg: "Current host state saved under {{ state_dir }}"
