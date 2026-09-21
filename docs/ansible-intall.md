@@ -258,7 +258,7 @@ This does not remove any system packages or collections that may be installed se
 
 - This is a **current-user** installation. It is not available to other accounts unless they perform their own installation or PATH setup.
 - It is not a system-wide `apt` installation. If a system-wide installation is required and the account is granted sudo access, the Debian route would be `sudo apt-get update && sudo apt-get install ansible-core`.
-- No `ansible.cfg`, inventory, SSH host configuration, credentials, or remote host configuration was created.
+- No system-wide `ansible.cfg`, remote inventory, SSH host configuration, credentials, or remote host configuration was created. The project-specific configuration is documented under `Ansible/`.
 - No remote host was changed during verification; only `localhost` was tested with the local connection.
 - `ansible-core` does not include the broad community collection bundle. Install only the collections needed for a particular project with `ansible-galaxy`.
 - The virtual environment keeps Ansible separate from Debian's externally managed system Python and makes the installation removable without root access.

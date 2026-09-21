@@ -5,12 +5,12 @@ collections/
 
 # Local audit output. These files can contain hostnames, IP addresses,
 # package inventories, service names, and other machine-specific details.
-state/*-facts.json
-state/*-packages.json
-state/*-services.json
-state/tailscale-status.txt
-state/*.log
+**/state/*-facts.json
+**/state/*-packages.json
+**/state/*-services.json
+**/state/tailscale-status.txt
+**/state/*.log
 
 # Local secrets
 .secrets/
-state/audit-meta.yml
+**/state/audit-meta.yml

@@ -47,64 +47,56 @@ The existing login profile already includes `$HOME/.local/bin` for login shells.
 
 ## 2. Lab project location
 
-The requested project path was `/lab-infra`. Creating a directory directly under `/` requires root privileges, so the project was staged at:
+The repository is currently staged at `/home/df-server/lab-infra`, with the Ansible project under:
 
 ```text
-/home/df-server/lab-infra
+/home/df-server/lab-infra/Ansible
 ```
 
-After reviewing the files, move it to `/lab-infra` from an interactive SSH shell:
+The requested `/lab-infra` path requires root privileges. After reviewing the repository, move it from an interactive SSH shell with:
 
 ```bash
 sudo mv "$HOME/lab-infra" /lab-infra
 sudo chown -R df-server:df-server /lab-infra
 ```
 
-The Ansible configuration uses relative paths and works from either location.
+After moving it, the Ansible project root is `/lab-infra/Ansible`. The Ansible configuration uses relative paths and works from either project location.
 
 ## 3. Project structure
 
 ```text
 lab-infra/
-├── .gitignore
-├── README.md
-├── ansible.cfg
-├── requirements.yml
-├── inventory/
-│   ├── README.md
-│   ├── hosts.yml
-│   ├── tailscale-peers.example.yml
-│   ├── group_vars/
-│   │   └── all.yml
-│   └── host_vars/
-│       └── server-debian.yml
-├── playbooks/
-│   ├── audit.yml
-│   └── site.yml
-├── roles/
-│   └── common/
-│       ├── README.md
-│       ├── defaults/main.yml
-│       ├── handlers/main.yml
-│       ├── meta/main.yml
-│       ├── tasks/main.yml
-│       ├── templates/.gitkeep
-│       └── vars/main.yml
-└── state/
-    ├── README.md
-    ├── audit-meta.yml
-    ├── server-debian-facts.json
-    ├── server-debian-packages.json
-    ├── server-debian-services.json
-    └── tailscale-status.txt
+├── Ansible/
+│   ├── ansible.cfg
+│   ├── requirements.yml
+│   ├── inventory/
+│   │   ├── README.md
+│   │   ├── hosts.yml
+│   │   ├── tailscale-peers.example.yml
+│   │   ├── group_vars/all.yml
+│   │   └── host_vars/server-debian.yml
+│   ├── playbooks/
+│   │   ├── audit.yml
+│   │   └── site.yml
+│   ├── roles/
+│   │   ├── common/
+│   │   └── garage/
+│   └── state/
+│       └── README.md
+├── docs/
+│   ├── ansibleconfig.md
+│   └── ansible-intall.md
+└── README.md
 ```
+
+The duplicate Markdown files previously under `Ansible/` were removed. The canonical copies remain in `docs/`.
 
 ## 4. Ansible configuration
 
-`lab-infra/ansible.cfg` configures:
+`Ansible/ansible.cfg` configures:
 
-- `inventory/hosts.yml` as the default inventory
-- `roles/` as the role search path
+- `Ansible/inventory/hosts.yml` as the default inventory
+- `Ansible/roles/` as the role search path
 - `collections/` as the collection path
 - Automatic Python interpreter discovery
 - SSH host-key checking enabled
@@ -126,7 +118,7 @@ all:
           ansible_python_interpreter: /usr/bin/python3
 ```
 
-The current Tailscale peers are listed in `inventory/tailscale-peers.example.yml`, but that file is intentionally not loaded by default. Remote operating-system usernames and SSH permissions have not been verified.
+The current Tailscale peers are listed in `Ansible/inventory/tailscale-peers.example.yml`, but that file is intentionally not loaded by default. Remote operating-system usernames and SSH permissions have not been verified.
 
 ## 5. Current machine captured
 
@@ -152,9 +144,9 @@ The observed Tailscale nodes were:
 
 ## 6. Playbooks and role
 
-### `playbooks/site.yml`
+### `Ansible/playbooks/site.yml`
 
-Runs the `common` role against the `lab_local` group. It is currently audit-only and does not modify the host.
+Runs the `common` role and the initial `garage` role against the `lab_local` group. The common role is audit-only; the Garage role is state-changing and requires sudo.
 
 ### `playbooks/audit.yml`
 
@@ -169,7 +161,7 @@ Captures the current state by collecting:
 Run it with:
 
 ```bash
-cd /home/df-server/lab-infra
+cd /home/df-server/lab-infra/Ansible
 export PATH="$HOME/.local/bin:$PATH"
 ansible-playbook playbooks/audit.yml
 ```
@@ -186,7 +178,7 @@ Package installation, service management, firewall changes, user management, and
 
 ## 7. Captured state files
 
-The audit generated these files under `lab-infra/state/`:
+The audit generated these files under `Ansible/state/`:
 
 - `server-debian-facts.json` — full Ansible facts
 - `server-debian-packages.json` — installed package facts
@@ -224,7 +216,7 @@ The check-mode playbook completed with `changed=0`.
 ## 9. Normal commands
 
 ```bash
-cd /home/df-server/lab-infra   # use /lab-infra after moving it
+cd /home/df-server/lab-infra/Ansible   # use /lab-infra/Ansible after moving it
 export PATH="$HOME/.local/bin:$PATH"
 
 # Show the inventory

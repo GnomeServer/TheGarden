@@ -4,7 +4,7 @@
 
 This is the deliberately small first version of the lab.
 
-Current lab description from the repository:
+Current lab description:
 
 - One Debian server laptop
 - Five Ubuntu worker laptops
@@ -15,9 +15,29 @@ Current lab description from the repository:
 
 The goal is to build a useful multi-node AI and software-agent lab without introducing Kubernetes, high-availability storage, or a large number of complex services too early.
 
-## Current Ansible controller
+## Repository layout
 
-The current controller is:
+```text
+TheGarden/
+├── Ansible/
+│   ├── ansible.cfg
+│   ├── requirements.yml
+│   ├── inventory/
+│   ├── playbooks/
+│   ├── roles/
+│   └── state/
+├── docs/
+│   ├── ansible-intall.md
+│   └── ansibleconfig.md
+├── README.md
+├── server-debian-ufw-hardening.md
+├── small-lab-open-source-architecture.md
+└── tailscale-setup.md
+```
+
+The Ansible project and its supporting directories are now grouped under `Ansible/`. The canonical Ansible Markdown files are kept in `docs/`; duplicate copies that were previously under `Ansible/` were removed.
+
+## Current Ansible controller
 
 | Item | Observed value |
 | --- | --- |
@@ -29,52 +49,25 @@ The current controller is:
 | Hardware | Dell Pro Max 14 MC14250 |
 | Ansible | `ansible-core 2.21.4` |
 
-The Ansible project is currently staged at `/home/df-server/lab-infra`. The requested `/lab-infra` path requires root access. After review, it can be moved with:
+The repository is currently at `/home/df-server/lab-infra`. The requested `/lab-infra` path requires root access. To move the repository after reviewing it:
 
 ```bash
 sudo mv "$HOME/lab-infra" /lab-infra
 sudo chown -R df-server:df-server /lab-infra
 ```
 
-All project paths are relative, so either location works.
+After moving it, the Ansible project root is `/lab-infra/Ansible`.
 
-## Project layout
+## Using Ansible
 
-```text
-lab-infra/
-├── .gitignore
-├── README.md
-├── ansible.cfg
-├── requirements.yml
-├── docs/
-│   ├── ansible-intall.md
-│   └── ansibleconfig.md
-├── inventory/
-│   ├── README.md
-│   ├── hosts.yml
-│   ├── tailscale-peers.example.yml
-│   ├── group_vars/all.yml
-│   └── host_vars/server-debian.yml
-├── playbooks/
-│   ├── audit.yml
-│   └── site.yml
-├── roles/
-│   ├── common/
-│   └── garage/
-├── state/
-│   └── README.md
-└── site.yml
-```
-
-The root `site.yml` is currently empty. Use `playbooks/site.yml` for the active site playbook.
-
-## Quick start
+Run Ansible from its project directory so `Ansible/ansible.cfg` is discovered automatically:
 
 ```bash
-cd /home/df-server/lab-infra   # use /lab-infra after moving it
+cd /home/df-server/lab-infra/Ansible   # use /lab-infra/Ansible after moving it
 export PATH="$HOME/.local/bin:$PATH"
 
 ansible --version
+ansible-config dump --only-changed
 ansible-inventory --graph
 ansible lab_local -m ansible.builtin.ping
 ```
@@ -85,23 +78,23 @@ Capture a read-only snapshot of the current host:
 ansible-playbook playbooks/audit.yml
 ```
 
-The audit records Ansible facts, installed packages, systemd services, and Tailscale status under `state/`. Generated state files contain machine-specific information and are ignored by Git by default.
+The audit records Ansible facts, installed packages, systemd services, and Tailscale status under `Ansible/state/`. Generated state files contain machine-specific information and are ignored by Git by default.
 
 ## Playbooks and roles
 
-### `playbooks/audit.yml`
+### `Ansible/playbooks/audit.yml`
 
-The audit playbook gathers the current host state and writes the following files:
+The audit playbook gathers the current host state and writes:
 
-- `state/server-debian-facts.json`
-- `state/server-debian-packages.json`
-- `state/server-debian-services.json`
-- `state/tailscale-status.txt`
-- `state/audit-meta.yml`
+- `Ansible/state/server-debian-facts.json`
+- `Ansible/state/server-debian-packages.json`
+- `Ansible/state/server-debian-services.json`
+- `Ansible/state/tailscale-status.txt`
+- `Ansible/state/audit-meta.yml`
 
 These files are snapshots, not the desired configuration.
 
-### `playbooks/site.yml`
+### `Ansible/playbooks/site.yml`
 
 This playbook currently includes:
 
@@ -110,30 +103,20 @@ This playbook currently includes:
 
 The Garage role requires sudo and should not be run until its secret handling, checksum, service user, firewall exposure, and initial Garage layout have been reviewed.
 
-Use syntax and check-mode validation before applying changes:
+Validate before applying changes:
 
 ```bash
 ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/site.yml --check --diff
 ```
 
-The Garage role currently requires an interactive sudo password when run against this host:
+### `Ansible/roles/common`
 
-```bash
-ansible-playbook -K playbooks/site.yml
-```
+The common role confirms the Debian platform and reports host information without changing packages, services, users, firewall rules, or networking.
 
-### `roles/common`
+### `Ansible/roles/garage`
 
-The common role currently:
-
-- Confirms the host belongs to the Debian family
-- Reports the host, OS, kernel, and Python information
-- Performs no package, service, user, firewall, or network changes
-
-### `roles/garage`
-
-The Garage role is an initial deployment draft for a single-node Garage service. Before production use, add or verify:
+The Garage role is an initial single-node deployment draft. Before production use, add or verify:
 
 - Ansible Vault or another secure source for `garage_rpc_secret`
 - An official binary checksum
@@ -145,7 +128,7 @@ The Garage role is an initial deployment draft for a single-node Garage service.
 
 ## Inventory and Tailscale
 
-`inventory/hosts.yml` intentionally contains only this machine as an active Ansible target. Remote Tailscale peers are available as a non-loaded template in `inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling them.
+`Ansible/inventory/hosts.yml` intentionally contains only this machine as an active Ansible target. Remote Tailscale peers are available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling them.
 
 Observed Tailscale nodes:
 
@@ -157,33 +140,34 @@ Observed Tailscale nodes:
 
 ## Git workflow
 
-The local Git repository tracks the Ansible configuration and documentation. The remote is:
+The Git repository tracks the Ansible configuration and documentation. The remote is:
 
 ```text
 git@github.com:GnomeServer/TheGarden.git
 ```
 
-Check the working tree:
+Check the working tree from the repository root:
 
 ```bash
+cd /home/df-server/lab-infra
 git status
 git log --oneline --decorate -5
 ```
 
-Commit configuration changes explicitly:
+Commit Ansible changes explicitly:
 
 ```bash
-git add ansible.cfg inventory playbooks roles docs README.md requirements.yml .gitignore
+git add Ansible docs README.md .gitignore
 git commit -m "Describe the change"
 git push
 ```
 
-Generated state snapshots are ignored because they contain hostnames, addresses, package inventories, and service details. Review sensitive infrastructure information before publishing any files.
+Generated `Ansible/state/` snapshots are ignored because they contain hostnames, addresses, package inventories, and service details. Review sensitive infrastructure information before publishing any files.
 
-## What is not managed yet
+## Not managed yet
 
 - SSH keys, credentials, or vault passwords
-- Remote-host configuration for the worker laptops
+- Remote-host configuration for worker laptops
 - Firewall rules
 - Tailscale ACLs, routes, or DNS settings
 - A complete package or service desired-state policy
