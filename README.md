@@ -99,9 +99,8 @@ These files are snapshots, not the desired configuration.
 This playbook currently includes:
 
 - `common` — verifies and reports the Debian host; it is audit-only
-- `garage` — state-changing role that downloads Garage, installs a systemd service, creates directories, and starts the service
 
-The Garage role requires sudo and should not be run until its secret handling, checksum, service user, firewall exposure, and initial Garage layout have been reviewed.
+No state-changing service roles are enabled yet.
 
 Validate before applying changes:
 
@@ -113,18 +112,6 @@ ansible-playbook playbooks/site.yml --check --diff
 ### `Ansible/roles/common`
 
 The common role confirms the Debian platform and reports host information without changing packages, services, users, firewall rules, or networking.
-
-### `Ansible/roles/garage`
-
-The Garage role is an initial single-node deployment draft. Before production use, add or verify:
-
-- Ansible Vault or another secure source for `garage_rpc_secret`
-- An official binary checksum
-- A dedicated `garage` system user and group
-- Appropriate service hardening
-- Firewall and bind-address restrictions
-- Garage layout initialization
-- Access keys, buckets, and permissions
 
 ## Inventory and Tailscale
 
@@ -171,5 +158,4 @@ Generated `Ansible/state/` snapshots are ignored because they contain hostnames,
 - Firewall rules
 - Tailscale ACLs, routes, or DNS settings
 - A complete package or service desired-state policy
-- Garage layout, buckets, and access keys
 - Kubernetes or high-availability storage

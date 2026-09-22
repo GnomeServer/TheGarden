@@ -6,7 +6,3 @@ host_lan_address: 10.1.10.156
 host_tailscale_address: 100.102.154.23
 host_tailscale_name: server-debian
 observed_at: '2026-09-21'
-
-garage_node_zone: lab-server
-garage_node_capacity: 350G
-garage_node_tag: server-debian
