@@ -1,0 +1,11 @@
+From a machine on the LAN, open:                                                                                                                                                     
+                                                                                                                                                                                      
+ ```text                                                                                                                                                                              
+   https://10.1.10.156:8006                                                                                                                                                           
+ ```                                                                                                                                                                                  
+                                                                                                                                                                                      
+ Or, over Tailscale:                                                                                                                                                                  
+                                                                                                                                                                                      
+ ```text                                                                                                                                                                              
+   https://100.102.154.23:8006                                                                                                                                                        
+ ```                                 
