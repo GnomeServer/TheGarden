@@ -1,7 +1,7 @@
 ---
 galaxy_info:
   author: df-server
-  description: Audit-first baseline for the lab infrastructure and Proxmox VE host
+  description: Read-only validation for the lab Proxmox VE host
   license: MIT
   min_ansible_version: '2.19'
   platforms:

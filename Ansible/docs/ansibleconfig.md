@@ -72,14 +72,17 @@ lab-infra/
 │   ├── inventory/
 │   │   ├── README.md
 │   │   ├── hosts.yml
+│   │   ├── proxmox-guests.example.yml
 │   │   ├── tailscale-peers.example.yml
 │   │   ├── group_vars/all.yml
 │   │   └── host_vars/server-debian.yml
 │   ├── playbooks/
 │   │   ├── audit.yml
+│   │   ├── proxmox-audit.yml
 │   │   └── site.yml
 │   ├── roles/
-│   │   └── common/
+│   │   ├── common/
+│   │   └── proxmox/
 │   └── state/
 │       └── README.md
 ├── docs/
@@ -105,7 +108,7 @@ The duplicate Markdown files previously under `Ansible/` were removed. The canon
 - Retry files disabled
 - Deprecation warnings enabled
 
-The active inventory contains the current machine only:
+The active inventory contains the current machine only. It belongs to both the general local group and the Proxmox-specific group:
 
 ```yaml
 all:
@@ -115,23 +118,48 @@ all:
         server-debian:
           ansible_connection: local
           ansible_python_interpreter: /usr/bin/python3
+    proxmox_hosts:
+      children:
+        lab_local:
 ```
 
 The current Tailscale peers are listed in `Ansible/inventory/tailscale-peers.example.yml`, but that file is intentionally not loaded by default. Remote operating-system usernames and SSH permissions have not been verified.
+
+A Debian guest VM was created on the Proxmox node as **VMID 100**. Its hostname is `infra-lab-services`, and its `ens18` address is `10.1.0.2/24`. Its connection template is `Ansible/inventory/proxmox-guests.example.yml`. It remains inactive because SSH has not been installed in the guest yet. The Proxmox host inventory records the VM under `proxmox_guest_vms`.
 
 ## 5. Current machine captured
 
 | Item | Observed value |
 | --- | --- |
 | Hostname | `server-debian` |
-| OS | Debian GNU/Linux 13.7 (`trixie`) |
-| Kernel | `6.12.107+deb13-amd64` |
+| OS | Proxmox VE 9.2 on Debian GNU/Linux 13.7 (`trixie`) |
+| Kernel | `7.0.14-19-pve` |
 | Architecture | `x86_64` |
 | Hardware | Dell Pro Max 14 MC14250 |
 | LAN address | `10.1.10.156` |
 | Tailscale address | `100.102.154.23` |
-| Installed Debian packages | 1,594 |
-| Discovered systemd services | 265 |
+| Installed Debian/Proxmox packages | observed by the latest audit |
+| Proxmox bridge | `vmbr0` (`10.1.10.156/24`) |
+| Discovered systemd services | observed by the latest audit |
+
+From the guest console, install SSH and Python:
+
+```bash
+sudo apt update
+sudo apt install -y openssh-server python3
+sudo systemctl enable --now ssh
+```
+
+After setting the Debian login account in the example inventory, test it with:
+
+```bash
+ansible infra-lab-services \\
+  -i inventory/hosts.yml \\
+  -i inventory/proxmox-guests.example.yml \\
+  -m ansible.builtin.ping
+```
+
+The Proxmox host is on `10.1.10.0/24`, while the guest is on `10.1.0.0/24`. Confirm that the separate subnet and its gateway are intentional and routable.
 
 The observed Tailscale nodes were:
 
@@ -145,7 +173,16 @@ The observed Tailscale nodes were:
 
 ### `Ansible/playbooks/site.yml`
 
-Runs the audit-only `common` role against the `lab_local` group.
+Runs the audit-only `common` role against `lab_local` and the read-only `proxmox` validation role against `proxmox_hosts`.
+
+### `Ansible/playbooks/proxmox-audit.yml`
+
+Validates the completed Proxmox VE installation without making changes. It checks the Proxmox version, running kernel, `vmbr0` management address, default route interface, and core PVE services:
+
+```bash
+cd /home/df-server/lab-infra/Ansible
+ansible-playbook playbooks/proxmox-audit.yml
+```
 
 ### `playbooks/audit.yml`
 
@@ -155,6 +192,7 @@ Captures the current state by collecting:
 - Installed package facts
 - systemd service facts
 - Tailscale peer status
+- Proxmox `pveversion --verbose` output
 - Audit timestamp and host metadata
 
 Run it with:
@@ -169,11 +207,15 @@ ansible-playbook playbooks/audit.yml
 
 The common role currently:
 
-- Confirms the machine belongs to the Debian family
+- Confirms the machine belongs to the Debian family used by Proxmox VE
 - Reports host, OS, kernel, and Python information
 - Explicitly confirms that no mutation tasks are enabled
 
-Package installation, service management, firewall changes, user management, and network changes were intentionally not added because a desired state has not yet been specified.
+### `roles/proxmox`
+
+The Proxmox role is a read-only post-installation validator. It confirms that Proxmox VE 9 is installed, a PVE kernel is running, `vmbr0` owns `10.1.10.156/24`, and the PVE management services are running.
+
+The in-place installation itself was performed by `/home/df-server/install-pve-inplace.sh` in two stages. Ansible does not repeat that conversion because it changes the active network configuration and requires controlled reboots. The procedure is documented in `proxmox-installation.md`.
 
 ## 7. Captured state files
 
@@ -183,6 +225,7 @@ The audit generated these files under `Ansible/state/`:
 - `server-debian-packages.json` — installed package facts
 - `server-debian-services.json` — systemd service facts
 - `tailscale-status.txt` — Tailscale status at audit time
+- `proxmox-version.txt` — Proxmox `pveversion --verbose` output
 - `audit-meta.yml` — audit timestamp and summary
 
 These files contain machine-specific information such as addresses, hostnames, package names, and service names. The supplied `.gitignore` excludes the generated state files by default.
@@ -197,7 +240,9 @@ ansible-inventory --graph
 ansible-inventory --list
 ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/audit.yml --syntax-check
+ansible-playbook playbooks/proxmox-audit.yml --syntax-check
 ansible-playbook playbooks/site.yml --check --diff
+ansible-playbook playbooks/proxmox-audit.yml
 ansible lab_local -m ansible.builtin.ping
 ```
 
@@ -224,8 +269,11 @@ ansible-inventory --graph
 # Test local connectivity
 ansible lab_local -m ansible.builtin.ping
 
-# Run the read-only baseline role
+# Run the read-only baseline and Proxmox validation roles
 ansible-playbook playbooks/site.yml
+
+# Validate only Proxmox
+ansible-playbook playbooks/proxmox-audit.yml
 
 # Refresh the current-state snapshot
 ansible-playbook playbooks/audit.yml

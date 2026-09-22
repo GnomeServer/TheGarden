@@ -23,6 +23,16 @@
       failed_when: false
       check_mode: false
 
+    - name: Read Proxmox version when available
+      ansible.builtin.command:
+        argv:
+          - pveversion
+          - --verbose
+      register: proxmox_version
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
     - name: Save Ansible host facts
       delegate_to: localhost
       ansible.builtin.copy:
@@ -56,6 +66,18 @@
         dest: "{{ state_dir }}/tailscale-status.txt"
         mode: '0644'
 
+    - name: Save Proxmox version
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: |
+          rc: {{ proxmox_version.rc | default(1) }}
+          stdout: |
+          {{ proxmox_version.stdout | default('') | indent(2, true) }}
+          stderr: |
+          {{ proxmox_version.stderr | default('') | indent(2, true) }}
+        dest: "{{ state_dir }}/proxmox-version.txt"
+        mode: '0644'
+
     - name: Save audit metadata
       delegate_to: localhost
       ansible.builtin.copy:
@@ -66,6 +88,7 @@
           ansible_distribution: {{ ansible_facts["distribution"] | quote }}
           ansible_distribution_version: {{ ansible_facts["distribution_version"] | quote }}
           ansible_kernel: {{ ansible_facts["kernel"] | quote }}
+          proxmox_rc: {{ proxmox_version.rc | default(1) }}
           tailscale_rc: {{ tailscale_status.rc | default(1) }}
         dest: "{{ state_dir }}/audit-meta.yml"
         mode: '0644'

@@ -1,0 +1,12 @@
+---
+# This role validates an already-installed Proxmox host. It intentionally does
+# not alter packages, networking, repositories, or reboot the machine.
+proxmox_validate_installation: true
+proxmox_expected_major_version: '9'
+proxmox_bridge_name: vmbr0
+proxmox_management_address: 10.1.10.156
+proxmox_services:
+  - pve-cluster.service
+  - pvedaemon.service
+  - pveproxy.service
+  - pvestatd.service

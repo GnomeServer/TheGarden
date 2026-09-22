@@ -6,7 +6,7 @@ This is the deliberately small first version of the lab.
 
 Current lab description:
 
-- One Debian server laptop
+- One Proxmox VE 9 server laptop, converted in-place from Debian 13
 - Five Ubuntu worker laptops
 - Approximately 32 GB RAM and 512 GB SSD per laptop
 - Intel integrated Arc graphics on the laptops
@@ -27,8 +27,8 @@ TheGarden/
 │   ├── roles/
 │   └── state/
 ├── docs/
-│   ├── ansible-intall.md
-│   └── ansibleconfig.md
+│   └── lab-layers.md
+├── proxmox-installation.md
 ├── README.md
 ├── server-debian-ufw-hardening.md
 ├── small-lab-open-source-architecture.md
@@ -42,7 +42,7 @@ The Ansible project and its supporting directories are now grouped under `Ansibl
 | Item | Observed value |
 | --- | --- |
 | Host | `server-debian` |
-| OS | Debian GNU/Linux 13 (`trixie`) |
+| OS | Proxmox VE 9.2 on Debian GNU/Linux 13 (`trixie`) |
 | Architecture | `x86_64` |
 | LAN address | `10.1.10.156` |
 | Tailscale address | `100.102.154.23` |
@@ -78,7 +78,9 @@ Capture a read-only snapshot of the current host:
 ansible-playbook playbooks/audit.yml
 ```
 
-The audit records Ansible facts, installed packages, systemd services, and Tailscale status under `Ansible/state/`. Generated state files contain machine-specific information and are ignored by Git by default.
+The audit records Ansible facts, installed packages, systemd services, Proxmox version output, and Tailscale status under `Ansible/state/`. Generated state files contain machine-specific information and are ignored by Git by default.
+
+A Debian VM now exists on the Proxmox node as VMID `100`, hostname `infra-lab-services`, with address `10.1.0.2/24` on `ens18`. Its Ansible connection template is `Ansible/inventory/proxmox-guests.example.yml`; it should be activated after installing SSH and confirming the separate guest subnet is routable.
 
 ## Playbooks and roles
 
@@ -90,6 +92,7 @@ The audit playbook gathers the current host state and writes:
 - `Ansible/state/server-debian-packages.json`
 - `Ansible/state/server-debian-services.json`
 - `Ansible/state/tailscale-status.txt`
+- `Ansible/state/proxmox-version.txt`
 - `Ansible/state/audit-meta.yml`
 
 These files are snapshots, not the desired configuration.
@@ -98,7 +101,8 @@ These files are snapshots, not the desired configuration.
 
 This playbook currently includes:
 
-- `common` — verifies and reports the Debian host; it is audit-only
+- `common` — verifies and reports the Debian-family host; it is audit-only
+- `proxmox` — validates the installed Proxmox VE version, running kernel, bridge, and services; it is read-only
 
 No state-changing service roles are enabled yet.
 
@@ -111,7 +115,18 @@ ansible-playbook playbooks/site.yml --check --diff
 
 ### `Ansible/roles/common`
 
-The common role confirms the Debian platform and reports host information without changing packages, services, users, firewall rules, or networking.
+The common role confirms the Debian-family platform and reports host information without changing packages, services, users, firewall rules, or networking.
+
+### `Ansible/roles/proxmox`
+
+The Proxmox role validates the completed in-place installation. Run it directly with:
+
+```bash
+cd /home/df-server/lab-infra/Ansible
+ansible-playbook playbooks/proxmox-audit.yml
+```
+
+The role does not install Proxmox or modify networking. The staged installation procedure remains documented in [`proxmox-installation.md`](proxmox-installation.md).
 
 ## Inventory and Tailscale
 

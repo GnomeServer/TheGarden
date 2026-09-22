@@ -3,7 +3,7 @@
   ansible.builtin.assert:
     that:
       - ansible_facts.os_family == 'Debian'
-    fail_msg: "This baseline currently expects a Debian-family host."
+    fail_msg: "This baseline currently expects a Debian-family or Proxmox VE host."
 
 - name: Report the discovered current host
   ansible.builtin.debug:
@@ -12,9 +12,10 @@
       - "OS: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
       - "Kernel: {{ ansible_facts.kernel }}"
       - "Ansible Python: {{ ansible_facts.python.version.major }}.{{ ansible_facts.python.version.minor }}.{{ ansible_facts.python.version.micro }}"
+      - "Proxmox host: {{ inventory_hostname in groups.get('proxmox_hosts', []) }}"
       - "Audit-only mode: {{ not (common_apply_changes | bool) }}"
 
-- name: Explain that no mutation tasks are enabled
+- name: Explain that no common mutation tasks are enabled
   ansible.builtin.debug:
-    msg: "No changes were requested: define the desired lab baseline before adding mutating tasks to the common role."
+    msg: "No common changes were requested: define the desired lab baseline before adding mutating tasks to the common role."
   when: not (common_apply_changes | bool)

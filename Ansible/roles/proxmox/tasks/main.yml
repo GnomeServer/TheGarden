@@ -1,0 +1,57 @@
+---
+- name: Read the installed Proxmox version
+  ansible.builtin.command:
+    argv:
+      - pveversion
+      - --verbose
+  register: proxmox_version_command
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Confirm that Proxmox VE is installed
+  ansible.builtin.assert:
+    that:
+      - proxmox_version_command.rc == 0
+      - "proxmox_version_command.stdout is search('proxmox-ve: ' ~ (proxmox_expected_major_version | string) ~ '\\.')"
+    fail_msg: >-
+      Proxmox VE {{ proxmox_expected_major_version }} was not detected. The
+      command returned rc={{ proxmox_version_command.rc }}:
+      {{ proxmox_version_command.stderr | default('') | trim }}
+
+- name: Confirm that the Proxmox kernel is running
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.kernel is search('pve')
+    fail_msg: "The running kernel is {{ ansible_facts.kernel }}, not a Proxmox kernel."
+
+- name: Confirm that the Proxmox bridge exists
+  ansible.builtin.assert:
+    that:
+      - proxmox_bridge_name in ansible_facts.interfaces
+      - ansible_facts[proxmox_bridge_name].ipv4.address == proxmox_management_address
+      - ansible_facts.default_ipv4.interface == proxmox_bridge_name
+    fail_msg: >-
+      {{ proxmox_bridge_name }} is not the expected management interface with
+      address {{ proxmox_management_address }}.
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+- name: Confirm Proxmox services are running
+  ansible.builtin.assert:
+    that:
+      - item in ansible_facts.services
+      - ansible_facts.services[item].state == 'running'
+    fail_msg: "{{ item }} is missing or not running."
+  loop: "{{ proxmox_services }}"
+
+- name: Report the validated Proxmox installation
+  ansible.builtin.debug:
+    msg:
+      - "Proxmox: {{ proxmox_version_command.stdout_lines | first }}"
+      - "Kernel: {{ ansible_facts.kernel }}"
+      - "Bridge: {{ proxmox_bridge_name }} ({{ proxmox_management_address }})"
+      - "Web interface: {{ proxmox_web_url | default('not configured') }}"
+      - "Validation is read-only; no installation or network changes were made."
+  when: proxmox_validate_installation | bool

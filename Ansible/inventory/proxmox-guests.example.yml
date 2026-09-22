@@ -1,0 +1,17 @@
+---
+# This file is intentionally not loaded by ansible.cfg until SSH is ready.
+# VMID 100 is the Debian guest created on server-debian.
+all:
+  children:
+    proxmox_guests:
+      hosts:
+        infra-lab-services:
+          ansible_host: 10.1.0.2
+          # Set this to the Debian account used for SSH after installing it.
+          # ansible_user: <guest-os-user>
+          ansible_python_interpreter: /usr/bin/python3
+          proxmox_node: server-debian
+          proxmox_vmid: 100
+          guest_interface: ens18
+          guest_address: 10.1.0.2/24
+          guest_ssh_ready: false

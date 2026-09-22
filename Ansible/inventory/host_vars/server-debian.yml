@@ -1,8 +1,40 @@
 ---
-host_description: Debian 13 lab controller and workstation
-host_os: Debian GNU/Linux 13 (trixie)
+host_description: Proxmox VE 9 lab hypervisor on Debian 13
+host_os: Proxmox VE 9 on Debian GNU/Linux 13 (trixie)
+host_base_os: Debian GNU/Linux 13 (trixie)
 host_architecture: x86_64
 host_lan_address: 10.1.10.156
 host_tailscale_address: 100.102.154.23
 host_tailscale_name: server-debian
-observed_at: '2026-09-21'
+host_fqdn: server-debian.home.arpa
+
+# Proxmox installation and management settings.
+proxmox_expected_major_version: '9'
+proxmox_bridge_name: vmbr0
+proxmox_physical_interface: enp0s31f6
+proxmox_management_address: 10.1.10.156
+proxmox_management_prefix: 24
+proxmox_gateway: 10.1.10.1
+proxmox_web_url: https://10.1.10.156:8006
+proxmox_installation_method: in-place staged installation from Debian 13
+proxmox_installation_script: /home/df-server/install-pve-inplace.sh
+proxmox_services:
+  - pve-cluster.service
+  - pvedaemon.service
+  - pveproxy.service
+  - pvestatd.service
+
+# VMID 100 is the Debian guest created on this Proxmox node. The guest is
+# documented but not an active Ansible target until its IP, SSH user, and key
+# are configured in inventory/proxmox-guests.example.yml.
+proxmox_guest_vms:
+  - vmid: 100
+    name: infra-lab-services
+    guest_os: Debian
+    guest_interface: ens18
+    guest_address: 10.1.0.2/24
+    inventory_group: proxmox_guests
+    ssh_installed: false
+    ansible_enabled: false
+
+observed_at: '2026-09-22'

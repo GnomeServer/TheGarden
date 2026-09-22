@@ -1,14 +1,4 @@
 ---
-- name: Evaluate the lab-infra baseline
-  hosts: lab_local
-  gather_facts: true
-  become: false
-  roles:
-    - role: common
-      tags:
-        - common
-        - baseline
-
 - name: Validate the Proxmox VE installation
   hosts: proxmox_hosts
   gather_facts: true

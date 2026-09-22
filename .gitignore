@@ -9,6 +9,7 @@ collections/
 **/state/*-packages.json
 **/state/*-services.json
 **/state/tailscale-status.txt
+**/state/proxmox-version.txt
 **/state/*.log
 
 # Local secrets
