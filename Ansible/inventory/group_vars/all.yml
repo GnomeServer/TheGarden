@@ -1,7 +1,7 @@
 ---
 infra_name: lab-infra
 environment_name: lab
-managed_host_scope: local
+managed_host_scope: garage_cluster
 
 # The current role is audit-only. Set a deliberate desired state before
 # introducing tasks that change the machine.

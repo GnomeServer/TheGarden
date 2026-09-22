@@ -74,9 +74,12 @@ lab-infra/
 │   │   ├── hosts.yml
 │   │   ├── tailscale-peers.example.yml
 │   │   ├── group_vars/all.yml
-│   │   └── host_vars/server-debian.yml
+│   │   ├── group_vars/garage_cluster.yml
+│   │   ├── host_vars/server-debian.yml
+│   │   └── host_vars/donatello.yml
 │   ├── playbooks/
 │   │   ├── audit.yml
+│   │   ├── garage.yml
 │   │   └── site.yml
 │   ├── roles/
 │   │   ├── common/
@@ -106,19 +109,27 @@ The duplicate Markdown files previously under `Ansible/` were removed. The canon
 - Retry files disabled
 - Deprecation warnings enabled
 
-The active inventory contains the current machine only:
+The active inventory contains the two-node Garage cluster. `lab_local` is
+retained as an alias for the site playbook:
 
 ```yaml
 all:
   children:
-    lab_local:
+    garage_cluster:
       hosts:
         server-debian:
           ansible_connection: local
-          ansible_python_interpreter: /usr/bin/python3
+        donatello:
+          ansible_host: 100.94.145.104
+          ansible_user: bgurrol4
+    lab_local:
+      children:
+        garage_cluster:
 ```
 
-The current Tailscale peers are listed in `Ansible/inventory/tailscale-peers.example.yml`, but that file is intentionally not loaded by default. Remote operating-system usernames and SSH permissions have not been verified.
+Both nodes have been verified for Ansible connectivity. Garage uses their
+Tailscale addresses for cluster RPC and S3 traffic; the cluster's admin API is
+local-only.
 
 ## 5. Current machine captured
 
@@ -146,7 +157,11 @@ The observed Tailscale nodes were:
 
 ### `Ansible/playbooks/site.yml`
 
-Runs the `common` role and the initial `garage` role against the `lab_local` group. The common role is audit-only; the Garage role is state-changing and requires sudo.
+Runs the `common` role and the Garage role against the `lab_local` alias.
+`playbooks/garage.yml` targets only `garage_cluster` and is the preferred
+Garage deployment command. The common role is audit-only; the Garage role is
+state-changing and requires sudo. Garage layout reconciliation must run against
+the complete cluster and must not be combined with `--limit`.
 
 ### `playbooks/audit.yml`
 
@@ -196,22 +211,17 @@ The project passed the following checks:
 ansible-config dump --only-changed
 ansible-inventory --graph
 ansible-inventory --list
+ansible-playbook playbooks/garage.yml --syntax-check
 ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/audit.yml --syntax-check
-ansible-playbook playbooks/site.yml --check --diff
-ansible lab_local -m ansible.builtin.ping
+ansible-playbook playbooks/garage.yml --check --diff --ask-become-pass
+ansible garage_cluster -m ansible.builtin.ping
 ```
 
-The local ping test returned:
-
-```text
-server-debian | SUCCESS => {
-    "changed": false,
-    "ping": "pong"
-}
-```
-
-The check-mode playbook completed with `changed=0`.
+The cluster ping test returned `SUCCESS` for both `server-debian` and
+`donatello`. Check mode renders the proposed configuration and skips service
+and layout mutations; the normal Garage deployment still requires a deliberate
+become password.
 
 ## 9. Normal commands
 
@@ -225,8 +235,11 @@ ansible-inventory --graph
 # Test local connectivity
 ansible lab_local -m ansible.builtin.ping
 
-# Run the read-only baseline role
-ansible-playbook playbooks/site.yml
+# Deploy and reconcile Garage (runs state-changing tasks)
+ansible-playbook playbooks/garage.yml --ask-become-pass
+
+# Run the site playbook, including the audit-only common role
+ansible-playbook playbooks/site.yml --ask-become-pass
 
 # Refresh the current-state snapshot
 ansible-playbook playbooks/audit.yml

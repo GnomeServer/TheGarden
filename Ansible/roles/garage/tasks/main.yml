@@ -1,62 +1,262 @@
 ---
-- name: Download Garage binary
+- name: Validate the Garage cluster definition
+  ansible.builtin.assert:
+    that:
+      - garage_cluster_group in groups
+      - groups[garage_cluster_group] | length >= 1
+      - garage_replication_factor | int >= 1
+      - garage_replication_factor | int <= groups[garage_cluster_group] | length
+      - ansible_facts.architecture in garage_architecture_platforms
+      - garage_binary_checksum | length > 0
+      - host_tailscale_address is defined
+      - host_tailscale_address | length > 0
+      - host_tailscale_address not in ['TBD', 'tbd']
+      - garage_node_zone | length > 0
+      - garage_node_capacity | length > 0
+      - garage_node_tag | length > 0
+    fail_msg: >-
+      Every Garage node needs a supported architecture, Tailscale address,
+      zone, tag, and reviewed storage capacity. The replication factor must
+      not exceed the number of nodes in {{ garage_cluster_group }}.
+  loop: "{{ groups[garage_cluster_group] }}"
+  loop_control:
+    loop_var: garage_validation_host
+  when: inventory_hostname == garage_validation_host
+
+- name: Collect cluster topology values for validation
+  ansible.builtin.set_fact:
+    garage_cluster_zones: >-
+      {{ groups[garage_cluster_group]
+         | map('extract', hostvars, ['garage_node_zone'])
+         | list | unique }}
+    garage_cluster_architectures: >-
+      {{ groups[garage_cluster_group]
+         | map('extract', hostvars, ['ansible_facts', 'architecture'])
+         | list | unique }}
+  run_once: true
+
+- name: Validate cluster zones and the shared binary architecture
+  ansible.builtin.assert:
+    that:
+      - garage_cluster_zones | length >= garage_replication_factor | int
+      - garage_cluster_architectures | length == 1
+    fail_msg: >-
+      The requested replication factor requires at least as many distinct
+      zones, and all nodes in this deployment must use the same architecture
+      because the binary is downloaded once on the control node.
+  run_once: true
+
+- name: Require a complete inventory for layout management
+  ansible.builtin.assert:
+    that:
+      - (groups[garage_cluster_group] | difference(ansible_play_hosts)) | length == 0
+    fail_msg: >-
+      Garage layout management must run against every host in
+      {{ garage_cluster_group }}. Do not use --limit with this play.
+  run_once: true
+  when: garage_manage_layout | bool and garage_layout_require_all_hosts | bool
+
+- name: Ensure the local Garage binary cache exists
+  ansible.builtin.file:
+    path: "{{ garage_local_cache_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+
+- name: Ensure the local Garage secrets directory exists
+  ansible.builtin.file:
+    path: "{{ garage_secrets_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+
+- name: Download and verify the Garage binary on the control node
   ansible.builtin.get_url:
     url: "{{ garage_binary_url }}"
-    dest: "{{ garage_binary_path }}"
+    dest: "{{ garage_local_cache_path }}"
+    checksum: "{{ garage_binary_checksum }}"
     mode: "0755"
-    owner: root
-    group: root
-  become: true
-  notify: Restart Garage
+    timeout: 3600
+  delegate_to: localhost
+  become: false
+  run_once: true
 
-- name: Create Garage metadata directory
+- name: Check the cached binary checksum
+  ansible.builtin.stat:
+    path: "{{ garage_local_cache_path }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: garage_cache_checksum
+
+- name: Sanity-check the cached Garage binary
+  ansible.builtin.command:
+    cmd: "{{ garage_local_cache_path }} --version"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  register: garage_cache_version_check
+  when: not ansible_check_mode
+
+- name: Fail if the cached binary is not the requested release
+  ansible.builtin.assert:
+    that:
+      - garage_cache_version_check.rc == 0
+      - garage_version in garage_cache_version_check.stdout
+    fail_msg: >-
+      {{ garage_local_cache_path }} is not a runnable {{ garage_version }}
+      binary. Remove it and re-run the play to download it again.
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: not ansible_check_mode
+
+- name: Create the unprivileged Garage service group
+  ansible.builtin.group:
+    name: "{{ garage_service_group }}"
+    system: true
+  become: true
+  when: not ansible_check_mode
+
+- name: Create the unprivileged Garage service account
+  ansible.builtin.user:
+    name: "{{ garage_service_user }}"
+    group: "{{ garage_service_group }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+  become: true
+  when: not ansible_check_mode
+
+- name: Create the Garage state directory
+  ansible.builtin.file:
+    path: "{{ garage_data_dir | dirname }}"
+    state: directory
+    owner: "{{ garage_service_user }}"
+    group: "{{ garage_service_group }}"
+    mode: "0750"
+  become: true
+  when: not ansible_check_mode
+
+- name: Create the Garage metadata directory
   ansible.builtin.file:
     path: "{{ garage_meta_dir }}"
     state: directory
-    owner: root
-    group: root
-    mode: "0755"
+    owner: "{{ garage_service_user }}"
+    group: "{{ garage_service_group }}"
+    mode: "0750"
   become: true
+  when: not ansible_check_mode
 
-- name: Create Garage data directory
+- name: Set ownership of existing Garage metadata contents
+  ansible.builtin.file:
+    path: "{{ garage_meta_dir }}"
+    state: directory
+    owner: "{{ garage_service_user }}"
+    group: "{{ garage_service_group }}"
+    recurse: true
+  become: true
+  when: not ansible_check_mode
+
+- name: Create the Garage data directory
   ansible.builtin.file:
     path: "{{ garage_data_dir }}"
     state: directory
+    owner: "{{ garage_service_user }}"
+    group: "{{ garage_service_group }}"
+    mode: "0750"
+  become: true
+  when: not ansible_check_mode
+
+- name: Set ownership of existing Garage data contents
+  ansible.builtin.file:
+    path: "{{ garage_data_dir }}"
+    state: directory
+    owner: "{{ garage_service_user }}"
+    group: "{{ garage_service_group }}"
+    recurse: true
+  become: true
+  when: not ansible_check_mode
+
+- name: Create the Garage secret directory
+  ansible.builtin.file:
+    path: "{{ garage_rpc_secret_file | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ garage_service_group }}"
+    mode: "0750"
+  become: true
+  when: not ansible_check_mode
+
+- name: Install the shared Garage RPC secret
+  ansible.builtin.copy:
+    content: "{{ garage_rpc_secret }}\n"
+    dest: "{{ garage_rpc_secret_file }}"
+    owner: "{{ garage_service_user }}"
+    group: "{{ garage_service_group }}"
+    mode: "0600"
+  become: true
+  no_log: true
+  notify: Restart Garage
+  when: not ansible_check_mode
+
+- name: Install the Garage admin API token
+  ansible.builtin.copy:
+    content: "{{ garage_admin_token }}\n"
+    dest: "{{ garage_admin_token_file }}"
+    owner: "{{ garage_service_user }}"
+    group: "{{ garage_service_group }}"
+    mode: "0600"
+  become: true
+  no_log: true
+  notify: Restart Garage
+  when: not ansible_check_mode
+
+- name: Check the installed Garage binary
+  ansible.builtin.stat:
+    path: "{{ garage_binary_path }}"
+    checksum_algorithm: sha256
+  register: garage_installed_stat
+  become: true
+
+- name: Install the verified Garage binary
+  ansible.builtin.copy:
+    src: "{{ garage_local_cache_path }}"
+    dest: "{{ garage_binary_path }}"
     owner: root
     group: root
     mode: "0755"
   become: true
+  when:
+    - not ansible_check_mode
+    - not garage_installed_stat.stat.exists or garage_installed_stat.stat.checksum != garage_cache_checksum.stat.checksum
+  notify: Restart Garage
 
-- name: Install Garage configuration
+- name: Install the Garage configuration
   ansible.builtin.template:
     src: garage.toml.j2
     dest: "{{ garage_config_path }}"
     owner: root
-    group: root
-    mode: "0600"
+    group: "{{ garage_service_group }}"
+    mode: "0640"
   become: true
   notify: Restart Garage
 
-- name: Install Garage systemd service
-  ansible.builtin.copy:
+- name: Install the hardened Garage systemd service
+  ansible.builtin.template:
+    src: garage.service.j2
     dest: /etc/systemd/system/garage.service
     owner: root
     group: root
     mode: "0644"
-    content: |
-      [Unit]
-      Description=Garage S3 Object Storage
-      After=network-online.target
-      Wants=network-online.target
-
-      [Service]
-      Type=simple
-      ExecStart={{ garage_binary_path }} -c {{ garage_config_path }} server
-      Restart=on-failure
-      RestartSec=5
-
-      [Install]
-      WantedBy=multi-user.target
   become: true
   notify:
     - Reload systemd
@@ -69,3 +269,177 @@
     state: started
     daemon_reload: true
   become: true
+  when: not ansible_check_mode
+
+# Configuration changes are notified above. Flush them before using the CLI so
+# that node id, peer connection, and layout commands talk to the new daemon.
+- name: Apply pending Garage service changes before cluster administration
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the Garage RPC listener
+  ansible.builtin.wait_for:
+    host: "{{ host_tailscale_address }}"
+    port: "{{ garage_rpc_port }}"
+    timeout: 30
+  become: false
+  when: not ansible_check_mode
+
+- name: Wait for the Garage S3 listener
+  ansible.builtin.wait_for:
+    host: "{{ host_tailscale_address }}"
+    port: "{{ garage_s3_port }}"
+    timeout: 30
+  become: false
+  when: not ansible_check_mode
+
+- name: Read this node's full Garage identifier
+  ansible.builtin.command:
+    argv:
+      - "{{ garage_binary_path }}"
+      - -c
+      - "{{ garage_config_path }}"
+      - node
+      - id
+  register: garage_node_id_command
+  changed_when: false
+  become: true
+  when: garage_manage_layout | bool and not ansible_check_mode
+
+- name: Save this node's Garage identifier
+  ansible.builtin.set_fact:
+    garage_node_id: "{{ garage_node_id_command.stdout_lines[0] | trim }}"
+  when: garage_manage_layout | bool and not ansible_check_mode
+
+- name: Validate this node's Garage identifier
+  ansible.builtin.assert:
+    that:
+      - garage_node_id is match('^[0-9a-f]{64}@.+:[0-9]+$')
+    fail_msg: "Garage did not return a full node identifier on {{ inventory_hostname }}."
+  when: garage_manage_layout | bool and not ansible_check_mode
+
+- name: Connect the Garage nodes through the first cluster node
+  ansible.builtin.command:
+    argv:
+      - "{{ garage_binary_path }}"
+      - -c
+      - "{{ garage_config_path }}"
+      - node
+      - connect
+      - "{{ hostvars[item].garage_node_id }}"
+  loop: "{{ groups[garage_cluster_group][1:] }}"
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+  become: true
+  when:
+    - garage_manage_layout | bool
+    - not ansible_check_mode
+    - inventory_hostname == groups[garage_cluster_group][0]
+
+- name: Wait until the cluster nodes are visible to the coordinator
+  ansible.builtin.command:
+    argv:
+      - "{{ garage_binary_path }}"
+      - -c
+      - "{{ garage_config_path }}"
+      - status
+  register: garage_status_check
+  changed_when: false
+  retries: 12
+  delay: 5
+  until: garage_status_check.rc == 0
+  become: true
+  when:
+    - garage_manage_layout | bool
+    - not ansible_check_mode
+    - inventory_hostname == groups[garage_cluster_group][0]
+
+- name: Stage the desired Garage role for every cluster node
+  ansible.builtin.command:
+    argv:
+      - "{{ garage_binary_path }}"
+      - -c
+      - "{{ garage_config_path }}"
+      - layout
+      - assign
+      - "{{ hostvars[item].garage_node_id.split('@')[0] }}"
+      - --zone
+      - "{{ hostvars[item].garage_node_zone }}"
+      - --capacity
+      - "{{ hostvars[item].garage_node_capacity }}"
+      - --tag
+      - "{{ hostvars[item].garage_node_tag }}"
+  loop: "{{ groups[garage_cluster_group] }}"
+  loop_control:
+    label: "{{ item }}"
+  register: garage_layout_assignments
+  changed_when: false
+  become: true
+  when:
+    - garage_manage_layout | bool
+    - not ansible_check_mode
+    - inventory_hostname == groups[garage_cluster_group][0]
+
+- name: Inspect the staged Garage layout
+  ansible.builtin.command:
+    argv:
+      - "{{ garage_binary_path }}"
+      - -c
+      - "{{ garage_config_path }}"
+      - layout
+      - show
+  register: garage_layout_show
+  changed_when: false
+  become: true
+  when:
+    - garage_manage_layout | bool
+    - not ansible_check_mode
+    - inventory_hostname == groups[garage_cluster_group][0]
+
+- name: Record the Garage layout version and staged-change state
+  ansible.builtin.set_fact:
+    garage_layout_current_version: >-
+      {{ (garage_layout_show.stdout
+          | regex_findall('Current cluster layout version:\s+([0-9]+)')
+          | first | default('0')) | int }}
+    garage_layout_has_staged_changes: "{{ '==== STAGED ROLE CHANGES ====' in garage_layout_show.stdout }}"
+  when:
+    - garage_manage_layout | bool
+    - not ansible_check_mode
+    - inventory_hostname == groups[garage_cluster_group][0]
+
+- name: Apply the Garage layout exactly once at the next version
+  ansible.builtin.command:
+    argv:
+      - "{{ garage_binary_path }}"
+      - -c
+      - "{{ garage_config_path }}"
+      - layout
+      - apply
+      - --version
+      - "{{ (garage_layout_current_version | int) + 1 }}"
+  register: garage_layout_apply
+  become: true
+  when:
+    - garage_manage_layout | bool
+    - not ansible_check_mode
+    - inventory_hostname == groups[garage_cluster_group][0]
+    - garage_layout_has_staged_changes | bool
+
+- name: Verify that the Garage cluster is healthy
+  ansible.builtin.command:
+    argv:
+      - "{{ garage_binary_path }}"
+      - -c
+      - "{{ garage_config_path }}"
+      - health
+  register: garage_health_check
+  changed_when: false
+  retries: 12
+  delay: 5
+  until: garage_health_check.rc == 0
+  become: true
+  when:
+    - garage_manage_layout | bool
+    - not ansible_check_mode
+    - inventory_hostname == groups[garage_cluster_group][0]

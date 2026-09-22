@@ -1,0 +1,9 @@
+---
+- name: Deploy and reconcile the Garage S3 cluster
+  hosts: garage_cluster
+  gather_facts: true
+  become: true
+  roles:
+    - role: garage
+      tags:
+        - garage

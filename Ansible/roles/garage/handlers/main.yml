@@ -3,6 +3,7 @@
   ansible.builtin.systemd:
     daemon_reload: true
   become: true
+  when: not ansible_check_mode
 
 - name: Restart Garage
   ansible.builtin.systemd:
@@ -10,3 +11,4 @@
     state: restarted
     daemon_reload: true
   become: true
+  when: not ansible_check_mode

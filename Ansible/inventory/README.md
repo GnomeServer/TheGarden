@@ -1,13 +1,18 @@
 # Inventory
 
-`hosts.yml` contains the current machine as the only active target. It uses the local connection and the system Python interpreter, so the project can audit this host without making an SSH connection back into itself.
+`hosts.yml` defines the two-node `garage_cluster` and retains `lab_local` as a
+site-playbook alias. `server-debian` uses the local connection; `donatello` is
+reached over its Tailscale address as `bgurrol4`.
 
-Remote Tailscale peers are not active inventory entries yet. Their observed names and addresses are recorded by `playbooks/audit.yml` in `state/tailscale-status.txt`. Before adding a peer, verify:
+Before adding another Garage node, verify:
 
 1. Its current Tailscale address or MagicDNS name.
-2. Its operating-system username.
-3. SSH key and/or Tailscale SSH authorization.
-4. Its Python interpreter path.
-5. Which playbooks are safe to run against it.
+2. Its operating-system username and SSH authorization.
+3. Its Python interpreter path.
+4. Its storage capacity and failure-domain/zone.
+5. That the full Garage play can be run against every cluster member.
 
-Use host-specific variables under `host_vars/` for values that differ between machines; do not put passwords, private keys, or tokens in inventory files.
+Garage layout changes are intentionally blocked when the play is run with
+`--limit`. Use host-specific variables under `host_vars/` for values that
+differ between machines; do not put passwords, private keys, or tokens in
+inventory files.
