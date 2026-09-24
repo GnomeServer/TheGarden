@@ -29,6 +29,7 @@ TheGarden/
 ├── Docker-Documents/
 │   ├── Caddyfile
 │   ├── caddy-setup.md
+│   ├── caddy_service/
 │   ├── forgejo/
 │   └── grafana_services/
 ├── docs/

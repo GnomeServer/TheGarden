@@ -62,6 +62,8 @@ The repository source files are:
 
 ```text
 Docker-Documents/Caddyfile
+Docker-Documents/caddy_service/compose.yml
+Docker-Documents/caddy_service/README.md
 Docker-Documents/caddy-setup.md
 ```
 
@@ -71,13 +73,16 @@ On the VM, the Caddyfile should be mounted into the Caddy container, normally at
 /etc/caddy/Caddyfile
 ```
 
-A Compose project should contain the Caddyfile and a `compose.yml`, for example:
+The VM Compose project contains the Caddyfile and the repository Compose file:
 
 ```text
 caddy-service/
 ├── Caddyfile
-└── compose.yml
+├── compose.yml
+└── site/
 ```
+
+`site/` is currently empty and is mounted read-only for optional future static files.
 
 ## Current Caddy routes
 
