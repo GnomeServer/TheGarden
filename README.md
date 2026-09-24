@@ -26,6 +26,10 @@ TheGarden/
 │   ├── playbooks/
 │   ├── roles/
 │   └── state/
+├── Docker-Documents/
+│   ├── Caddyfile
+│   ├── caddy-setup.md
+│   └── grafana_services/
 ├── docs/
 │   └── lab-layers.md
 ├── proxmox-installation.md
@@ -80,7 +84,7 @@ ansible-playbook playbooks/audit.yml
 
 The audit records Ansible facts, installed packages, systemd services, Proxmox version output, and Tailscale status under `Ansible/state/`. Generated state files contain machine-specific information and are ignored by Git by default.
 
-A Debian VM now exists on the Proxmox node as VMID `100`, hostname `infra-lab-services`, with address `10.1.0.2/24` on `ens18`. Its Ansible connection template is `Ansible/inventory/proxmox-guests.example.yml`; it should be activated after installing SSH and confirming the separate guest subnet is routable.
+A Debian VM now exists on the Proxmox node as VMID `100`, hostname `infra-lab-services`, with address `10.1.10.2/24` on `ens18`. Its Ansible connection template is `Ansible/inventory/proxmox-guests.example.yml`; it should be activated after installing SSH and confirming the guest is routable.
 
 ## Playbooks and roles
 
@@ -165,6 +169,10 @@ git push
 ```
 
 Generated `Ansible/state/` snapshots are ignored because they contain hostnames, addresses, package inventories, and service details. Review sensitive infrastructure information before publishing any files.
+
+## Docker services
+
+The `infra-lab-services` VM currently runs Caddy, Grafana, Prometheus, and Node Exporter with Docker Compose. Caddy is the HTTPS entry point, and Grafana is available under `/grafana/`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the verified topology, deployment files, and test command.
 
 ## Not managed yet
 

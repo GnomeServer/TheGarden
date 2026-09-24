@@ -25,14 +25,14 @@ proxmox_services:
   - pvestatd.service
 
 # VMID 100 is the Debian guest created on this Proxmox node. The guest is
-# documented but not an active Ansible target until its IP, SSH user, and key
+# documented but not an active Ansible target until SSH and its user/key
 # are configured in inventory/proxmox-guests.example.yml.
 proxmox_guest_vms:
   - vmid: 100
     name: infra-lab-services
     guest_os: Debian
     guest_interface: ens18
-    guest_address: 10.1.0.2/24
+    guest_address: 10.1.10.2/24
     inventory_group: proxmox_guests
     ssh_installed: false
     ansible_enabled: false

@@ -18,9 +18,25 @@ VM 100: infra-lab-services
   Caddy:             ports 80 and 443
 ```
 
-The VM is connected to the Proxmox bridge and has its own network identity. Tailscale installed on the Proxmox host does not automatically make the VM a Tailscale node. The VM can currently reach the Proxmox host over the LAN address after the host firewall path was allowed.
+The VM is connected to the Proxmox bridge and has its own network identity. Tailscale installed on the Proxmox host does not automatically make the VM a Tailscale node. The VM can reach the Proxmox host over the LAN address after the host firewall path was allowed.
 
-The repository previously documented the VM as `10.1.0.2`. The address confirmed on the running VM is `10.1.10.2`; update the Ansible inventory and other documentation before enabling automated guest management.
+The address confirmed on the running VM is `10.1.10.2`. The Ansible guest inventory template and related documentation use this address; the guest remains inactive until SSH access is intentionally enabled.
+
+## Current validated status
+
+The current deployment uses Docker Compose on the VM:
+
+```text
+Caddy project:    ~/caddy-service
+Grafana project:  ~/grafana-service
+Docker network:   caddy_proxy
+Caddy hostname:   tail494f6d.ts.net
+Grafana URL:      https://tail494f6d.ts.net/grafana/
+```
+
+Caddy and the Grafana containers are attached to `caddy_proxy`. A request using the VM address as a DNS override returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. This verifies TLS, Caddy routing, Docker service discovery, and Grafana's `/grafana/` subpath configuration.
+
+The VM does not currently appear as its own Tailscale node. Access from another tailnet device therefore requires either a temporary `curl --resolve`/hosts override, a subnet route through `server-debian`, or a future Tailscale identity for the VM. The Tailscale identity option is deferred for now.
 
 ## Important architecture note
 
@@ -58,31 +74,41 @@ caddy-service/
 └── compose.yml
 ```
 
-## Current Proxmox test route
+## Current Caddy routes
 
-The working test configuration is:
+The live Caddyfile routes Grafana under `/grafana/` and keeps Proxmox as the fallback route:
 
 ```caddyfile
 tail494f6d.ts.net {
     tls internal
 
-    reverse_proxy https://10.1.10.156:8006 {
-        transport http {
-            tls_insecure_skip_verify
+    @grafana {
+        path /grafana /grafana/*
+    }
+
+    handle @grafana {
+        reverse_proxy grafana:3000
+    }
+
+    handle {
+        reverse_proxy https://10.1.10.156:8006 {
+            transport http {
+                tls_insecure_skip_verify
+            }
         }
     }
 }
 ```
 
-Notes:
+Important details:
 
+- `tail494f6d.ts.net` must match the hostname used in the request's SNI. A Caddyfile using `server-debian.tail494f6d.ts.net` will not serve the `tail494f6d.ts.net` request.
+- `grafana:3000` is a Docker service name. It resolves only when Caddy and Grafana share `caddy_proxy`.
 - `10.1.10.156` is the Proxmox host, not `10.1.10.1`.
 - `10.1.10.1` is the LAN gateway/router.
-- The upstream URL uses `https://` because Proxmox serves HTTPS on port `8006`.
-- Caddy's transport module remains `http`; the upstream URL controls the TLS connection.
+- Proxmox serves HTTPS on port `8006`, so the upstream URL uses `https://`.
 - `tls_insecure_skip_verify` is required because the Proxmox certificate is locally issued/self-signed.
-- `tls internal` causes Caddy to issue a private certificate. Clients must trust Caddy's local CA or show a browser warning.
-- The domain used is currently the MagicDNS provided by Tailscale. This will need to be changed once other services can expand from caddy (grafana, etc).
+- `tls internal` causes Caddy to issue a private certificate. Clients must trust Caddy's local CA or use `curl -k` during testing.
 
 ## Connecting to the VM
 
@@ -154,25 +180,69 @@ sudo systemctl reload caddy
 sudo journalctl -u caddy -n 100 --no-pager
 ```
 
+A container showing `Started` does not prove that Caddy loaded the intended configuration or completed the TLS handshake. For an error such as `curl: (35) ... tlsv1 alert internal error`, inspect Caddy before changing the Grafana route:
+
+```bash
+sudo docker compose ps
+sudo docker compose logs --tail=200 caddy
+sudo docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile
+openssl s_client -connect 10.1.10.2:443 -servername tail494f6d.ts.net -brief </dev/null
+```
+
+The mounted Caddyfile must contain `tail494f6d.ts.net`, not `server-debian.tail494f6d.ts.net`. A direct request to `https://10.1.10.2/` can also produce a TLS alert because it does not send the hostname/SNI that Caddy is configured to serve. Always test with the hostname and `--resolve`.
+
+The TLS error occurs before Caddy contacts Grafana, so it is separate from Docker DNS. If Caddy logs a storage, certificate, or permission error, fix that error first.
+
 ## Testing the Caddy frontend
 
-From the Proxmox host, force the Caddy hostname to resolve to the VM:
+From `server-debian` or another machine that can route to `10.1.10.2`, use the hostname and force it to the Caddy VM. Keep this command on one physical line:
 
 ```bash
-curl -k --resolve tail494f6d.ts.net:443:10.1.10.2 \
-  https://tail494f6d.ts.net/
+curl -4 -k -i -L --connect-timeout 5 --resolve tail494f6d.ts.net:443:10.1.10.2 https://tail494f6d.ts.net/grafana/login
 ```
 
-From inside the VM, if Caddy publishes port `443` on the VM host:
+A successful response contains:
+
+```text
+HTTP/2 200
+via: 1.1 Caddy
+content-type: text/html; charset=UTF-8
+```
+
+and Grafana HTML with:
+
+```html
+<base href="/grafana/" />
+```
+
+A `502 Bad Gateway` means Caddy is running but cannot reach Grafana. A TLS alert when using the IP directly is expected because the request does not provide the configured hostname/SNI:
 
 ```bash
-curl -k --resolve tail494f6d.ts.net:443:127.0.0.1 \
-  https://tail494f6d.ts.net/
+# This is not a valid Grafana test:
+curl -k -vk https://10.1.10.2/
 ```
 
-A successful response should be the Proxmox page returned through Caddy. A `502 Bad Gateway` means the Caddy frontend is running but cannot reach the configured upstream.
+The correct direct-IP test still uses the hostname:
 
-The `--resolve` option is only a test override. For normal browser access, DNS, Tailscale MagicDNS, or a local hosts/DNS record must resolve the chosen hostname to `10.1.10.2` or to the VM's future Tailscale address.
+```bash
+curl -4 -k -i -L --resolve tail494f6d.ts.net:443:10.1.10.2 https://tail494f6d.ts.net/grafana/login
+```
+
+The `--resolve` option is only a test override. The current `tail494f6d.ts.net` name is associated with the Proxmox/Tailscale host, while Caddy runs on the VM's LAN address. A normal browser request will not reach `10.1.10.2` unless the client has a hosts/DNS entry for the VM, a subnet route through `server-debian`, or the VM receives its own Tailscale identity.
+
+A hosts entry applies only to the machine where it is configured:
+
+```text
+10.1.10.2 tail494f6d.ts.net
+```
+
+If Caddy logs `lookup grafana ... no such host`, inspect the shared network:
+
+```bash
+sudo docker network inspect caddy_proxy --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}'
+```
+
+The output should contain `caddy` and the current `grafana-services-*` containers. Do not leave old `monitoring-*` or `grafana-service-*` containers attached to the network, because multiple Grafana containers can create ambiguous Docker DNS results.
 
 ## Firewall findings
 
@@ -263,46 +333,36 @@ port:        TCP 8006
 
 After confirming the rule works, persist it using the selected host firewall system. Do not expose port `8006` publicly.
 
-## Optional: give the VM its own Tailscale identity
+## Deferred: give the VM its own Tailscale identity
 
-The architecture expects the infrastructure VM to have its own Tailscale node. This is useful for accessing Caddy from the tailnet and avoids depending on LAN routing:
+This is paused for now. The VM is not currently listed as a Tailscale node; only `server-debian` has the Tailscale address `100.102.154.23`. Installing Tailscale on the VM later would provide direct access from devices such as `donatello` without a LAN hosts entry or subnet route.
+
+When this work resumes, install Tailscale on the VM and use the VM's actual MagicDNS hostname in both Caddy and Grafana:
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --hostname=infra-01
+sudo tailscale up --hostname=infra-lab-services
 tailscale status
 tailscale ip -4
 ```
 
-After authentication, test the Proxmox host over Tailscale:
+After authentication, update the Caddy site address and Grafana values to the hostname shown by `tailscale status`. From another tailnet device such as `donatello`, test with:
 
 ```bash
-curl -4 -vk --connect-timeout 5 https://100.102.154.23:8006/
+curl -k -i -L https://infra-lab-services.tail494f6d.ts.net/grafana/login
 ```
 
-If this path is used, the Caddy upstream can be changed to:
-
-```caddyfile
-reverse_proxy https://100.102.154.23:8006 {
-    transport http {
-        tls_insecure_skip_verify
-    }
-}
-```
-
-Tailscale ACLs must allow the VM's identity to reach the Proxmox host on port `8006`.
+The exact MagicDNS name may differ; use the name reported by Tailscale. Tailscale ACLs must allow the client to reach the VM on TCP port `443`. Caddy's internal CA will still need to be trusted by browsers, or `curl -k` can be used for testing.
 
 ## Next services
 
-Once the Caddy frontend and VM networking are stable, deploy the control-plane services in this order:
+Caddy, Grafana, Prometheus, and Node Exporter are now deployed and the Grafana route has been verified. Continue the control-plane rollout in this order:
 
 1. PostgreSQL
 2. Forgejo
 3. Forgejo OCI registry
-4. Prometheus
-5. Grafana
-6. NATS JetStream
-7. Open WebUI
+4. NATS JetStream
+5. Open WebUI
 
 Caddy should then route application hostnames to internal Compose services, for example:
 
