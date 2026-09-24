@@ -9,6 +9,14 @@ infra-lab-services.tail494f6d.ts.net {
 		reverse_proxy grafana:3000
 	}
 
+	@forgejo {
+		path /forgejo /forgejo/*
+	}
+
+	handle @forgejo {
+		reverse_proxy forgejo:3000
+	}
+
 	handle {
 		reverse_proxy https://10.1.10.156:8006 {
 			transport http {

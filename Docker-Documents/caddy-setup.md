@@ -29,10 +29,12 @@ The current deployment uses Docker Compose on the VM:
 ```text
 Caddy project:    ~/caddy-service
 Grafana project:  ~/grafana-service
+Forgejo project:  ~/forgejo-service (prepared, not yet deployed)
 Docker network:   caddy_proxy
 Caddy hostname:   infra-lab-services.tail494f6d.ts.net
 VM Tailscale:     100.94.49.45
 Grafana URL:      https://infra-lab-services.tail494f6d.ts.net/grafana/
+Forgejo URL:      https://infra-lab-services.tail494f6d.ts.net/forgejo/ (after deploy)
 ```
 
 Caddy and the Grafana containers are attached to `caddy_proxy`. The configured application hostname is `infra-lab-services.tail494f6d.ts.net`, with Grafana under `/grafana/`.
@@ -79,7 +81,7 @@ caddy-service/
 
 ## Current Caddy routes
 
-The live Caddyfile routes Grafana under `/grafana/` and keeps Proxmox as the fallback route:
+The Caddyfile routes Grafana under `/grafana/`, Forgejo under `/forgejo/`, and keeps Proxmox as the fallback route:
 
 ```caddyfile
 infra-lab-services.tail494f6d.ts.net {
@@ -91,6 +93,14 @@ infra-lab-services.tail494f6d.ts.net {
 
     handle @grafana {
         reverse_proxy grafana:3000
+    }
+
+    @forgejo {
+        path /forgejo /forgejo/*
+    }
+
+    handle @forgejo {
+        reverse_proxy forgejo:3000
     }
 
     handle {
@@ -106,7 +116,7 @@ infra-lab-services.tail494f6d.ts.net {
 Important details:
 
 - `infra-lab-services.tail494f6d.ts.net` must match the hostname used in the request's SNI. The old `tail494f6d.ts.net` alias and `server-debian.tail494f6d.ts.net` are not the configured Caddy site addresses.
-- `grafana:3000` is a Docker service name. It resolves only when Caddy and Grafana share `caddy_proxy`.
+- `grafana:3000` and `forgejo:3000` are Docker service names. They resolve only when Caddy shares `caddy_proxy` with the corresponding service.
 - `10.1.10.156` is the Proxmox host, not `10.1.10.1`.
 - `10.1.10.1` is the LAN gateway/router.
 - Proxmox serves HTTPS on port `8006`, so the upstream URL uses `https://`.
@@ -356,13 +366,12 @@ Caddy's internal CA still needs to be trusted by browsers, or `curl -k` can be u
 
 ## Next services
 
-Caddy, Grafana, Prometheus, and Node Exporter are now deployed and the Grafana route has been verified. Continue the control-plane rollout in this order:
+Caddy, Grafana, Prometheus, and Node Exporter are deployed and the Grafana route has been verified. The Forgejo/PostgreSQL Compose project is now prepared; deploy it before adding the OCI registry and automation services:
 
-1. PostgreSQL
-2. Forgejo
-3. Forgejo OCI registry
-4. NATS JetStream
-5. Open WebUI
+1. Forgejo with PostgreSQL
+2. Forgejo OCI registry validation
+3. NATS JetStream
+4. Open WebUI
 
 Caddy should then route application hostnames to internal Compose services, for example:
 

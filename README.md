@@ -29,6 +29,7 @@ TheGarden/
 ├── Docker-Documents/
 │   ├── Caddyfile
 │   ├── caddy-setup.md
+│   ├── forgejo/
 │   └── grafana_services/
 ├── docs/
 │   └── lab-layers.md
@@ -173,7 +174,7 @@ Generated `Ansible/state/` snapshots are ignored because they contain hostnames,
 
 ## Docker services
 
-The `infra-lab-services` VM currently runs Caddy, Grafana, Prometheus, and Node Exporter with Docker Compose. Caddy is the HTTPS entry point, and Grafana is available under `/grafana/`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the verified topology, deployment files, and test command.
+The `infra-lab-services` VM currently runs Caddy, Grafana, Prometheus, and Node Exporter with Docker Compose. Forgejo with PostgreSQL is prepared as the next Compose project. Caddy is the HTTPS entry point, and Grafana is available under `/grafana/`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the verified topology, deployment files, and test commands.
 
 ## Not managed yet
 

@@ -1,0 +1,70 @@
+name: forgejo
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-forgejo}
+      POSTGRES_USER: ${POSTGRES_USER:-forgejo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-forgejo} -d ${POSTGRES_DB:-forgejo}
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - forgejo_internal
+
+  forgejo:
+    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:16.0.5}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      USER_UID: ${FORGEJO_UID:-1000}
+      USER_GID: ${FORGEJO_GID:-1000}
+      FORGEJO__database__DB_TYPE: postgres
+      FORGEJO__database__HOST: postgres:5432
+      FORGEJO__database__NAME: ${POSTGRES_DB:-forgejo}
+      FORGEJO__database__USER: ${POSTGRES_USER:-forgejo}
+      FORGEJO__database__PASSWD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      FORGEJO__database__SSL_MODE: disable
+      FORGEJO__server__DOMAIN: ${FORGEJO_DOMAIN:-infra-lab-services.tail494f6d.ts.net}
+      FORGEJO__server__ROOT_URL: "https://${FORGEJO_DOMAIN:-infra-lab-services.tail494f6d.ts.net}/forgejo/"
+      FORGEJO__server__PROTOCOL: http
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__SSH_DOMAIN: ${FORGEJO_DOMAIN:-infra-lab-services.tail494f6d.ts.net}
+      FORGEJO__server__SSH_PORT: ${FORGEJO_SSH_PORT:-2222}
+      FORGEJO__server__START_SSH_SERVER: "true"
+      FORGEJO__server__SSH_LISTEN_PORT: "22"
+      FORGEJO__service__DISABLE_REGISTRATION: ${FORGEJO_DISABLE_REGISTRATION:-false}
+      FORGEJO__service__REQUIRE_SIGNIN_VIEW: ${FORGEJO_REQUIRE_SIGNIN_VIEW:-false}
+      FORGEJO__repository__DEFAULT_PRIVATE: ${FORGEJO_DEFAULT_PRIVATE:-true}
+      FORGEJO__packages__ENABLED: ${FORGEJO_PACKAGES_ENABLED:-true}
+      FORGEJO__actions__ENABLED: ${FORGEJO_ACTIONS_ENABLED:-true}
+    volumes:
+      - forgejo_data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "${FORGEJO_TAILSCALE_IP:-100.94.49.45}:${FORGEJO_SSH_PORT:-2222}:22"
+    networks:
+      - caddy_proxy
+      - forgejo_internal
+
+networks:
+  caddy_proxy:
+    external: true
+    name: ${CADDY_NETWORK:-caddy_proxy}
+  forgejo_internal:
+    name: forgejo_internal
+
+volumes:
+  forgejo_data:
+  postgres_data:

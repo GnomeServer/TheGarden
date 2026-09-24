@@ -19,7 +19,7 @@ The verified request path is:
 client -> Caddy on the VM -> grafana:3000
 ```
 
-A direct request to `https://infra-lab-services.tail494f6d.ts.net/grafana/login` returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. Grafana, Prometheus, and Node Exporter are deployed by the `grafana_services` Compose project and Caddy is deployed separately.
+A direct request to `https://infra-lab-services.tail494f6d.ts.net/grafana/login` returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. Grafana, Prometheus, and Node Exporter are deployed by the `grafana_services` Compose project and Caddy is deployed separately. A Forgejo/PostgreSQL Compose project is prepared under `forgejo/`; it still needs to be deployed and its first administrator configured.
 
 The VM now has its own Tailscale identity, so other tailnet devices can use the MagicDNS hostname directly. The older `tail494f6d.ts.net` alias is not the canonical service name.
 
@@ -27,7 +27,8 @@ The VM now has its own Tailscale identity, so other tailnet devices can use the 
 
 - [`caddy-setup.md`](caddy-setup.md) — VM networking, Caddy routes, TLS/SNI testing, Docker network checks, and Proxmox connectivity.
 - [`grafana_services/README.md`](grafana_services/README.md) — Grafana, Prometheus, and Node Exporter deployment and the shared `caddy_proxy` network.
-- [`Caddyfile`](Caddyfile) — The Caddy route for `/grafana/` and the Proxmox fallback route.
+- [`forgejo/README.md`](forgejo/README.md) — Forgejo with PostgreSQL, HTTPS Git access, SSH clone access, and first-run setup.
+- [`Caddyfile`](Caddyfile) — The Caddy routes for `/grafana/`, `/forgejo/`, and the Proxmox fallback route.
 
 ## Important test command
 
