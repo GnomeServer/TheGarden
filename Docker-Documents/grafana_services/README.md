@@ -17,10 +17,10 @@ No service ports are published directly to the VM LAN. Caddy is the HTTPS entry 
 The stack is running on `infra-lab-services` and shares `caddy_proxy` with Caddy. The verified URL is:
 
 ```text
-https://tail494f6d.ts.net/grafana/
+https://infra-lab-services.tail494f6d.ts.net/grafana/
 ```
 
-A request using `--resolve tail494f6d.ts.net:443:10.1.10.2` returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. The live VM checkout is currently `~/grafana-service`; the repository directory is `grafana_services`. The current VM Compose output has used both `grafana-services` and the older `grafana-service` project names during migration. The project name affects container and volume names, not Docker DNS. Use one Compose project at a time and remove old `monitoring-*`/`grafana-service-*` containers from `caddy_proxy`.
+The VM has the Tailscale identity `infra-lab-services.tail494f6d.ts.net` (`100.94.49.45`), which is also the application hostname used by Caddy and Grafana. The live VM checkout is currently `~/grafana-service`; the repository directory is `grafana_services`. The current VM Compose output has used both `grafana-services` and the older `grafana-service` project names during migration. The project name affects container and volume names, not Docker DNS. Use one Compose project at a time and remove old `monitoring-*`/`grafana-service-*` containers from `caddy_proxy`.
 
 ## Deploy on `infra-lab-services`
 
@@ -33,7 +33,7 @@ chmod 600 .env
 nano .env
 ```
 
-Set a strong `GRAFANA_ADMIN_PASSWORD`. Do not commit `.env`. Do not paste the output of `docker compose config` into tickets or chat because Compose expands and prints the password. If a password has already been exposed, rotate it.
+Set a strong `GRAFANA_ADMIN_PASSWORD` and keep `GRAFANA_DOMAIN=infra-lab-services.tail494f6d.ts.net` unless the application hostname is deliberately changed. Do not commit `.env`. Do not paste the output of `docker compose config` into tickets or chat because Compose expands and prints the password. If a password has already been exposed, rotate it.
 
 Validate and start the stack:
 
@@ -76,10 +76,10 @@ Grafana is provisioned automatically with Prometheus as its default data source.
 
 ## Caddy route
 
-The initial setup uses Grafana under the existing Caddy hostname at:
+Grafana is served under the existing Caddy hostname at:
 
 ```text
-https://tail494f6d.ts.net/grafana/
+https://infra-lab-services.tail494f6d.ts.net/grafana/
 ```
 
 The Caddyfile route is:
@@ -152,12 +152,12 @@ Do not publish Grafana's port `3000` unless there is a specific temporary testin
 When testing, use the complete command on one physical line. A newline without a final backslash runs `curl` without a URL and then tries to execute the URL as a shell command:
 
 ```bash
-curl -4 -k -i -L --connect-timeout 5 --resolve tail494f6d.ts.net:443:10.1.10.2 https://tail494f6d.ts.net/grafana/login
+curl -4 -k -i -L --connect-timeout 5 https://infra-lab-services.tail494f6d.ts.net/grafana/login
 ```
 
-A successful response contains `HTTP/2 200`, `via: 1.1 Caddy`, and Grafana HTML with `<base href="/grafana/" />`. Do not test with only `https://10.1.10.2/`; Caddy requires the hostname/SNI `tail494f6d.ts.net`.
+A successful response contains `HTTP/2 200`, `via: 1.1 Caddy`, and Grafana HTML with `<base href="/grafana/" />`. Do not test with only `https://10.1.10.2/`; Caddy requires the hostname/SNI `infra-lab-services.tail494f6d.ts.net`.
 
-The `--resolve` option only overrides DNS for one request. The current `tail494f6d.ts.net` record identifies the Proxmox/Tailscale host, not the Caddy VM. For browser access without `--resolve`, create a DNS/hosts entry pointing the client to `10.1.10.2`, configure a subnet route through `server-debian`, or give the VM its own Tailscale identity. A hosts entry on `server-debian` does not affect `donatello` or any other client.
+MagicDNS resolves the VM directly for tailnet devices, so `--resolve` is not required for normal access. To test the LAN path from `server-debian`, use `--resolve infra-lab-services.tail494f6d.ts.net:443:10.1.10.2` while keeping the hostname in the URL.
 
 ## Upgrade notes
 

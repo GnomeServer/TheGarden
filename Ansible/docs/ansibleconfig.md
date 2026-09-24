@@ -164,6 +164,7 @@ The Proxmox host and guest are on `10.1.10.0/24`. Confirm that the guest address
 The observed Tailscale nodes were:
 
 - `server-debian` — `100.102.154.23` — this machine
+- `infra-lab-services` — `100.94.49.45` — active VM
 - `donatello` — `100.94.145.104` — active
 - `inkii` — `100.98.125.127` — offline when checked
 - `naruto-dell-pro-max-14-mc14250` — `100.88.92.78`

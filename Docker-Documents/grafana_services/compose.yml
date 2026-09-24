@@ -36,8 +36,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_SERVER_DOMAIN: tail494f6d.ts.net
-      GF_SERVER_ROOT_URL: "https://tail494f6d.ts.net/grafana/"
+      GF_SERVER_DOMAIN: ${GRAFANA_DOMAIN:-infra-lab-services.tail494f6d.ts.net}
+      GF_SERVER_ROOT_URL: "https://${GRAFANA_DOMAIN:-infra-lab-services.tail494f6d.ts.net}/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     volumes:
       - grafana_data:/var/lib/grafana

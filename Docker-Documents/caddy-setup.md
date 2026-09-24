@@ -18,9 +18,9 @@ VM 100: infra-lab-services
   Caddy:             ports 80 and 443
 ```
 
-The VM is connected to the Proxmox bridge and has its own network identity. Tailscale installed on the Proxmox host does not automatically make the VM a Tailscale node. The VM can reach the Proxmox host over the LAN address after the host firewall path was allowed.
+The VM is connected to the Proxmox bridge and has its own network identity. The VM can reach the Proxmox host over the LAN address after the host firewall path was allowed. Tailscale is now also installed on the VM.
 
-The address confirmed on the running VM is `10.1.10.2`. The Ansible guest inventory template and related documentation use this address; the guest remains inactive until SSH access is intentionally enabled.
+The address confirmed on the running VM is `10.1.10.2`. The Ansible guest inventory template and related documentation use this address; the guest remains inactive as an Ansible target until SSH credentials are intentionally configured.
 
 ## Current validated status
 
@@ -30,13 +30,16 @@ The current deployment uses Docker Compose on the VM:
 Caddy project:    ~/caddy-service
 Grafana project:  ~/grafana-service
 Docker network:   caddy_proxy
-Caddy hostname:   tail494f6d.ts.net
-Grafana URL:      https://tail494f6d.ts.net/grafana/
+Caddy hostname:   infra-lab-services.tail494f6d.ts.net
+VM Tailscale:     100.94.49.45
+Grafana URL:      https://infra-lab-services.tail494f6d.ts.net/grafana/
 ```
 
-Caddy and the Grafana containers are attached to `caddy_proxy`. A request using the VM address as a DNS override returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. This verifies TLS, Caddy routing, Docker service discovery, and Grafana's `/grafana/` subpath configuration.
+Caddy and the Grafana containers are attached to `caddy_proxy`. The configured application hostname is `infra-lab-services.tail494f6d.ts.net`, with Grafana under `/grafana/`.
 
-The VM does not currently appear as its own Tailscale node. Access from another tailnet device therefore requires either a temporary `curl --resolve`/hosts override, a subnet route through `server-debian`, or a future Tailscale identity for the VM. The Tailscale identity option is deferred for now.
+The VM is a Tailscale node named `infra-lab-services` at `100.94.49.45`. Other tailnet devices should use the VM's MagicDNS hostname directly; no hosts override or `--resolve` option is required when MagicDNS is working.
+
+A direct request to the VM's Tailscale MagicDNS name returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML with `<base href="/grafana/" />`. This verifies TLS, Caddy routing, Docker service discovery, and Grafana's `/grafana/` subpath configuration.
 
 ## Important architecture note
 
@@ -79,7 +82,7 @@ caddy-service/
 The live Caddyfile routes Grafana under `/grafana/` and keeps Proxmox as the fallback route:
 
 ```caddyfile
-tail494f6d.ts.net {
+infra-lab-services.tail494f6d.ts.net {
     tls internal
 
     @grafana {
@@ -102,7 +105,7 @@ tail494f6d.ts.net {
 
 Important details:
 
-- `tail494f6d.ts.net` must match the hostname used in the request's SNI. A Caddyfile using `server-debian.tail494f6d.ts.net` will not serve the `tail494f6d.ts.net` request.
+- `infra-lab-services.tail494f6d.ts.net` must match the hostname used in the request's SNI. The old `tail494f6d.ts.net` alias and `server-debian.tail494f6d.ts.net` are not the configured Caddy site addresses.
 - `grafana:3000` is a Docker service name. It resolves only when Caddy and Grafana share `caddy_proxy`.
 - `10.1.10.156` is the Proxmox host, not `10.1.10.1`.
 - `10.1.10.1` is the LAN gateway/router.
@@ -186,19 +189,25 @@ A container showing `Started` does not prove that Caddy loaded the intended conf
 sudo docker compose ps
 sudo docker compose logs --tail=200 caddy
 sudo docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile
-openssl s_client -connect 10.1.10.2:443 -servername tail494f6d.ts.net -brief </dev/null
+openssl s_client -connect 10.1.10.2:443 -servername infra-lab-services.tail494f6d.ts.net -brief </dev/null
 ```
 
-The mounted Caddyfile must contain `tail494f6d.ts.net`, not `server-debian.tail494f6d.ts.net`. A direct request to `https://10.1.10.2/` can also produce a TLS alert because it does not send the hostname/SNI that Caddy is configured to serve. Always test with the hostname and `--resolve`.
+The mounted Caddyfile must contain `infra-lab-services.tail494f6d.ts.net`. A direct request to `https://10.1.10.2/` can also produce a TLS alert because it does not send the hostname/SNI that Caddy is configured to serve. Always test with the MagicDNS hostname or use `--resolve` when deliberately targeting the LAN address.
 
 The TLS error occurs before Caddy contacts Grafana, so it is separate from Docker DNS. If Caddy logs a storage, certificate, or permission error, fix that error first.
 
 ## Testing the Caddy frontend
 
-From `server-debian` or another machine that can route to `10.1.10.2`, use the hostname and force it to the Caddy VM. Keep this command on one physical line:
+From any tailnet device, use the VM's MagicDNS hostname and keep this command on one physical line:
 
 ```bash
-curl -4 -k -i -L --connect-timeout 5 --resolve tail494f6d.ts.net:443:10.1.10.2 https://tail494f6d.ts.net/grafana/login
+curl -4 -k -i -L --connect-timeout 5 https://infra-lab-services.tail494f6d.ts.net/grafana/login
+```
+
+To test the LAN path from `server-debian` while preserving the correct SNI, use:
+
+```bash
+curl -4 -k -i -L --connect-timeout 5 --resolve infra-lab-services.tail494f6d.ts.net:443:10.1.10.2 https://infra-lab-services.tail494f6d.ts.net/grafana/login
 ```
 
 A successful response contains:
@@ -222,19 +231,7 @@ A `502 Bad Gateway` means Caddy is running but cannot reach Grafana. A TLS alert
 curl -k -vk https://10.1.10.2/
 ```
 
-The correct direct-IP test still uses the hostname:
-
-```bash
-curl -4 -k -i -L --resolve tail494f6d.ts.net:443:10.1.10.2 https://tail494f6d.ts.net/grafana/login
-```
-
-The `--resolve` option is only a test override. The current `tail494f6d.ts.net` name is associated with the Proxmox/Tailscale host, while Caddy runs on the VM's LAN address. A normal browser request will not reach `10.1.10.2` unless the client has a hosts/DNS entry for the VM, a subnet route through `server-debian`, or the VM receives its own Tailscale identity.
-
-A hosts entry applies only to the machine where it is configured:
-
-```text
-10.1.10.2 tail494f6d.ts.net
-```
+The `--resolve` option is only a LAN-path test override. The current canonical MagicDNS name resolves directly to the VM's Tailscale address. A normal browser request from a tailnet device should use `https://infra-lab-services.tail494f6d.ts.net/grafana/login` without a hosts entry.
 
 If Caddy logs `lookup grafana ... no such host`, inspect the shared network:
 
@@ -333,26 +330,29 @@ port:        TCP 8006
 
 After confirming the rule works, persist it using the selected host firewall system. Do not expose port `8006` publicly.
 
-## Deferred: give the VM its own Tailscale identity
+## Tailscale status
 
-This is paused for now. The VM is not currently listed as a Tailscale node; only `server-debian` has the Tailscale address `100.102.154.23`. Installing Tailscale on the VM later would provide direct access from devices such as `donatello` without a LAN hosts entry or subnet route.
+The VM now has its own Tailscale identity:
 
-When this work resumes, install Tailscale on the VM and use the VM's actual MagicDNS hostname in both Caddy and Grafana:
-
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --hostname=infra-lab-services
-tailscale status
-tailscale ip -4
+```text
+hostname:  infra-lab-services.tail494f6d.ts.net
+address:   100.94.49.45
 ```
 
-After authentication, update the Caddy site address and Grafana values to the hostname shown by `tailscale status`. From another tailnet device such as `donatello`, test with:
+Other tailnet devices can reach Caddy directly through this MagicDNS name. Check the identity and reachability with:
+
+```bash
+tailscale status
+tailscale ping infra-lab-services
+```
+
+Test Grafana from another tailnet device with:
 
 ```bash
 curl -k -i -L https://infra-lab-services.tail494f6d.ts.net/grafana/login
 ```
 
-The exact MagicDNS name may differ; use the name reported by Tailscale. Tailscale ACLs must allow the client to reach the VM on TCP port `443`. Caddy's internal CA will still need to be trusted by browsers, or `curl -k` can be used for testing.
+Caddy's internal CA still needs to be trusted by browsers, or `curl -k` can be used for testing.
 
 ## Next services
 

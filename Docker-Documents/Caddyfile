@@ -1,4 +1,4 @@
-tail494f6d.ts.net {
+infra-lab-services.tail494f6d.ts.net {
 	tls internal
 
 	@grafana {
