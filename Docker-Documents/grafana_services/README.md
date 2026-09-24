@@ -44,6 +44,15 @@ sudo docker compose up -d
 sudo docker compose ps
 ```
 
+Validate the Prometheus configuration from the Compose project directory:
+
+```bash
+cd ~/grafana-service
+sudo docker compose exec prometheus /bin/promtool check config /etc/prometheus/prometheus.yml
+```
+
+The command is intentionally shown on one line. If using a multiline shell command, the backslash must be the final character on the line with no following spaces. A command such as `\\ promtool` passes a leading-space command name to Docker.
+
 If the VM checkout is still named `~/grafana-service`, that path is fine; the directory name does not control Docker DNS. Confirm that the deployed file is the updated one:
 
 ```bash
