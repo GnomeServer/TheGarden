@@ -1,0 +1,9 @@
+tail494f6d.ts.net {
+	tls internal
+
+	reverse_proxy https://10.1.10.156:8006 {
+		transport http {
+			tls_insecure_skip_verify
+		}
+	}
+}

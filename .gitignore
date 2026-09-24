@@ -14,4 +14,5 @@ collections/
 
 # Local secrets
 .secrets/
+Docker-Documents/monitoring/.env
 **/state/audit-meta.yml
