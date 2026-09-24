@@ -82,6 +82,7 @@ Notes:
 - Caddy's transport module remains `http`; the upstream URL controls the TLS connection.
 - `tls_insecure_skip_verify` is required because the Proxmox certificate is locally issued/self-signed.
 - `tls internal` causes Caddy to issue a private certificate. Clients must trust Caddy's local CA or show a browser warning.
+- The domain used is currently the MagicDNS provided by Tailscale. This will need to be changed once other services can expand from caddy (gorjana, etc).
 
 ## Connecting to the VM
 
