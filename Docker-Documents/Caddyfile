@@ -1,9 +1,19 @@
 tail494f6d.ts.net {
 	tls internal
 
-	reverse_proxy https://10.1.10.156:8006 {
-		transport http {
-			tls_insecure_skip_verify
+	@grafana {
+		path /grafana /grafana/*
+	}
+
+	handle @grafana {
+		reverse_proxy grafana:3000
+	}
+
+	handle {
+		reverse_proxy https://10.1.10.156:8006 {
+			transport http {
+				tls_insecure_skip_verify
+			}
 		}
 	}
 }

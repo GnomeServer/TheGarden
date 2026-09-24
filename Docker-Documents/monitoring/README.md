@@ -52,15 +52,21 @@ Grafana is provisioned automatically with Prometheus as its default data source.
 
 ## Caddy route
 
-After choosing a hostname that resolves to the Caddy VM, add a route to the Caddyfile:
+The initial setup uses Grafana under the existing Caddy hostname at `/grafana/`:
 
 ```caddyfile
-grafana.example.internal {
+@grafana {
+    path /grafana /grafana/*
+}
+
+handle @grafana {
     reverse_proxy grafana:3000
 }
 ```
 
-The Caddy container and the monitoring containers are on `caddy-service_default`, so Caddy can resolve `grafana` through Docker DNS.
+Grafana is configured for the `/grafana/` subpath through `GF_SERVER_ROOT_URL` and `GF_SERVER_SERVE_FROM_SUB_PATH`.
+
+The Caddy container and the monitoring containers are on `caddy-service_default`, so Caddy can resolve `grafana` through Docker DNS. A separate Grafana hostname can be introduced later after internal DNS is available.
 
 Validate and reload Caddy:
 
