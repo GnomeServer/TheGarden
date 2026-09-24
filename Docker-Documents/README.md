@@ -25,11 +25,11 @@ The VM now has its own Tailscale identity, so other tailnet devices can use the 
 
 ## Documents
 
-- [`caddy_service/caddy-setup.md`](caddy-setup.md) — VM networking, Caddy routes, TLS/SNI testing, Docker network checks, and Proxmox connectivity.
+- [`caddy_service/caddy-setup.md`](caddy_service/caddy-setup.md) — VM networking, Caddy routes, TLS/SNI testing, Docker network checks, and Proxmox connectivity.
 - [`grafana_services/README.md`](grafana_services/README.md) — Grafana, Prometheus, and Node Exporter deployment and the shared `caddy_proxy` network.
 - [`forgejo/README.md`](forgejo/README.md) — Forgejo with PostgreSQL, HTTPS Git access, SSH clone access, and first-run setup.
 - [`caddy_service/README.md`](caddy_service/README.md) — Caddy Compose deployment, persistent TLS volumes, network membership, and operations.
-- [`caddy_service/Caddyfile`](Caddyfile) — The Caddy routes for `/grafana/`, `/forgejo/`, and the Proxmox fallback route.
+- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — The Caddy routes for `/grafana/`, `/forgejo/`, and the Proxmox fallback route.
 
 ## Important test command
 

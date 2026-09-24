@@ -112,6 +112,7 @@ Add the Forgejo route before Caddy's fallback route:
 }
 
 handle @forgejo {
+    uri strip_prefix /forgejo
     reverse_proxy forgejo:3000
 }
 ```

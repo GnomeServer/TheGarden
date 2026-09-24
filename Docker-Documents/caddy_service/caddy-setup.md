@@ -105,6 +105,7 @@ infra-lab-services.tail494f6d.ts.net {
     }
 
     handle @forgejo {
+        uri strip_prefix /forgejo
         reverse_proxy forgejo:3000
     }
 
