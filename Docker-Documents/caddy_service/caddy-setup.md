@@ -29,15 +29,15 @@ The current deployment uses Docker Compose on the VM:
 ```text
 Caddy project:    ~/caddy-service
 Grafana project:  ~/grafana-service
-Forgejo project:  ~/forgejo-service (prepared, not yet deployed)
+Forgejo project:  ~/forgejo-service
 Docker network:   caddy_proxy
 Caddy hostname:   infra-lab-services.tail494f6d.ts.net
 VM Tailscale:     100.94.49.45
 Grafana URL:      https://infra-lab-services.tail494f6d.ts.net/grafana/
-Forgejo URL:      https://infra-lab-services.tail494f6d.ts.net/forgejo/ (after deploy)
+Forgejo URL:      https://infra-lab-services.tail494f6d.ts.net/forgejo/
 ```
 
-Caddy and the Grafana containers are attached to `caddy_proxy`. The configured application hostname is `infra-lab-services.tail494f6d.ts.net`, with Grafana under `/grafana/`.
+Caddy, Grafana, Prometheus, and Forgejo are attached to `caddy_proxy`. The configured application hostname is `infra-lab-services.tail494f6d.ts.net`, with Grafana under `/grafana/` and Forgejo under `/forgejo/`. Forgejo's HTTP upstream is `forgejo:3000`; its SSH clone endpoint is published separately on the VM's Tailscale address at port `2222`.
 
 The VM is a Tailscale node named `infra-lab-services` at `100.94.49.45`. Other tailnet devices should use the VM's MagicDNS hostname directly; no hosts override or `--resolve` option is required when MagicDNS is working.
 
@@ -372,12 +372,11 @@ Caddy's internal CA still needs to be trusted by browsers, or `curl -k` can be u
 
 ## Next services
 
-Caddy, Grafana, Prometheus, and Node Exporter are deployed and the Grafana route has been verified. The Forgejo/PostgreSQL Compose project is now prepared; deploy it before adding the OCI registry and automation services:
+Caddy, Grafana, Prometheus, Node Exporter, Forgejo, and PostgreSQL are deployed. The Grafana and Forgejo routes have been verified. Continue with the OCI registry and automation services:
 
-1. Forgejo with PostgreSQL
-2. Forgejo OCI registry validation
-3. NATS JetStream
-4. Open WebUI
+1. Forgejo OCI registry validation
+2. NATS JetStream
+3. Open WebUI
 
 Caddy should then route application hostnames to internal Compose services, for example:
 

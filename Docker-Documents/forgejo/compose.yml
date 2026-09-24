@@ -41,8 +41,9 @@ services:
       FORGEJO__server__HTTP_PORT: "3000"
       FORGEJO__server__SSH_DOMAIN: ${FORGEJO_DOMAIN:-infra-lab-services.tail494f6d.ts.net}
       FORGEJO__server__SSH_PORT: ${FORGEJO_SSH_PORT:-2222}
-      FORGEJO__server__START_SSH_SERVER: "true"
-      FORGEJO__server__SSH_LISTEN_PORT: "22"
+      # The Forgejo image already runs OpenSSH on container port 22.
+      # Do not start Forgejo's embedded SSH server on the same port.
+      FORGEJO__server__START_SSH_SERVER: "false"
       FORGEJO__service__DISABLE_REGISTRATION: ${FORGEJO_DISABLE_REGISTRATION:-false}
       FORGEJO__service__REQUIRE_SIGNIN_VIEW: ${FORGEJO_REQUIRE_SIGNIN_VIEW:-false}
       FORGEJO__repository__DEFAULT_PRIVATE: ${FORGEJO_DEFAULT_PRIVATE:-true}

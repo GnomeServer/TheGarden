@@ -19,7 +19,7 @@ The verified request path is:
 client -> Caddy on the VM -> grafana:3000
 ```
 
-A direct request to `https://infra-lab-services.tail494f6d.ts.net/grafana/login` returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. Grafana, Prometheus, and Node Exporter are deployed by the `grafana_services` Compose project and Caddy is deployed separately. A Forgejo/PostgreSQL Compose project is prepared under `forgejo/`; it still needs to be deployed and its first administrator configured.
+A direct request to `https://infra-lab-services.tail494f6d.ts.net/grafana/login` returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. Grafana, Prometheus, and Node Exporter are deployed by the `grafana_services` Compose project and Caddy is deployed separately. Forgejo and PostgreSQL are now deployed by the `forgejo/` Compose project and Forgejo is available under `/forgejo/`; its first administrator and private-service settings must be configured during initial setup.
 
 The VM now has its own Tailscale identity, so other tailnet devices can use the MagicDNS hostname directly. The older `tail494f6d.ts.net` alias is not the canonical service name.
 
