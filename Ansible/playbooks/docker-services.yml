@@ -1,0 +1,34 @@
+---
+- name: Deploy Docker Compose services
+  hosts: docker_hosts
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check that Compose project directories exist
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      loop: "{{ docker_compose_projects }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: compose_directories
+
+    - name: Fail when a Compose project is missing
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isdir
+        fail_msg: "Missing Compose project directory: {{ item.item.path }}"
+      loop: "{{ compose_directories.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Deploy Compose project
+      community.docker.docker_compose_v2:
+        project_src: "{{ item.path }}"
+        state: present
+        pull: missing
+        build: "{{ item.build }}"
+      loop: "{{ docker_compose_projects }}"
+      loop_control:
+        label: "{{ item.name }}"

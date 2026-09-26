@@ -1,0 +1,25 @@
+---
+docker_compose_projects:
+  - name: caddy
+    path: /home/infra-lab-user/caddy-service
+    build: never
+
+  - name: forgejo
+    path: /home/infra-lab-user/forgejo-service
+    build: never
+
+  - name: open-webui
+    path: /home/infra-lab-user/open-webui-service
+    build: never
+
+  - name: llama
+    path: /home/infra-lab-user/llama-service
+    build: never
+
+  - name: grafana
+    path: /home/infra-lab-user/grafana-service
+    build: never
+
+  - name: agent-manager
+    path: /home/infra-lab-user/agent-manager-service
+    build: always
