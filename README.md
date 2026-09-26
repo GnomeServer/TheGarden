@@ -27,11 +27,13 @@ TheGarden/
 │   ├── roles/
 │   └── state/
 ├── Docker-Documents/
-│   ├── Caddyfile
-│   ├── caddy-setup.md
+│   ├── README.md
 │   ├── caddy_service/
 │   ├── forgejo/
-│   └── grafana_services/
+│   ├── agent_manager/
+│   ├── grafana_services/
+│   ├── llama_services/
+│   └── open_webui_services/
 ├── docs/
 │   └── lab-layers.md
 ├── proxmox-installation.md
@@ -41,7 +43,7 @@ TheGarden/
 └── tailscale-setup.md
 ```
 
-The Ansible project and its supporting directories are now grouped under `Ansible/`. The canonical Ansible Markdown files are kept in `docs/`; duplicate copies that were previously under `Ansible/` were removed.
+The Ansible project and its supporting directories are grouped under `Ansible/`. Installation history remains in `Ansible/docs/`; current operating instructions are in `Ansible/README.md`.
 
 ## Current Ansible controller
 
@@ -55,21 +57,24 @@ The Ansible project and its supporting directories are now grouped under `Ansibl
 | Hardware | Dell Pro Max 14 MC14250 |
 | Ansible | `ansible-core 2.21.4` |
 
-The repository is currently at `/home/df-server/lab-infra`. The requested `/lab-infra` path requires root access. To move the repository after reviewing it:
+The active checkout is:
 
-```bash
-sudo mv "$HOME/lab-infra" /lab-infra
-sudo chown -R df-server:df-server /lab-infra
+```text
+/home/infra-lab-user/TheGarden
 ```
 
-After moving it, the Ansible project root is `/lab-infra/Ansible`.
+The Ansible project root is:
+
+```text
+/home/infra-lab-user/TheGarden/Ansible
+```
 
 ## Using Ansible
 
 Run Ansible from its project directory so `Ansible/ansible.cfg` is discovered automatically:
 
 ```bash
-cd /home/df-server/lab-infra/Ansible   # use /lab-infra/Ansible after moving it
+cd /home/infra-lab-user/TheGarden/Ansible
 export PATH="$HOME/.local/bin:$PATH"
 
 ansible --version
@@ -110,7 +115,7 @@ This playbook currently includes:
 - `common` — verifies and reports the Debian-family host; it is audit-only
 - `proxmox` — validates the installed Proxmox VE version, running kernel, bridge, and services; it is read-only
 
-No state-changing service roles are enabled yet.
+The existing `site.yml` remains audit-oriented. Docker Compose deployment is handled separately by `Ansible/playbooks/docker-services.yml`.
 
 Validate before applying changes:
 
@@ -136,7 +141,7 @@ The role does not install Proxmox or modify networking. The staged installation 
 
 ## Inventory and Tailscale
 
-`Ansible/inventory/hosts.yml` intentionally contains only this machine as an active Ansible target. Remote Tailscale peers are available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling them.
+`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian` and the local Docker target `infra-lab-services`. The Docker target is in the `docker_hosts` group and uses `/usr/bin/python3`. Remote Tailscale peers are available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling them.
 
 Observed Tailscale nodes:
 
@@ -158,7 +163,7 @@ git@github.com:GnomeServer/TheGarden.git
 Check the working tree from the repository root:
 
 ```bash
-cd /home/df-server/lab-infra
+cd /home/infra-lab-user/TheGarden
 git status
 git log --oneline --decorate -5
 ```
@@ -175,7 +180,16 @@ Generated `Ansible/state/` snapshots are ignored because they contain hostnames,
 
 ## Docker services
 
-The `infra-lab-services` VM currently runs Caddy, Grafana, Prometheus, Node Exporter, Forgejo, and PostgreSQL with Docker Compose. Caddy is the HTTPS entry point; Grafana is available under `/grafana/` and Forgejo under `/forgejo/`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the verified topology, deployment files, and test commands.
+The `infra-lab-services` VM currently runs these Docker Compose services:
+
+- Caddy
+- Forgejo and its PostgreSQL database
+- Open WebUI and Ollama
+- llama.cpp
+- Grafana, Prometheus, and Node Exporter
+- Agent Manager, its PostgreSQL database, and NATS JetStream
+
+Caddy is the HTTPS entry point; Grafana is available under `/grafana/` and Forgejo under `/forgejo/`. Agent Manager is currently a live checkout at `/home/infra-lab-user/agent-manager-service`; its source and Compose project have not yet been moved into TheGarden. See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the Docker topology and [`Ansible/README.md`](Ansible/README.md) for deployment through Ansible.
 
 ## Not managed yet
 

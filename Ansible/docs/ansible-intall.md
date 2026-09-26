@@ -211,13 +211,20 @@ To run a playbook, provide an inventory and playbook in the usual way:
 ansible-playbook -i inventory.ini site.yml
 ```
 
-To add a community collection later (which is separate from `ansible-core`), use for example:
+The Docker deployment uses the `community.docker` collection, which is separate from `ansible-core`. Install the project requirements with:
 
 ```bash
-ansible-galaxy collection install community.general
+cd /home/infra-lab-user/TheGarden/Ansible
+ansible-galaxy collection install -r requirements.yml
 ```
 
-No collection was installed as part of this lightweight setup.
+The current requirements file installs:
+
+```text
+community.docker
+```
+
+The Docker Compose deployment uses `community.docker.docker_compose_v2` from `playbooks/docker-services.yml`.
 
 ## Maintenance
 
