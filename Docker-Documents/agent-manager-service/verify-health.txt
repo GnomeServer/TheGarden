@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd -- "$(dirname -- "$0")"
+
+printf '%s\n' '--- liveness ---'
+curl -fsS http://127.0.0.1:8090/healthz
+printf '\n%s\n' '--- readiness ---'
+curl -fsS http://127.0.0.1:8090/readyz
+printf '\n'

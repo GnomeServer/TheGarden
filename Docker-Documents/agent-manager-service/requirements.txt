@@ -1,0 +1,6 @@
+fastapi==0.115.6
+nats-py==2.9.0
+pydantic-settings==2.7.1
+sqlalchemy[asyncio]==2.0.37
+asyncpg==0.30.0
+uvicorn[standard]==0.34.0

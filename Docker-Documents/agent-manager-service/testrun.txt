@@ -1,0 +1,3 @@
+response=$(curl -fsS -H "Authorization: Bearer ${AGENT_MANAGER_API_TOKEN}" -H 'Content-Type: application/json' http://127.0.0.1:8090/v1/runs -d '{"goal": "Verification run: report the repository status", "forgejo_repository": "owner/project", "base_ref": "main","model": "verification-model","metadata": {"source": "manual-smoke-test"}}')                                                             
+                                                                     
+printf '%s\n' "$response"
