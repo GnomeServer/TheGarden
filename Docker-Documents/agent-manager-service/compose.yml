@@ -1,0 +1,102 @@
+name: agent-manager
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agent_manager}
+      POSTGRES_USER: ${POSTGRES_USER:-agent_manager}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - manager_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-agent_manager} -d ${POSTGRES_DB:-agent_manager}
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - manager_internal
+
+  nats:
+    image: ${NATS_IMAGE:-nats:2.11-alpine}
+    restart: unless-stopped
+    command:
+      - --jetstream
+      - --store_dir
+      - /data
+      - --http_port
+      - "8222"
+    volumes:
+      - nats_data:/data
+    expose:
+      - "4222"
+      - "8222"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:8222/healthz >/dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - manager_internal
+
+  agent-manager:
+    build:
+      context: .
+    image: ${AGENT_MANAGER_IMAGE:-local/agent-manager:dev}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-agent_manager}
+      DB_USER: ${POSTGRES_USER:-agent_manager}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      NATS_URL: nats://nats:4222
+      AGENT_MANAGER_API_TOKEN: ${AGENT_MANAGER_API_TOKEN:?Set AGENT_MANAGER_API_TOKEN in .env}
+      FORGEJO_API_URL: ${FORGEJO_API_URL:-http://forgejo:3000/api/v1}
+      FORGEJO_TOKEN: ${FORGEJO_TOKEN:-}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-http://llama:8080/v1}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${AGENT_MANAGER_BIND_ADDRESS:-127.0.0.1}:${AGENT_MANAGER_PORT:-8090}:8000"
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - manager_internal
+      - caddy_proxy
+      - open_webui_internal
+
+networks:
+  manager_internal:
+    name: agent_manager_internal
+  caddy_proxy:
+    external: true
+    name: caddy_proxy
+  open_webui_internal:
+    external: true
+    name: open-webui_internal
+
+volumes:
+  manager_postgres_data:
+    name: agent-manager_postgres_data
+  nats_data:
+    name: agent-manager_nats_data

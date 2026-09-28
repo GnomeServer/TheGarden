@@ -1,0 +1,5 @@
+.env
+.last-run-id
+__pycache__/
+*.py[cod]
+.pytest_cache/

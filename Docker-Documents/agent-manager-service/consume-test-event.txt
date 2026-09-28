@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd -- "$(dirname -- "$0")"
+
+sudo docker compose exec -T agent-manager python - <<'PY'
+import asyncio
+import json
+import nats
+
+
+async def main():
+    nc = await nats.connect("nats://nats:4222")
+    js = nc.jetstream()
+    sub = await js.subscribe("agent.runs.created", stream="AGENT_RUNS")
+
+    try:
+        msg = await sub.next_msg(timeout=3)
+        print(json.dumps(json.loads(msg.data.decode()), indent=2))
+        await msg.ack()
+    finally:
+        await sub.unsubscribe()
+        await nc.close()
+
+
+asyncio.run(main())
+PY

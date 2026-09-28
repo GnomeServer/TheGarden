@@ -4,4 +4,5 @@
 # collections:
 #   - name: community.general
 #     version: ">=10.0.0"
-collections: []
+collections:
+  - name: community.docker
