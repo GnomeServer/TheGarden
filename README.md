@@ -26,6 +26,12 @@ TheGarden/
 │   ├── playbooks/
 │   ├── roles/
 │   └── state/
+├── Docker-Documents/
+│   ├── Caddyfile
+│   ├── caddy-setup.md
+│   ├── caddy_service/
+│   ├── forgejo/
+│   └── grafana_services/
 ├── docs/
 │   └── lab-layers.md
 ├── proxmox-installation.md
@@ -80,7 +86,7 @@ ansible-playbook playbooks/audit.yml
 
 The audit records Ansible facts, installed packages, systemd services, Proxmox version output, and Tailscale status under `Ansible/state/`. Generated state files contain machine-specific information and are ignored by Git by default.
 
-A Debian VM now exists on the Proxmox node as VMID `100`, hostname `infra-lab-services`, with address `10.1.0.2/24` on `ens18`. Its Ansible connection template is `Ansible/inventory/proxmox-guests.example.yml`; it should be activated after installing SSH and confirming the separate guest subnet is routable.
+A Debian VM now exists on the Proxmox node as VMID `100`, hostname `infra-lab-services`, with address `10.1.10.2/24` on `ens18`. Its Ansible connection template is `Ansible/inventory/proxmox-guests.example.yml`; it should be activated after installing SSH and confirming the guest is routable.
 
 ## Playbooks and roles
 
@@ -135,6 +141,7 @@ The role does not install Proxmox or modify networking. The staged installation 
 Observed Tailscale nodes:
 
 - `server-debian` — `100.102.154.23` — this host
+- `infra-lab-services` — `100.94.49.45` — active VM
 - `donatello` — `100.94.145.104` — active
 - `inkii` — `100.98.125.127` — offline when checked
 - `naruto-dell-pro-max-14-mc14250` — `100.88.92.78`
@@ -165,6 +172,10 @@ git push
 ```
 
 Generated `Ansible/state/` snapshots are ignored because they contain hostnames, addresses, package inventories, and service details. Review sensitive infrastructure information before publishing any files.
+
+## Docker services
+
+The `infra-lab-services` VM currently runs Caddy, Grafana, Prometheus, Node Exporter, Forgejo, and PostgreSQL with Docker Compose. Caddy is the HTTPS entry point; Grafana is available under `/grafana/` and Forgejo under `/forgejo/`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the verified topology, deployment files, and test commands.
 
 ## Not managed yet
 

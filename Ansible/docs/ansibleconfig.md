@@ -125,7 +125,7 @@ all:
 
 The current Tailscale peers are listed in `Ansible/inventory/tailscale-peers.example.yml`, but that file is intentionally not loaded by default. Remote operating-system usernames and SSH permissions have not been verified.
 
-A Debian guest VM was created on the Proxmox node as **VMID 100**. Its hostname is `infra-lab-services`, and its `ens18` address is `10.1.0.2/24`. Its connection template is `Ansible/inventory/proxmox-guests.example.yml`. It remains inactive because SSH has not been installed in the guest yet. The Proxmox host inventory records the VM under `proxmox_guest_vms`.
+A Debian guest VM was created on the Proxmox node as **VMID 100**. Its hostname is `infra-lab-services`, and its `ens18` address is `10.1.10.2/24`. Its connection template is `Ansible/inventory/proxmox-guests.example.yml`. It remains inactive because SSH has not been installed in the guest yet. The Proxmox host inventory records the VM under `proxmox_guest_vms`.
 
 ## 5. Current machine captured
 
@@ -159,11 +159,12 @@ ansible infra-lab-services \\
   -m ansible.builtin.ping
 ```
 
-The Proxmox host is on `10.1.10.0/24`, while the guest is on `10.1.0.0/24`. Confirm that the separate subnet and its gateway are intentional and routable.
+The Proxmox host and guest are on `10.1.10.0/24`. Confirm that the guest address is reserved and reachable.
 
 The observed Tailscale nodes were:
 
 - `server-debian` — `100.102.154.23` — this machine
+- `infra-lab-services` — `100.94.49.45` — active VM
 - `donatello` — `100.94.145.104` — active
 - `inkii` — `100.98.125.127` — offline when checked
 - `naruto-dell-pro-max-14-mc14250` — `100.88.92.78`

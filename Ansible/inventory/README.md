@@ -10,7 +10,7 @@ Remote Tailscale peers are not active inventory entries yet. Their observed name
 4. Its Python interpreter path.
 5. Which playbooks are safe to run against it.
 
-A Debian guest VM was created on `server-debian` as **VMID 100**. Its hostname is `infra-lab-services`, with `ens18` configured as `10.1.0.2/24`. It is documented in `inventory/proxmox-guests.example.yml`, but is not active until SSH is installed and the Debian operating-system user is configured.
+A Debian guest VM was created on `server-debian` as **VMID 100**. Its hostname is `infra-lab-services`, with `ens18` configured as `10.1.10.2/24`. It is documented in `inventory/proxmox-guests.example.yml`, but is not active until SSH is installed and the Debian operating-system user is configured.
 
 From the Debian VM console, install and enable SSH and Python:
 
@@ -30,6 +30,6 @@ ansible infra-lab-services \\
   -m ansible.builtin.ping
 ```
 
-The Proxmox host is on `10.1.10.0/24`, while this guest is on `10.1.0.0/24`. Confirm that this separate subnet and its gateway are intentional and routable before troubleshooting SSH.
+The Proxmox host and this guest are both on `10.1.10.0/24`. Confirm that the guest address is reserved and reachable before troubleshooting SSH.
 
 Use host-specific variables under `host_vars/` for values that differ between machines; do not put passwords, private keys, or tokens in inventory files.
