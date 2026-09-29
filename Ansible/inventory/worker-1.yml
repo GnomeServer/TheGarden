@@ -1,0 +1,9 @@
+all:
+  children:
+    agent_workers:
+      hosts:
+        inkii:
+          ansible_host: 100.98.125.127
+          ansible_user: inkii
+          ansible_python_interpreter: /usr/bin/python3
+          worker_role: coder

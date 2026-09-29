@@ -27,6 +27,12 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from prometheus_client import make_asgi_app
+
+RUNS_CREATED = Counter(
+    "agent_runs_created_total",
+    "Number of agent runs successfully published to the queue.",
+)
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
@@ -256,6 +262,8 @@ app = FastAPI(
     version=os.getenv("AGENT_MANAGER_VERSION", "0.1.0"),
     lifespan=lifespan,
 )
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 
 @app.get("/healthz", response_model=HealthOut)
@@ -327,6 +335,7 @@ async def create_run(
     }
     try:
         await publish_run_event(request, RUN_CREATED_SUBJECT, event)
+	RUNS_CREATED.inc()
     except Exception as exc:
         logger.exception("failed to publish run %s", run_id)
         record.status = "failed"
