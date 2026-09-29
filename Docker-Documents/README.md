@@ -21,7 +21,7 @@ client -> Caddy on the VM -> application container
 
 A direct request to `https://infra-lab-services.tail494f6d.ts.net/grafana/login` returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. Grafana, Prometheus, and Node Exporter are deployed by the `grafana_services` Compose project and Caddy is deployed separately. Forgejo and PostgreSQL are deployed by the `forgejo/` Compose project and Forgejo is available under `/forgejo/`; its first administrator and private-service settings must be configured during initial setup.
 
-Open WebUI, Ollama, and llama.cpp are also running on the VM. The Agent Manager control-plane stack is currently deployed from the live checkout at `/home/infra-lab-user/agent-manager-service` and includes the manager API, a private PostgreSQL database, and NATS JetStream. Its API is loopback-bound on port `8090` and is available to containers on `caddy_proxy` at `http://agent-manager:8000`.
+Open WebUI, Ollama, and llama.cpp are also running on the VM. The Agent Manager control-plane stack is currently deployed from the live checkout at `/home/infra-lab-user/agent-manager-service` and includes the manager API, a private PostgreSQL database, and NATS JetStream. Its API is loopback-bound on port `8090` and is available to containers on `caddy_proxy` at `http://agent-manager:8000`. The remote worker smoke test reaches NATS on the VM's Tailscale address and is documented in [`../agent-worker/README.md`](../agent-worker/README.md).
 
 The VM now has its own Tailscale identity, so other tailnet devices can use the MagicDNS hostname directly. The older `tail494f6d.ts.net` alias is not the canonical service name.
 
@@ -33,8 +33,9 @@ The VM now has its own Tailscale identity, so other tailnet devices can use the 
 - [`llama_services/README.md`](llama_services/README.md) — llama.cpp model serving and OpenAI-compatible API access.
 - [`open_webui_services/README.md`](open_webui_services/README.md) — Open WebUI and Ollama deployment.
 - [`caddy_service/README.md`](caddy_service/README.md) — Caddy Compose deployment, persistent TLS volumes, network membership, and operations.
-- [`agent_manager/README.md`](agent_manager/README.md) — Agent Manager, PostgreSQL, NATS JetStream, API verification, and Ansible deployment.
-- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — The Caddy routes for `/grafana/`, `/forgejo/`, and the Proxmox fallback route.
+- [`agent-manager-service/README.md`](agent-manager-service/README.md) — Agent Manager, PostgreSQL, NATS JetStream, API verification, and Ansible deployment.
+- [`../agent-worker/README.md`](../agent-worker/README.md) — Remote worker installation, dynamic script prompts, and NATS/LiteLLM configuration.
+- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — The Caddy routes for `/grafana/`, `/litellm/`, `/forgejo/`, and the Proxmox fallback route.
 
 ## Important test command
 

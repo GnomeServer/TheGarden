@@ -19,6 +19,10 @@ The goal is to build a useful multi-node AI and software-agent lab without intro
 
 ```text
 TheGarden/
+├── agent-worker/
+│   ├── worker.py
+│   ├── requirements.txt
+│   └── README.md
 ├── Ansible/
 │   ├── ansible.cfg
 │   ├── requirements.yml
@@ -30,7 +34,7 @@ TheGarden/
 │   ├── README.md
 │   ├── caddy_service/
 │   ├── forgejo/
-│   ├── agent_manager/
+│   ├── agent-manager-service/
 │   ├── grafana_services/
 │   ├── llama_services/
 │   └── open_webui_services/
@@ -141,14 +145,14 @@ The role does not install Proxmox or modify networking. The staged installation 
 
 ## Inventory and Tailscale
 
-`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian` and the local Docker target `infra-lab-services`. The Docker target is in the `docker_hosts` group and uses `/usr/bin/python3`. Remote Tailscale peers are available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling them.
+`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian` and the local Docker target `infra-lab-services`. The Docker target is in the `docker_hosts` group and uses `/usr/bin/python3`. The first worker smoke-test host, `inkii`, is defined separately in `Ansible/inventory/worker-1.yml` and is not loaded by the default inventory. It currently requires manual runtime setup; see [`agent-worker/README.md`](agent-worker/README.md). Remote Tailscale peers are available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling them.
 
 Observed Tailscale nodes:
 
 - `server-debian` — `100.102.154.23` — this host
 - `infra-lab-services` — `100.94.49.45` — active VM
 - `donatello` — `100.94.145.104` — active
-- `inkii` — `100.98.125.127` — offline when checked
+- `inkii` — `100.98.125.127` — worker smoke-test host
 - `naruto-dell-pro-max-14-mc14250` — `100.88.92.78`
 - `raphael` — `100.116.35.103` — active
 
@@ -189,7 +193,7 @@ The `infra-lab-services` VM currently runs these Docker Compose services:
 - Grafana, Prometheus, and Node Exporter
 - Agent Manager, its PostgreSQL database, and NATS JetStream
 
-Caddy is the HTTPS entry point; Grafana is available under `/grafana/` and Forgejo under `/forgejo/`. Agent Manager is currently a live checkout at `/home/infra-lab-user/agent-manager-service`; its source and Compose project have not yet been moved into TheGarden. See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the Docker topology and [`Ansible/README.md`](Ansible/README.md) for deployment through Ansible.
+Caddy is the HTTPS entry point; Grafana is available under `/grafana/`, Forgejo under `/forgejo/`, and the LiteLLM gateway under `/litellm/`. Agent Manager is currently a live checkout at `/home/infra-lab-user/agent-manager-service`; its source and Compose project have not yet been moved into TheGarden. The remote worker smoke test uses NATS over the VM's Tailscale address and is documented in [`agent-worker/README.md`](agent-worker/README.md). See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the Docker topology and [`Ansible/README.md`](Ansible/README.md) for deployment through Ansible.
 
 ## Not managed yet
 

@@ -6,7 +6,7 @@ This Compose project deploys the first control-plane slice for agentic coding ru
 - `postgres`: private PostgreSQL database for manager state
 - `nats`: private NATS server with JetStream enabled and persistent storage
 
-The manager does not execute repository code. Workers can consume the durable NATS events later.
+The manager does not execute repository code. Workers consume the durable NATS events. The current one-shot dynamic smoke-test worker is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md).
 
 ## Networks
 
@@ -99,7 +99,7 @@ bash verify-nats.txt
 bash consume-test-event.txt
 ```
 
-`submit-test-run.txt` stores the most recent run ID in `.last-run-id`, which is ignored by Git. Since there is not yet a worker, the test run is expected to remain `queued`.
+`submit-test-run.txt` stores the most recent run ID in `.last-run-id`, which is ignored by Git. A run submitted without a matching worker is expected to remain `queued`. The current worker smoke test also leaves the database row queued because the manager does not yet consume `agent.runs.completed`; inspect the worker output and NATS event for completion.
 
 ## Submit a run
 
@@ -132,7 +132,18 @@ The cancellation endpoint publishes to:
 agent.runs.cancelled
 ```
 
-The stream is named `AGENT_RUNS` and is stored in the `nats_data` volume.
+For the worker smoke test, include matching metadata in the request:
+
+```json
+{
+  "worker_id": "inkii",
+  "operation": "create-python-script"
+}
+```
+
+The worker must be waiting before the request is submitted because its current
+consumer is one-shot and starts at new events. The stream is named `AGENT_RUNS`
+and is stored in the `nats_data` volume.
 
 ## Existing service endpoints
 

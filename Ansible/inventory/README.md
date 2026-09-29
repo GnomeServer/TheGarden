@@ -58,6 +58,33 @@ Caddy starts first because it creates the external `caddy_proxy` network. Agent 
 
 The Compose project `.env` files remain on the Docker VM and are intentionally not stored in the inventory or committed to Git.
 
+## Agent worker inventory
+
+The first remote worker is defined separately in `inventory/worker-1.yml` so it
+does not affect the default local audit or Docker deployment inventory:
+
+```text
+inkii
+├── Tailscale address: 100.98.125.127
+├── SSH user: inkii
+└── worker_role: coder
+```
+
+Inspect or test that inventory explicitly:
+
+```bash
+cd /home/infra-lab-user/TheGarden/Ansible
+ansible-inventory -i inventory/worker-1.yml --host inkii
+ansible -i inventory/worker-1.yml inkii -m ansible.builtin.ping
+```
+
+The current worker runtime is a manual smoke-test deployment rather than an
+Ansible role. Install the virtual environment, NATS connection settings,
+LiteLLM worker key, and `worker.py` according to
+[`../../agent-worker/README.md`](../../agent-worker/README.md). Do not add the
+worker inventory to `hosts.yml` until SSH authorization and the desired worker
+playbooks have been reviewed.
+
 ## Proxmox guest template
 
 `proxmox-guests.example.yml` is not loaded by default. It documents VMID `100`, the Debian guest named `infra-lab-services`, and the connection values that must be confirmed before using SSH-based management.

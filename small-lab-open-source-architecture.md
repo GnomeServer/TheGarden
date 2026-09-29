@@ -173,7 +173,7 @@ Use ext4 or LVM-thin for the Proxmox server storage. Do not introduce ZFS or Cep
 
 | Service | Why defer it | Later interactions |
 |---|---|---|
-| LiteLLM or another AI gateway | Direct Open WebUI-to-worker communication is simpler for the first model test. | Open WebUI and agent workers call one gateway. The gateway routes to multiple inference workers. |
+| LiteLLM | Deployed after the first direct endpoint test. | Open WebUI and agent workers call one gateway using scoped virtual keys. The gateway currently exposes the `luna` model route and can later route to multiple inference workers. |
 | Loki + Grafana Alloy or Promtail | Journald and Docker log rotation are enough during initial bring-up. | Workers send logs to Loki. Grafana queries both Loki and Prometheus. Add this when agent runs become frequent. |
 | OpenTelemetry Collector + Grafana Tempo or Jaeger | Distributed tracing is not needed for the first single-worker test. | Agent, supervisor, queue, model, and tool spans are correlated by run and task IDs. Add this when timing and failure analysis become difficult. |
 | Proxmox metrics exporter | Node Exporter covers basic host metrics initially. | Exposes VM state, CPU, memory, storage, and task metrics from the Proxmox host to Prometheus. |
@@ -328,12 +328,13 @@ User laptop
   -> Tailscale
   -> Caddy
   -> Open WebUI
+  -> LiteLLM gateway (virtual key, model name: luna)
   -> llama.cpp/OpenVINO server on a selected worker
   -> Intel GPU
   -> response to Open WebUI
 ```
 
-Start with one model endpoint. Add LiteLLM after multiple endpoints and model routing become necessary.
+The first gateway deployment uses one `luna` route and PostgreSQL-backed virtual keys. Add additional `model_list` entries with the same public model name as more inference workers become available; LiteLLM can then load-balance the worker endpoints without changing Open WebUI or worker clients.
 
 ## 5.2 Agent coding task
 

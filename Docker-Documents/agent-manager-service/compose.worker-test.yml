@@ -1,0 +1,6 @@
+services:
+  nats:
+    # Test-only remote worker access. Keep this on the VM's Tailscale address;
+    # do not change it to 0.0.0.0 without adding NATS authentication/TLS.
+    ports:
+      - "${NATS_BIND_ADDRESS:-100.94.49.45}:4222:4222"
