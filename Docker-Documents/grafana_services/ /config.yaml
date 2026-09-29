@@ -1,0 +1,21 @@
+# The public model name is deliberately stable. Add another model_list entry for
+# each additional worker and keep the same model_name to enable load balancing.
+model_list:
+  - model_name: luna
+    litellm_params:
+      # LUNA_MODEL includes the provider prefix, for example openai/luna or
+      # openai//models/model.gguf for a llama.cpp server that validates IDs.
+      model: os.environ/LUNA_MODEL
+      api_base: os.environ/LUNA_API_BASE
+      api_key: os.environ/LUNA_BACKEND_API_KEY
+
+# The master key is used only for administration. Workers must use a virtual
+# key generated through /key/generate, never this key.
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  drop_params: true
+  num_retries: 1
+  request_timeout: 600
+  set_verbose: false

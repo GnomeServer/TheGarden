@@ -1,0 +1,73 @@
+name: litellm
+
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: litellm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-litellm}
+      POSTGRES_USER: ${POSTGRES_USER:-litellm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - litellm_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-litellm} -d ${POSTGRES_DB:-litellm}
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - litellm_internal
+
+  litellm:
+    image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.103.0}
+    container_name: litellm
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - --config
+      - /app/config.yaml
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-litellm}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-litellm}
+      STORE_MODEL_IN_DB: "False"
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?Set LITELLM_SALT_KEY in .env}
+      LUNA_API_BASE: ${LUNA_API_BASE:-http://llama:8080/v1}
+      LUNA_MODEL: ${LUNA_MODEL:-openai/luna}
+      LUNA_BACKEND_API_KEY: ${LUNA_BACKEND_API_KEY:?Set LUNA_BACKEND_API_KEY in .env}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      - "${LITELLM_BIND_ADDRESS:-127.0.0.1}:${LITELLM_PORT:-4000}:4000"
+    expose:
+      - "4000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - litellm_internal
+      - caddy_proxy
+
+networks:
+  litellm_internal:
+    name: litellm_internal
+  caddy_proxy:
+    external: true
+    name: caddy_proxy
+
+volumes:
+  litellm_postgres_data:
+    name: litellm_postgres_data
