@@ -1,145 +1,218 @@
-# Forgejo
+# Open WebUI and Ollama
 
-This Compose project deploys Forgejo with PostgreSQL on `infra-lab-services`.
+This Compose project runs Open WebUI and Ollama as separate containers on `infra-lab-services`.
 
-Forgejo is served through Caddy at:
+## Current deployment
+
+- Open WebUI container: `open-webui`
+- Ollama container: `ollama`
+- LiteLLM gateway: `litellm` (optional shared model gateway)
+- Open WebUI URL: `https://infra-lab-services.tail494f6d.ts.net:8443/`
+- Open WebUI internal port: `8080`
+- Ollama internal port: `11434`
+- Docker network shared with Caddy: `caddy_proxy`
+- Private network between Open WebUI and Ollama: `open-webui_internal`
+
+Neither service publishes its application port directly to the VM LAN. Caddy publishes HTTPS port `8443` and proxies to Open WebUI.
+
+## Why port 8443 is used
+
+Open WebUI serves root-relative frontend assets such as `/static/...` and `/_app/...`. Serving it under `/open-webui/` caused the HTML to load while the JavaScript assets were requested from the wrong path, resulting in a blank page.
+
+Caddy therefore gives Open WebUI its own HTTPS listener:
 
 ```text
-https://infra-lab-services.tail494f6d.ts.net/forgejo/
+https://infra-lab-services.tail494f6d.ts.net:8443/
 ```
 
-The Forgejo web service and PostgreSQL do not publish HTTP or database ports to the VM LAN. Forgejo SSH clone access is bound only to the VM's Tailscale address on port `2222`.
+## Files and volumes
 
-## Deployment
+```text
+compose.yml       Compose service definition
+.env              Local settings; do not commit
+.env.example      Non-secret configuration template
+```
 
-The Caddy project must already be running and must own the external Docker network `caddy_proxy`. The repository Caddyfile already includes the `/forgejo/` route, but the updated Caddyfile must be copied to the VM and reloaded before Forgejo will be reachable.
+Persistent Docker volumes:
 
-Copy this directory to the VM, then run:
+```text
+open-webui_data          Open WebUI users, settings, and data
+open-webui_ollama_data   Ollama models and runtime data
+```
+
+## Start the services
+
+Caddy must already be running and must create the external `caddy_proxy` network:
 
 ```bash
-cd ~/forgejo-service
+cd /home/infra-lab-user/caddy-service
+sudo docker compose up -d caddy
+```
+
+For a new Open WebUI deployment:
+
+```bash
+cd /home/infra-lab-user/open-webui-service
 cp .env.example .env
 chmod 600 .env
-nano .env
 ```
 
-Set both secrets before starting:
+Review `.env` before starting. The current settings are:
 
 ```dotenv
-POSTGRES_PASSWORD=use-a-long-random-database-password
+OLLAMA_IMAGE=ollama/ollama:latest
+OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:latest
+OPEN_WEBUI_URL=https://infra-lab-services.tail494f6d.ts.net:8443/
+OPEN_WEBUI_ENABLE_SIGNUP=false
 ```
 
-The `.env` file contains database credentials and must not be committed. Do not paste the output of `docker compose config` into chat or tickets because it expands the secrets.
-
-Validate and start the project:
+Start or update the stack:
 
 ```bash
-sudo docker compose config
+sudo docker compose config --quiet
 sudo docker compose pull
 sudo docker compose up -d
 sudo docker compose ps
 ```
 
-Check the initial logs:
+After changing `WEBUI_URL` or an image setting, recreate Open WebUI:
 
 ```bash
-sudo docker compose logs --tail=100 postgres
-sudo docker compose logs --tail=100 forgejo
+sudo docker compose up -d --force-recreate open-webui
 ```
 
-## First Forgejo setup
+## Verify Open WebUI
 
-Open the following URL from a Tailscale device:
-
-```text
-https://infra-lab-services.tail494f6d.ts.net/forgejo/
-```
-
-The database settings are already supplied through Compose. If the installer displays them, use:
-
-```text
-Database type: PostgreSQL
-Host:          postgres:5432
-Database name: forgejo
-User:          forgejo
-Password:      POSTGRES_PASSWORD from .env
-```
-
-Create the first administrator account during the initial setup. After confirming that the administrator can log in, change these values in `.env`:
-
-```dotenv
-FORGEJO_DISABLE_REGISTRATION=true
-FORGEJO_REQUIRE_SIGNIN_VIEW=true
-```
-
-Apply the security settings:
+Health endpoint:
 
 ```bash
-sudo docker compose up -d --force-recreate forgejo
+curl -k -sS \
+  -o /dev/null \
+  -w 'HTTP status: %{http_code}\n' \
+  https://infra-lab-services.tail494f6d.ts.net:8443/health
 ```
 
-Keep new repositories private by default. Create separate human and automation accounts rather than sharing the administrator account with workers.
-
-## Git access
-
-HTTPS clone URLs use the `/forgejo/` path:
+Expected result:
 
 ```text
-https://infra-lab-services.tail494f6d.ts.net/forgejo/<owner>/<repository>.git
+HTTP status: 200
 ```
 
-SSH clone access uses the VM's Tailscale hostname and port `2222`:
+The browser URL is:
 
 ```text
-ssh://git@infra-lab-services.tail494f6d.ts.net:2222/<owner>/<repository>.git
+https://infra-lab-services.tail494f6d.ts.net:8443/
 ```
 
-The host's normal SSH service remains on port `22`. Forgejo's embedded SSH server is published separately on `2222` and only on `100.94.49.45`.
+The `-k` option is needed for command-line tests until the client trusts Caddy's internal CA.
 
-Test the Forgejo SSH endpoint after adding an SSH key to the Forgejo account:
+Check logs:
 
 ```bash
-ssh -T -p 2222 git@infra-lab-services.tail494f6d.ts.net
+sudo docker compose logs --tail=100 open-webui
+sudo docker compose logs --tail=100 ollama
 ```
 
-## Caddy route
+## Ollama models
 
-Add the Forgejo route before Caddy's fallback route:
-
-```caddyfile
-@forgejo {
-    path /forgejo /forgejo/*
-}
-
-handle @forgejo {
-    reverse_proxy forgejo:3000
-}
-```
-
-Caddy and Forgejo must both be attached to `caddy_proxy`. Validate and reload Caddy from the Caddy project directory:
+List models without downloading anything:
 
 ```bash
-sudo docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile
-sudo docker compose restart caddy
-sudo docker compose logs --tail=100 caddy
+sudo docker compose exec ollama ollama list
 ```
 
-Do not route PostgreSQL, Forgejo SSH, or the Forgejo administration API separately through Caddy.
+Download a model intentionally when needed:
 
-## Backups
+```bash
+sudo docker compose exec ollama ollama pull llama3.2:3b
+```
 
-Forgejo requires both volumes for a complete restore:
+Run a model test using the exact name shown by `ollama list`:
+
+```bash
+sudo docker compose exec ollama \
+  ollama run llama3.2:3b 'Reply with exactly OK'
+```
+
+Ollama is configured in Open WebUI through the internal URL:
 
 ```text
-forgejo_data      Git repositories, attachments, packages, configuration
-postgres_data     Forgejo database
+http://ollama:11434
 ```
 
-Back up both volumes and export the Compose `.env` values through the lab's secret-management process. A volume backup alone without the database is not a complete Forgejo backup.
+## Using LiteLLM as the shared gateway
 
-## Future work
+LiteLLM is deployed separately in `/home/infra-lab-user/litellm-service`. It exposes the stable model name `luna`, manages virtual API keys in PostgreSQL, and routes requests to the configured inference worker. Start that project before adding the connection:
 
-- Add a dedicated Forgejo OCI registry workflow.
-- Add Forgejo Actions runners on worker machines.
-- Add PostgreSQL backup and restore verification.
-- Add branch protection and separate bot permissions.
+```bash
+cd /home/infra-lab-user/litellm-service
+sudo docker compose up -d
+./create-luna-key.sh
+```
+
+In **Admin Panel → Settings → Connections → OpenAI API Connections**, use:
+
+```text
+Base URL: http://litellm:4000/v1
+API key:  contents of /home/infra-lab-user/litellm-service/.luna-worker-api-key
+Model:    luna
+```
+
+Enter this URL in Open WebUI's server-side connection settings; do not open it directly in Firefox. `litellm` is a Docker-only hostname. Open WebUI and LiteLLM are both attached to `caddy_proxy`, so the internal service name works from the Open WebUI container without publishing LiteLLM to the LAN. The external worker URL is:
+
+```text
+https://infra-lab-services.tail494f6d.ts.net/litellm/v1
+```
+
+## Using llama.cpp directly
+
+The direct llama.cpp connection remains useful for backend diagnostics and bypass testing. It is also attached to `caddy_proxy` and can be added under:
+
+```text
+Admin Panel → Settings → Connections → OpenAI API Connections
+```
+
+Use:
+
+```text
+Base URL: http://llama:8080/v1
+API key:  LLAMA_API_KEY from /home/infra-lab-user/llama-service/.env
+```
+
+Select the exact model ID returned by llama.cpp's `/v1/models` endpoint. Use LiteLLM for normal Open WebUI and worker traffic when the request should be authenticated with a virtual key and routed as `luna`.
+
+## Testing backend connectivity from the Open WebUI container
+
+The Open WebUI image may not include `wget`, so an error such as `executable file not found in $PATH` means the diagnostic tool is missing, not that the backend is unavailable.
+
+If Python is available in the image, test llama.cpp with:
+
+```bash
+sudo docker compose exec open-webui \
+  python3 -c "import urllib.request; print(urllib.request.urlopen('http://litellm:4000/health/liveliness', timeout=5).read().decode())"
+```
+
+If that fails because `python3` is not present, use the service logs and the health endpoint instead. Do not install diagnostic packages into the application container just for this check.
+
+## All-in-one alternative
+
+Open WebUI also provides an image that includes Ollama:
+
+```text
+ghcr.io/open-webui/open-webui:ollama
+```
+
+The separate-container arrangement used here is preferred because Open WebUI and Ollama can be upgraded, restarted, monitored, and backed up independently.
+
+## Troubleshooting
+
+- **Blank page:** use the dedicated `:8443` URL, not the old `/open-webui/` path. Open WebUI's root-relative assets do not work reliably behind that path prefix.
+- **502 from Caddy:** check that `open-webui`, `litellm`, or the selected backend is running and attached to `caddy_proxy`.
+- **No models:** run `ollama list`; models must be pulled intentionally, or check that the LiteLLM virtual key is allowed to use `luna`.
+- **Ollama connection error:** Open WebUI should use `http://ollama:11434`, not a host-published port.
+- **LiteLLM 401:** use the generated `.luna-worker-api-key`, not `LITELLM_MASTER_KEY` or the backend `LLAMA_API_KEY`.
+- **LiteLLM backend error:** verify `LUNA_API_BASE` and `LUNA_BACKEND_API_KEY` in `/home/infra-lab-user/litellm-service/.env`.
+- **llama.cpp 401:** use the current `LLAMA_API_KEY` from the llama.cpp `.env`.
+- **llama.cpp model 404:** use the exact model ID returned from `/v1/models`.
+
+Keep `.env` files private and rotate credentials if they are disclosed.
