@@ -13,7 +13,15 @@ from typing import Any, AsyncGenerator
 import nats
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from nats.js.api import RetentionPolicy, StorageType, StreamConfig
+from nats.errors import TimeoutError as NatsTimeoutError
+from nats.js.api import (
+    AckPolicy,
+    ConsumerConfig,
+    DeliverPolicy,
+    RetentionPolicy,
+    StorageType,
+    StreamConfig,
+)
 from nats.js.errors import NotFoundError
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,11 +35,19 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from prometheus_client import make_asgi_app
+from prometheus_client import Counter, make_asgi_app
 
 RUNS_CREATED = Counter(
     "agent_runs_created_total",
     "Number of agent runs successfully published to the queue.",
+)
+RUNS_COMPLETED = Counter(
+    "agent_runs_completed_total",
+    "Number of agent runs completed by a worker.",
+)
+RUNS_FAILED = Counter(
+    "agent_runs_failed_total",
+    "Number of agent runs failed by a worker.",
 )
 
 class Settings(BaseSettings):
@@ -58,7 +74,7 @@ class Settings(BaseSettings):
     )
     forgejo_token: str = Field(default="", validation_alias="FORGEJO_TOKEN")
     model_base_url: str = Field(
-        default="http://llama:8080/v1",
+        default="http://litellm:4000/v1",
         validation_alias="MODEL_BASE_URL",
     )
     model_api_key: str = Field(default="", validation_alias="MODEL_API_KEY")
@@ -74,6 +90,7 @@ logger = logging.getLogger("agent-manager")
 
 STREAM_NAME = "AGENT_RUNS"
 RUN_CREATED_SUBJECT = "agent.runs.created"
+RUN_COMPLETED_SUBJECT = "agent.runs.completed"
 RUN_CANCELLED_SUBJECT = "agent.runs.cancelled"
 
 
@@ -242,16 +259,102 @@ async def publish_run_event(request: Request, subject: str, payload: dict[str, A
     )
 
 
+async def apply_run_completion(payload: dict[str, Any]) -> None:
+    run_id = payload.get("run_id")
+    worker_status = payload.get("status")
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("completion event is missing run_id")
+    if worker_status not in {"completed", "failed"}:
+        raise ValueError(f"unsupported worker status: {worker_status!r}")
+
+    async with SessionLocal() as session:
+        record = await session.get(RunRecord, run_id)
+        if record is None:
+            logger.warning("completion received for unknown run %s", run_id)
+            return
+
+        previous_status = record.status
+        metadata = dict(record.run_metadata or {})
+        completion = dict(payload)
+        completion.pop("run_id", None)
+        metadata["result"] = completion
+        record.run_metadata = metadata
+        record.status = worker_status
+
+        if worker_status == "failed":
+            error = payload.get("error") or payload.get("stderr") or "worker failed"
+            record.error = str(error)[:4000]
+        else:
+            record.error = None
+
+        await session.commit()
+
+    # JetStream may redeliver a message after a manager restart. Do not count
+    # the same terminal transition more than once in the process lifetime.
+    if previous_status not in {"completed", "failed"}:
+        if worker_status == "completed":
+            RUNS_COMPLETED.inc()
+        else:
+            RUNS_FAILED.inc()
+
+    logger.info(
+        "updated run %s from worker %s: %s",
+        run_id,
+        payload.get("worker_id", "unknown"),
+        worker_status,
+    )
+
+
+async def consume_completion_events(connection: nats.NATS) -> None:
+    subscription = await connection.jetstream().pull_subscribe(
+        RUN_COMPLETED_SUBJECT,
+        stream=STREAM_NAME,
+        durable="agent-manager-completions",
+        config=ConsumerConfig(
+            ack_policy=AckPolicy.EXPLICIT,
+            deliver_policy=DeliverPolicy.ALL,
+        ),
+    )
+    logger.info("started durable completion consumer")
+
+    try:
+        while True:
+            try:
+                messages = await subscription.fetch(1, timeout=1)
+            except NatsTimeoutError:
+                continue
+
+            try:
+                message = messages[0]
+                payload = json.loads(message.data.decode("utf-8"))
+                await apply_run_completion(payload)
+                await message.ack()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                logger.exception("discarding invalid completion event")
+                await message.ack()
+            except Exception:
+                # Leave transient database errors unacknowledged so JetStream
+                # can redeliver the completion after its ack wait expires.
+                logger.exception("failed to process completion event")
+    finally:
+        await subscription.unsubscribe()
+        logger.info("stopped durable completion consumer")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await initialise_database()
     connection = await connect_nats_with_retry()
     await ensure_stream(connection)
     app.state.nats = connection
+    completion_task = asyncio.create_task(consume_completion_events(connection))
+    app.state.completion_task = completion_task
     logger.info("agent manager started")
     try:
         yield
     finally:
+        completion_task.cancel()
+        await asyncio.gather(completion_task, return_exceptions=True)
         await connection.drain()
         await engine.dispose()
         logger.info("agent manager stopped")
@@ -335,7 +438,7 @@ async def create_run(
     }
     try:
         await publish_run_event(request, RUN_CREATED_SUBJECT, event)
-	RUNS_CREATED.inc()
+        RUNS_CREATED.inc()
     except Exception as exc:
         logger.exception("failed to publish run %s", run_id)
         record.status = "failed"

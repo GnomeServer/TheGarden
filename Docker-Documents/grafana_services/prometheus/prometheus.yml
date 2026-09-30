@@ -20,16 +20,16 @@ scrape_configs:
         labels:
           host: infra-lab-services
           role: server
-  - job_name: agent-worker-1-host
+  - job_name: agent-worker-inkii-host
     static_configs:
       - targets:
         - 100.98.125.127:9100
         labels:
           host: inkii
-          worker_id: worker-1
+          worker_id: inkii
           role: coder
   - job_name: agent-manager
-    metrics_path: /metrics
+    metrics_path: /metrics/
     static_configs:
       - targets:
         - agent-manager:8000

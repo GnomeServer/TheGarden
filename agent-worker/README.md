@@ -153,8 +153,10 @@ unset AGENT_MANAGER_API_TOKEN
 ```
 
 The Manager stores and publishes the `goal`; the worker uses the goal for the
-model request. The current Manager does not yet consume `agent.runs.completed`,
-so the database run may remain `queued` even after the worker reports success.
+model request. The Manager consumes `agent.runs.completed` and updates the database run to
+`completed` or `failed`. The worker result is also stored under the run's
+`metadata.result` field. The Open WebUI Pipe can poll the run endpoint to show
+the final status.
 
 For a deterministic test without a model call, add a `script` string to
 `metadata`. The worker still requires `ALLOW_GENERATED_CODE=1` before it will

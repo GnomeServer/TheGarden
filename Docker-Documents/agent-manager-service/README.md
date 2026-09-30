@@ -6,7 +6,7 @@ This Compose project deploys the first control-plane slice for agentic coding ru
 - `postgres`: private PostgreSQL database for manager state
 - `nats`: private NATS server with JetStream enabled and persistent storage
 
-The manager does not execute repository code. Workers consume the durable NATS events. The current one-shot dynamic smoke-test worker is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md).
+The manager does not execute repository code. Workers consume the durable NATS events and publish completion events. The manager now consumes `agent.runs.completed` through a durable JetStream consumer and updates the run status and result metadata. The current one-shot dynamic smoke-test worker is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md).
 
 ## Networks
 
@@ -99,7 +99,7 @@ bash verify-nats.txt
 bash consume-test-event.txt
 ```
 
-`submit-test-run.txt` stores the most recent run ID in `.last-run-id`, which is ignored by Git. A run submitted without a matching worker is expected to remain `queued`. The current worker smoke test also leaves the database row queued because the manager does not yet consume `agent.runs.completed`; inspect the worker output and NATS event for completion.
+`submit-test-run.txt` stores the most recent run ID in `.last-run-id`, which is ignored by Git. A run submitted without a matching worker remains `queued`. When a worker publishes `agent.runs.completed`, the manager updates the database status and stores the worker result under `metadata.result`.
 
 ## Submit a run
 
@@ -143,7 +143,7 @@ For the worker smoke test, include matching metadata in the request:
 
 The worker must be waiting before the request is submitted because its current
 consumer is one-shot and starts at new events. The stream is named `AGENT_RUNS`
-and is stored in the `nats_data` volume.
+and is stored in the `nats_data` volume. The manager's durable completion consumer is named `agent-manager-completions` and replays retained completion events after a restart.
 
 ## Existing service endpoints
 

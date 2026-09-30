@@ -149,28 +149,18 @@ async def process_message(js: Any, message: Any) -> None:
     event = json.loads(message.data.decode("utf-8"))
     metadata = event.get("metadata") or {}
 
+    # Do not acknowledge another worker's task. A worker-specific failure is
+    # reported only after confirming that this worker owns the event.
     if metadata.get("worker_id") != WORKER_ID:
         raise RuntimeError(
             f"task is for {metadata.get('worker_id')!r}, not {WORKER_ID!r}"
         )
-    if metadata.get("operation") != "create-python-script":
-        raise RuntimeError("unsupported worker operation")
 
     run_id = event.get("run_id")
-    goal = event.get("goal")
     if not isinstance(run_id, str) or not run_id:
         raise RuntimeError("event is missing run_id")
-    if not isinstance(goal, str) or not goal.strip():
-        raise RuntimeError("event is missing a non-empty goal")
-    if not ALLOW_GENERATED_CODE:
-        raise RuntimeError(
-            "refusing to execute generated code; set ALLOW_GENERATED_CODE=1 "
-            "only on a disposable/test worker"
-        )
 
-    run_dir = WORKSPACE / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
-    script_path = run_dir / "generated_agent.py"
+    script_path = WORKSPACE / run_id / "generated_agent.py"
     result: dict[str, Any] = {
         "event": "run.completed",
         "run_id": run_id,
@@ -181,6 +171,20 @@ async def process_message(js: Any, message: Any) -> None:
     }
 
     try:
+        if metadata.get("operation") != "create-python-script":
+            raise RuntimeError("unsupported worker operation")
+
+        goal = event.get("goal")
+        if not isinstance(goal, str) or not goal.strip():
+            raise RuntimeError("event is missing a non-empty goal")
+        if not ALLOW_GENERATED_CODE:
+            raise RuntimeError(
+                "refusing to execute generated code; set ALLOW_GENERATED_CODE=1 "
+                "only on a disposable/test worker"
+            )
+
+        run_dir = WORKSPACE / run_id
+        run_dir.mkdir(parents=True, exist_ok=False)
         source, source_origin = await generate_source(goal, metadata)
         compile(source, str(script_path), "exec")
         script_path.write_text(source, encoding="utf-8")
@@ -216,6 +220,8 @@ async def process_message(js: Any, message: Any) -> None:
 
         result["source"] = source_origin
     except Exception as exc:
+        # Even model, validation, workspace, and compile failures become a
+        # completion event so the manager can mark the database run failed.
         result["error"] = str(exc)[:2000]
 
     await js.publish("agent.runs.completed", json.dumps(result).encode("utf-8"))
