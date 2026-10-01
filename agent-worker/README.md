@@ -115,7 +115,7 @@ mkdir -p ~/agent-worker
 
 scp "$REPO_ROOT/agent-worker/worker.py" \
     "$REPO_ROOT/agent-worker/requirements.txt" \
-    inkii@100.98.125.127:~/agent-worker/
+    <worker-id>@<tailnet-user-IP>:~/agent-worker/
 ```
 
 Create the environment once:
@@ -136,7 +136,7 @@ the same `WORKER_ROLE` and `WORKER_CONSUMER` values:
 
 ```bash
 export NATS_URL='nats://100.94.49.45:4222'
-export WORKER_ID='inkii'
+export WORKER_ID='<worker-id>'
 export WORKER_ROLE='coder'
 export WORKER_CONSUMER='agent-workers-coder'
 export AGENT_WORKSPACE="$HOME/agent-workspace"
