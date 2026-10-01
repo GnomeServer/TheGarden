@@ -6,7 +6,7 @@ This Compose project deploys the first control-plane slice for agentic coding ru
 - `postgres`: private PostgreSQL database for manager state
 - `nats`: private NATS server with JetStream enabled and persistent storage
 
-The manager does not execute repository code. Workers consume the durable NATS events and publish completion events. The manager now consumes `agent.runs.completed` through a durable JetStream consumer and updates the run status and result metadata. The current one-shot dynamic smoke-test worker is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md).
+The manager does not execute repository code. Long-running workers consume durable NATS events and publish completion events. The manager consumes `agent.runs.completed` through a durable JetStream consumer and updates the run status and result metadata. The pooled worker protocol is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md).
 
 ## Networks
 
@@ -21,17 +21,20 @@ The manager does **not** join `forgejo_internal`; Forgejo's database network rem
 Caddy and the Open WebUI Compose project must already be running so that the two external networks exist:
 
 ```bash
-cd /home/infra-lab-user/caddy-service
+export REPO_ROOT=/path/to/TheGarden
+
+cd "$REPO_ROOT/Docker-Documents/caddy_service"
 sudo docker compose up -d caddy
 
-cd /home/infra-lab-user/open-webui-service
+cd "$REPO_ROOT/Docker-Documents/open_webui_services"
 sudo docker compose up -d
 ```
 
 ## Configure and start
 
 ```bash
-cd /home/infra-lab-user/agent-manager-service
+export REPO_ROOT=/path/to/TheGarden
+cd "$REPO_ROOT/Docker-Documents/agent-manager-service"
 cp .env.example .env
 chmod 600 .env
 ```
@@ -132,18 +135,20 @@ The cancellation endpoint publishes to:
 agent.runs.cancelled
 ```
 
-For the worker smoke test, include matching metadata in the request:
+For pooled worker work, omit `worker_id` and include the worker role:
 
 ```json
 {
-  "worker_id": "inkii",
+  "worker_role": "coder",
   "operation": "create-python-script"
 }
 ```
 
-The worker must be waiting before the request is submitted because its current
-consumer is one-shot and starts at new events. The stream is named `AGENT_RUNS`
-and is stored in the `nats_data` volume. The manager's durable completion consumer is named `agent-manager-completions` and replays retained completion events after a restart.
+The stream is named `AGENT_RUNS` and is stored in the `nats_data` volume. Coder
+workers share a durable consumer such as `agent-workers-coder`; the first
+available worker pulls each event. The manager's durable completion consumer is
+named `agent-manager-completions` and replays retained completion events after
+a restart.
 
 ## Existing service endpoints
 
@@ -173,6 +178,78 @@ handle @agent_manager {
 ```
 
 Keep the bearer token secret and prefer calling `http://agent-manager:8000` directly from an Open WebUI Function while both containers are on `caddy_proxy`.
+
+## Troubleshooting
+
+### NATS port and handshake
+
+The base Compose file exposes NATS only to Docker networks. Remote workers
+require the test override, which binds port `4222` to the service host's
+Tailscale address:
+
+```bash
+cd "$REPO_ROOT/Docker-Documents/agent-manager-service"
+sudo docker compose \
+  -f compose.yml \
+  -f compose.worker-test.yml \
+  ps nats
+sudo ss -ltnp | grep ':4222'
+printf '' | nc -v 100.94.49.45 4222
+```
+
+A working NATS endpoint sends an `INFO` line. `Connection refused` means the
+port is not published or NATS is not listening. An empty response while
+expecting `INFO` is a handshake/endpoint problem, not an empty queue.
+
+### Inspect NATS clients and consumers
+
+The monitoring port is internal to the NATS container:
+
+```bash
+sudo docker compose \
+  -f compose.yml \
+  -f compose.worker-test.yml \
+  exec -T nats wget -q -O - \
+  http://127.0.0.1:8222/connz
+
+sudo docker compose \
+  -f compose.yml \
+  -f compose.worker-test.yml \
+  exec -T nats wget -q -O - \
+  'http://127.0.0.1:8222/jsz?streams=true&consumers=true'
+```
+
+The worker pool should use one shared durable consumer per role, such as
+`agent-workers-coder`. A worker's client name includes its `WORKER_ID`.
+
+### Worker environment
+
+The worker process must receive its variables in the same shell or service
+unit that starts it:
+
+```text
+NATS_URL=nats://100.94.49.45:4222
+WORKER_ID=<unique-worker-id>
+WORKER_ROLE=coder
+WORKER_CONSUMER=agent-workers-coder
+MODEL_BASE_URL=https://infra-lab-services.tail494f6d.ts.net/litellm/v1
+MODEL_NAME=luna
+MODEL_API_KEY=<worker-scoped-LiteLLM-key>
+ALLOW_GENERATED_CODE=1
+```
+
+Do not use the LiteLLM master key as `MODEL_API_KEY`. Do not place any key in
+Git. The worker should use the existing Caddy root CA rather than
+`MODEL_TLS_INSECURE=1` for normal operation.
+
+### Duplicate completion events
+
+A single delivery should produce one terminal completion event. If a run has
+both `failed` and `completed` results, compare `run_id`, `worker_id`, and
+`hostname`. Stop stale worker processes, ensure all workers share the same
+role consumer, and keep the model/script runtime below the JetStream
+`ack_wait` window. A redelivery can occur when the worker takes longer than
+`ack_wait` to acknowledge the event.
 
 ## Backups
 

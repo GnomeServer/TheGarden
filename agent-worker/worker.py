@@ -16,21 +16,18 @@ from typing import Any
 
 import nats
 from nats.errors import TimeoutError as NatsTimeoutError
-from datetime import timedelta
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 
-NATS_URL = os.getenv("NATS_URL", "nats://100.94.49.45:4222")
-WORKER_ID = os.getenv("WORKER_ID", "inkii")
+NATS_URL = os.getenv("NATS_URL", "nats://127.0.0.1:4222")
+WORKER_ID = os.getenv("WORKER_ID", "worker-1")
 WORKER_ROLE = os.getenv("WORKER_ROLE", "coder")
 WORKSPACE = Path(
     os.getenv("AGENT_WORKSPACE", str(Path.home() / "agent-workspace"))
 )
 WORKER_CONSUMER = os.getenv(
-    "WORKER_CONSUMER", f"agent-workers-coder"
+    "WORKER_CONSUMER", f"agent-workers-{WORKER_ROLE}"
 )
-
-print(f"connecting to NATSat {NATS_URL}", flush=True)
 
 # MODEL_BASE_URL should include the OpenAI-compatible /v1 path, for example:
 # https://infra-lab-services.tail494f6d.ts.net/litellm/v1
@@ -57,13 +54,15 @@ Return only the source code, without Markdown fences or commentary.
 Use only the Python standard library. The script must operate only in its
 current working directory, must not use the network, must not invoke a shell
 or subprocess, must not access secrets, and must finish in a bounded amount of
-time. This is a headless Linux worker: do not import ktinker or other GUI/desktop
-modules, do not require third-party packages, and do not install packages. If a GUI
-is requested, create a text or file-based alternative and explain the assumption.
-Make reasonable assumptions when details are missing and state them in the final
-stdout output. Make the result deterministic when the request involves
-generated data. Include useful validatoin and concise stdout output.
-Create any requested artifacts in the current working directory.
+time. Do not call input(), read from stdin, ask follow-up questions, or wait
+for human input. This is a headless Linux worker: do not import tkinter or
+other GUI/desktop modules, do not require third-party packages, and do not
+install packages. If a GUI is requested, create a text or file-based
+alternative and explain the assumption. Make reasonable assumptions when
+details are missing and state them in the final stdout output. Make the result
+deterministic when the request involves generated data.
+Include useful validation and concise stdout output. Create any requested
+artifacts in the current working directory.
 """
 
 
@@ -214,6 +213,7 @@ async def process_message(js: Any, message: Any) -> None:
                 subprocess.run,
                 [sys.executable, str(script_path)],
                 cwd=run_dir,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=SCRIPT_TIMEOUT,
@@ -262,7 +262,7 @@ async def main() -> None:
         durable=WORKER_CONSUMER,
         config=ConsumerConfig(
             ack_policy=AckPolicy.EXPLICIT,
-            ack_wait=300,
+            ack_wait=900,
             deliver_policy=DeliverPolicy.NEW,
         ),
     )

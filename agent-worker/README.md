@@ -1,177 +1,328 @@
-# Agent worker smoke test
+# Agent worker
 
-`worker.py` is a one-shot Agent Manager worker for the first remote-worker
-smoke test. It waits for one `agent.runs.created` event, uses the run's `goal`
-to request a Python script from the configured OpenAI-compatible model gateway,
-executes the generated script, publishes `agent.runs.completed`, prints the
-result, and exits.
+`worker.py` is a long-running Agent Manager worker. It consumes
+`agent.runs.created` events from NATS JetStream, asks the configured
+OpenAI-compatible gateway to generate a Python script, executes that script in
+a per-run workspace, and publishes one `agent.runs.completed` event.
 
-The worker source is:
-
-```text
-/home/infra-lab-user/TheGarden/agent-worker/worker.py
-```
-
-The worker currently supports the `create-python-script` operation only. A
-script can also be supplied directly as `metadata.script` for deterministic
-pipeline tests, bypassing the model call.
+The worker currently supports the `create-python-script` operation. A script
+may also be supplied as `metadata.script` for deterministic pipeline tests,
+bypassing the model call.
 
 > **Test-worker safety:** generated code runs as the worker operating-system
-> user, directly on the worker host. This is not yet the sandbox described in
-> the architecture documents. Use a disposable/test worker, keep the model
-> prompt constrained, and do not provide production credentials or mount
-> sensitive directories. `ALLOW_GENERATED_CODE=1` is an explicit opt-in.
+> user. This is not a sandbox. Use a disposable/test worker, do not provide
+> production credentials, and keep `ALLOW_GENERATED_CODE=1` disabled except for
+> controlled tests.
 
-## Network arrangement
+## Repository layout
 
-The Agent Manager and NATS server run on `infra-lab-services`. The test
-Compose override exposes NATS only on that VM's Tailscale address:
+Run repository commands from the checkout root:
+
+```bash
+export REPO_ROOT=/path/to/TheGarden
+```
+
+The worker source and dependency file are:
+
+```text
+$REPO_ROOT/agent-worker/worker.py
+$REPO_ROOT/agent-worker/requirements.txt
+```
+
+The Agent Manager Compose project is stored in the repository at:
+
+```text
+$REPO_ROOT/Docker-Documents/agent-manager-service
+```
+
+The worker itself is copied to a remote worker directory such as:
+
+```text
+~/agent-worker
+```
+
+That remote runtime directory is not a Git checkout and should contain no
+committed secrets.
+
+## Worker-pool behavior
+
+Workers use a shared durable pull consumer for load balancing. Every worker
+that provides the same role uses the same consumer name:
+
+```text
+worker_id       unique identity, for example inkii or donatello
+worker_role     capability label, normally coder
+worker_consumer shared JetStream consumer, normally agent-workers-coder
+```
+
+An available worker pulls the next event. The Open WebUI Pipe should not choose
+a worker for normal jobs. It should submit role metadata:
+
+```json
+{
+  "worker_role": "coder",
+  "operation": "create-python-script"
+}
+```
+
+A specific `worker_id` may be included for an intentional targeted test, but it
+should not be used for pooled work.
+
+## NATS network
+
+The Agent Manager and NATS server run on the Docker service host. The test
+Compose override publishes NATS only on that host's Tailscale address:
 
 ```text
 NATS server: 100.94.49.45:4222
-worker:      inkii (100.98.125.127)
 ```
 
-This is a Tailscale path; no Internet router port-forward or inbound NAT rule
-is needed. Do not bind the test port to `0.0.0.0` while NATS has no
-authentication/TLS configured.
+This is a Tailscale-only path. Do not add a public router rule or bind the test
+port to `0.0.0.0` while NATS has no authentication/TLS configuration.
 
-On the service VM, from `/home/infra-lab-user/agent-manager-service`, apply the
-test-only override and verify the listener:
+From the repository checkout on the service host, start NATS with the worker
+override:
 
 ```bash
+cd "$REPO_ROOT/Docker-Documents/agent-manager-service"
+
 sudo docker compose \
-  -f compose.yml -f compose.worker-test.yml \
+  -f compose.yml \
+  -f compose.worker-test.yml \
   up -d --force-recreate nats
 
 sudo ss -ltnp | grep ':4222'
 ```
 
-The listener should show `100.94.49.45:4222`, not only
-`127.0.0.1:4222`. From `inkii`, verify the path before starting Python:
+The listener should include `100.94.49.45:4222`, not only
+`127.0.0.1:4222`. Test the path from a worker before starting Python:
 
 ```bash
 nc -vz 100.94.49.45 4222
 ```
 
-If the VM's Tailscale address changes, set `NATS_BIND_ADDRESS` to the new
-address when running Compose. The override defaults to the current VM address.
+A raw NATS handshake should begin with `INFO`. `Connection refused` means the
+Compose port override is not active or NATS is not listening. An
+`empty response from server when expecting INFO message` is a connection or
+endpoint problem, not an empty JetStream queue.
 
-## Install on `inkii`
+## Install or update a worker
 
-Copy the worker and its dependency file to the worker, then use a virtual
-environment:
+Copy the source files through a trusted SSH channel:
 
 ```bash
 mkdir -p ~/agent-worker
-# Run this scp command on infra-lab-services, or copy the two files by another
-# trusted method:
-scp /home/infra-lab-user/TheGarden/agent-worker/{worker.py,requirements.txt} \
-  inkii@100.98.125.127:~/agent-worker/
 
+scp "$REPO_ROOT/agent-worker/worker.py" \
+    "$REPO_ROOT/agent-worker/requirements.txt" \
+    inkii@100.98.125.127:~/agent-worker/
+```
+
+Create the environment once:
+
+```bash
 cd ~/agent-worker
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-## Configure the model gateway
+Do not copy `.env` files, private keys, LiteLLM master keys, or API tokens from
+the repository.
 
-The worker calls the LiteLLM OpenAI-compatible endpoint using the worker-scoped
-virtual key, not the LiteLLM master key:
+## Worker environment
+
+Each worker needs a unique `WORKER_ID`. Workers with the same capability use
+the same `WORKER_ROLE` and `WORKER_CONSUMER` values:
+
+```bash
+export NATS_URL='nats://100.94.49.45:4222'
+export WORKER_ID='inkii'
+export WORKER_ROLE='coder'
+export WORKER_CONSUMER='agent-workers-coder'
+export AGENT_WORKSPACE="$HOME/agent-workspace"
+export ALLOW_GENERATED_CODE=1
+```
+
+The model gateway uses the worker-scoped LiteLLM virtual key:
 
 ```bash
 export MODEL_BASE_URL='https://infra-lab-services.tail494f6d.ts.net/litellm/v1'
 export MODEL_NAME='luna'
-export MODEL_API_KEY='<contents of the worker virtual key>'
+export MODEL_API_KEY="$(cat ~/.config/agent-worker/luna-worker-api-key)"
 ```
 
-Copy the virtual key to the worker through a secure method and do not commit or
-paste it into the repository. Prefer installing the Caddy internal CA on the
-worker so normal TLS verification succeeds. For a temporary lab test only, if
-the worker does not trust that CA, use:
+Do not use `LITELLM_MASTER_KEY` or the LiteLLM backend key as
+`MODEL_API_KEY`. The public model name is `luna`; `openai/luna` is a LiteLLM
+backend/provider configuration value, not a replacement worker credential.
+
+For the internal Caddy CA, prefer a trusted CA bundle:
 
 ```bash
-export MODEL_TLS_INSECURE=1
+export SSL_CERT_FILE="$HOME/.pi/agent/certs/caddy-local-root.crt"
+export MODEL_TLS_INSECURE=0
 ```
 
-`MODEL_TLS_INSECURE=1` disables certificate verification for the model request
-and should not be used for a persistent deployment.
+`MODEL_TLS_INSECURE=1` is only a temporary diagnostic bypass and must not be
+used for a persistent deployment. The URL must use the Caddy hostname, not the
+Tailscale IP, because the certificate is issued for the hostname.
 
-## Run the worker
+## Start the worker
 
-Start the worker **before** submitting the run:
+The worker is long-running and should remain in the foreground while testing:
 
 ```bash
 cd ~/agent-worker
-export NATS_URL='nats://100.94.49.45:4222'
-export WORKER_ID='inkii'
-export AGENT_WORKSPACE="$HOME/agent-workspace"
-export ALLOW_GENERATED_CODE=1
-.venv/bin/python worker.py
+.venv/bin/python -u worker.py 2>&1 | tee -a ~/agent-worker/worker.log
 ```
 
-Optional limits are available for the smoke test:
+An idle worker should not print an error for an empty queue. The pull timeout is
+caught and the worker waits for the next event. A worker connection error is
+different and should be investigated rather than hidden.
+
+Optional limits:
 
 ```bash
 export MODEL_TIMEOUT=120
-export SCRIPT_TIMEOUT=30
+export SCRIPT_TIMEOUT=300
 export MAX_SCRIPT_CHARS=30000
 export MAX_OUTPUT_CHARS=12000
 ```
 
-The worker exits after one event. A fresh worker process and a fresh run are
-needed for another test. The generated file is written to:
+The generated file is written to:
 
 ```text
 ~/agent-workspace/<run-id>/generated_agent.py
 ```
 
-## Submit a dynamic prompt
+## Generated-script contract
 
-From the Agent Manager VM, submit this only after the worker is waiting. The
-metadata must match the worker exactly:
+Generated code is executed directly by the worker user. The model prompt
+requires scripts to:
 
-```bash
-cd /home/infra-lab-user/agent-manager-service
-read -r -s -p 'Agent Manager token: ' AGENT_MANAGER_API_TOKEN
-printf '\n'
-curl -fsS \
-  -H "Authorization: Bearer ${AGENT_MANAGER_API_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  http://127.0.0.1:8090/v1/runs \
-  -d '{
-    "goal": "Create a dependency-free Python 3 script that generates 5,000 deterministic synthetic transaction records using a fixed random seed. Validate every record, write transactions.jsonl, write report.json with counts by status, total amount, average amount, and the five largest transactions, then print a concise summary.",
-    "forgejo_repository": "owner/project",
-    "base_ref": "main",
-    "model": "luna",
-    "metadata": {
-      "worker_id": "inkii",
-      "operation": "create-python-script"
-    }
-  }'
-unset AGENT_MANAGER_API_TOKEN
-```
+- use only the Python standard library already available on the worker;
+- operate only in the current run directory;
+- avoid network, shell, subprocess, and secret access;
+- avoid `input()`, stdin, follow-up questions, and GUI modules such as
+  `tkinter`;
+- finish within the configured timeout;
+- print a concise final result and exit.
 
-The Manager stores and publishes the `goal`; the worker uses the goal for the
-model request. The Manager consumes `agent.runs.completed` and updates the database run to
-`completed` or `failed`. The worker result is also stored under the run's
-`metadata.result` field. The Open WebUI Pipe can poll the run endpoint to show
-the final status.
+`stdin` is connected to `DEVNULL`. A generated script that calls `input()` will
+receive `EOFError` and be reported as failed. Interactive human-in-the-loop
+execution is not implemented yet; it would require a `waiting_for_input` state,
+a worker protocol for resuming a process, and Pipe support.
 
-For a deterministic test without a model call, add a `script` string to
-`metadata`. The worker still requires `ALLOW_GENERATED_CODE=1` before it will
-execute it:
+Do not allow generated code to run `pip install`, `apt`, or another package
+manager. If a dependency is intentionally supported, install a pinned version
+in the worker image or virtual environment through Ansible before running jobs.
+`tkinter`, when required, is an operating-system package such as
+`python3-tk` and also requires a display for most GUI operations; it is not a
+suitable dependency for the current headless worker.
+
+## Submit a pooled run
+
+The Pipe or a test client should omit `worker_id` for pooled work:
 
 ```json
-"metadata": {
-  "worker_id": "inkii",
-  "operation": "create-python-script",
-  "script": "print('provided test script')"
+{
+  "goal": "Create a dependency-free Python script that writes a report.json file.",
+  "model": "luna",
+  "metadata": {
+    "worker_role": "coder",
+    "operation": "create-python-script"
+  }
 }
 ```
 
-If the worker prints `ConnectionRefusedError`, NATS is still bound to loopback
-or the override was not applied. If it reports a model API error, check the
-LiteLLM URL, virtual key, Caddy certificate trust, and `MODEL_NAME`. If it
-reports that the operation or worker does not match, submit a fresh run with
-the exact metadata above.
+For a deterministic test, provide a script string:
+
+```json
+{
+  "goal": "Run the supplied test script",
+  "metadata": {
+    "worker_role": "coder",
+    "operation": "create-python-script",
+    "script": "print('provided test script')"
+  }
+}
+```
+
+The Manager stores the run, publishes `agent.runs.created`, and consumes the
+worker's `agent.runs.completed` event. The worker result is stored under
+`metadata.result`.
+
+## Troubleshooting
+
+### NATS connection refused
+
+On the service host, use both Compose files and check the published port:
+
+```bash
+cd "$REPO_ROOT/Docker-Documents/agent-manager-service"
+sudo docker compose -f compose.yml -f compose.worker-test.yml ps nats
+sudo ss -ltnp | grep ':4222'
+```
+
+In the same shell that starts the worker, verify:
+
+```bash
+printf 'NATS_URL=%s\n' "$NATS_URL"
+```
+
+It must be `nats://100.94.49.45:4222`, not the default local URL
+`nats://127.0.0.1:4222`.
+
+### Empty queue timeout
+
+A `nats.errors.TimeoutError` from `subscription.fetch()` after the configured
+wait is normal when no job is available. The worker catches it and continues.
+It should not be printed as a failure.
+
+### Empty response while expecting NATS INFO
+
+This happens during the NATS protocol handshake and is not an empty queue. Test
+the endpoint with `nc` or a small socket script. Confirm that the worker is
+using the same URL that returned an `INFO` line.
+
+### Duplicate completed and failed results
+
+A single delivery should produce one completion event. Check the `run_id`,
+`worker_id`, and `hostname` in both events. Duplicate results usually mean an
+old worker process is still subscribed, different workers are using different
+consumer names, or the job exceeded the JetStream acknowledgement window.
+
+Keep the maximum model and script time below `ack_wait` (currently 900 seconds)
+or increase `ack_wait` when intentionally allowing longer jobs. Stop stale
+worker processes before testing:
+
+```bash
+pgrep -af worker.py
+```
+
+### TLS certificate failure
+
+Extract the existing Caddy root certificate from the running Caddy container,
+copy only `root.crt` to the worker, and use the Caddy hostname in
+`MODEL_BASE_URL`. Never copy `root.key` and do not generate a second CA for the
+same Caddy deployment.
+
+### LiteLLM or model timeout
+
+Test the LiteLLM `/v1/models` and `/v1/chat/completions` endpoints with the
+worker virtual key. If the local gateway request works but the external request
+fails, investigate Caddy/TLS. If both requests work but the worker times out,
+compare `MODEL_TIMEOUT` with LiteLLM's backend timeout and inspect the LiteLLM
+logs.
+
+### Generated module or GUI failure
+
+Inspect the generated source:
+
+```bash
+grep -nE '^(import|from)|input\(|tkinter' \
+  ~/agent-workspace/<run-id>/generated_agent.py
+```
+
+Do not install arbitrary packages at runtime. Change the request to require a
+standard-library, headless, file-based result, or provision an approved pinned
+dependency before running the job.

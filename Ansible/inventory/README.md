@@ -13,6 +13,12 @@ proxmox_hosts
 
 docker_hosts
 └── infra-lab-services
+
+agent_workers
+├── inkii
+├── naruto
+├── raphael
+└── donatello
 ```
 
 `server-debian` is the local Proxmox host used by the audit and Proxmox validation playbooks. `infra-lab-services` is the local Docker VM used by `playbooks/docker-services.yml`.
@@ -22,7 +28,7 @@ Both targets currently use a local connection. The Docker VM uses `/usr/bin/pyth
 Inspect the active inventory from the Ansible project directory:
 
 ```bash
-cd /home/infra-lab-user/TheGarden/Ansible
+cd TheGarden/Ansible
 ansible-inventory --graph
 ansible-inventory --host infra-lab-services
 ```
@@ -38,12 +44,12 @@ inventory/group_vars/docker_hosts.yml
 They list the live Compose projects in their required startup order:
 
 ```text
-/home/infra-lab-user/caddy-service
-/home/infra-lab-user/forgejo-service
-/home/infra-lab-user/open-webui-service
-/home/infra-lab-user/llama-service
-/home/infra-lab-user/grafana-service
-/home/infra-lab-user/agent-manager-service
+TheGarden/Docker-Documents/caddy_service
+TheGarden/Docker-Documents/forgejo
+TheGarden/Docker-Documents/open_webui_services
+TheGarden/Docker-Documents/llama_services
+TheGarden/Docker-Documents/grafana_services
+TheGarden/Docker-Documents/agent-manager-service
 ```
 
 The Docker deployment uses the `community.docker` collection:
@@ -60,30 +66,38 @@ The Compose project `.env` files remain on the Docker VM and are intentionally n
 
 ## Agent worker inventory
 
-The first remote worker is defined separately in `inventory/worker-1.yml` so it
-does not affect the default local audit or Docker deployment inventory:
-
-```text
-inkii
-├── Tailscale address: 100.98.125.127
-├── SSH user: inkii
-└── worker_role: coder
-```
-
-Inspect or test that inventory explicitly:
+The approved worker nodes are now in the active `inventory/hosts.yml` under the
+`agent_workers` group. This is the correct location when worker playbooks should
+be runnable through the default Ansible configuration:
 
 ```bash
-cd /home/infra-lab-user/TheGarden/Ansible
-ansible-inventory -i inventory/worker-1.yml --host inkii
-ansible -i inventory/worker-1.yml inkii -m ansible.builtin.ping
+cd TheGarden/Ansible
+ansible-inventory --graph
+ansible-inventory --host inkii
+ansible agent_workers -m ansible.builtin.ping
 ```
 
-The current worker runtime is a manual smoke-test deployment rather than an
-Ansible role. Install the virtual environment, NATS connection settings,
-LiteLLM worker key, and `worker.py` according to
-[`../../agent-worker/README.md`](../../agent-worker/README.md). Do not add the
-worker inventory to `hosts.yml` until SSH authorization and the desired worker
-playbooks have been reviewed.
+The current workers are:
+
+| Host | Tailscale address | SSH user | Role |
+| --- | --- | --- | --- |
+| `inkii` | `100.98.125.127` | `inkii` | `coder` |
+| `naruto` | `100.88.92.78` | `naruto` | `coder` |
+| `raphael` | `100.116.35.103` | `raphael` | `coder` |
+| `donatello` | `100.94.145.104` | `bgurrol4` | `coder` |
+
+The existing `inventory/worker-1.yml` is an optional single-worker inventory
+for isolated testing. Do not load it together with `hosts.yml` unless you
+intentionally want to maintain duplicate definitions for `inkii`.
+
+The worker runtime is documented in
+[`../../agent-worker/README.md`](../../agent-worker/README.md). The worker role
+scaffold targets `agent_workers`; use `--limit` during initial rollout, for
+example:
+
+```bash
+ansible-playbook playbooks/agent-workers.yml --limit inkii
+```
 
 ## Proxmox guest template
 

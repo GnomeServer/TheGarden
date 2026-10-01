@@ -21,7 +21,13 @@ client -> Caddy on the VM -> application container
 
 A direct request to `https://infra-lab-services.tail494f6d.ts.net/grafana/login` returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML. Grafana, Prometheus, and Node Exporter are deployed by the `grafana_services` Compose project and Caddy is deployed separately. Forgejo and PostgreSQL are deployed by the `forgejo/` Compose project and Forgejo is available under `/forgejo/`; its first administrator and private-service settings must be configured during initial setup.
 
-Open WebUI, Ollama, and llama.cpp are also running on the VM. The Agent Manager control-plane stack is currently deployed from the live checkout at `/home/infra-lab-user/agent-manager-service` and includes the manager API, a private PostgreSQL database, and NATS JetStream. Its API is loopback-bound on port `8090` and is available to containers on `caddy_proxy` at `http://agent-manager:8000`. The remote worker smoke test reaches NATS on the VM's Tailscale address and is documented in [`../agent-worker/README.md`](../agent-worker/README.md).
+Open WebUI, Ollama, and llama.cpp are also running on the VM. The Agent
+Manager control-plane Compose project is stored in
+`TheGarden/Docker-Documents/agent-manager-service` and includes the manager
+API, a private PostgreSQL database, and NATS JetStream. Its API is
+loopback-bound on port `8090` and is available to containers on `caddy_proxy` at
+`http://agent-manager:8000`. The remote worker pool reaches NATS on the VM's
+Tailscale address and is documented in [`../agent-worker/README.md`](../agent-worker/README.md).
 
 The VM now has its own Tailscale identity, so other tailnet devices can use the MagicDNS hostname directly. The older `tail494f6d.ts.net` alias is not the canonical service name.
 
@@ -53,6 +59,6 @@ curl -4 -k -i -L --connect-timeout 5 --resolve infra-lab-services.tail494f6d.ts.
 
 Do not test with only `https://10.1.10.2/`. Caddy uses the hostname/SNI `infra-lab-services.tail494f6d.ts.net`; a direct IP request can fail during the TLS handshake even when the service is healthy.
 
-Ansible deployment is documented in [`../Ansible/README.md`](../Ansible/README.md). Run `Ansible/playbooks/docker-services.yml` from the Ansible project to deploy the Compose projects in dependency order. The playbook currently points at the live Compose checkouts under `/home/infra-lab-user/`; their `.env` files remain local to the VM.
+Ansible deployment is documented in [`../Ansible/README.md`](../Ansible/README.md). Run `Ansible/playbooks/docker-services.yml` from the Ansible project to deploy the Compose projects in dependency order. The Compose source directories are under `Docker-Documents/`; their `.env` files remain local deployment files and are not committed.
 
 Do not paste `docker compose config` output into chat or tickets. It expands environment variables and can reveal service passwords or API tokens.

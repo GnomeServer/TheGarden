@@ -61,24 +61,15 @@ The Ansible project and its supporting directories are grouped under `Ansible/`.
 | Hardware | Dell Pro Max 14 MC14250 |
 | Ansible | `ansible-core 2.21.4` |
 
-The active checkout is:
-
-```text
-/home/infra-lab-user/TheGarden
-```
-
-The Ansible project root is:
-
-```text
-/home/infra-lab-user/TheGarden/Ansible
-```
+The repository checkout is `TheGarden/`. The Ansible project root is
+`TheGarden/Ansible/`.
 
 ## Using Ansible
 
 Run Ansible from its project directory so `Ansible/ansible.cfg` is discovered automatically:
 
 ```bash
-cd /home/infra-lab-user/TheGarden/Ansible
+cd TheGarden/Ansible
 export PATH="$HOME/.local/bin:$PATH"
 
 ansible --version
@@ -137,7 +128,7 @@ The common role confirms the Debian-family platform and reports host information
 The Proxmox role validates the completed in-place installation. Run it directly with:
 
 ```bash
-cd /home/df-server/lab-infra/Ansible
+cd TheGarden/Ansible
 ansible-playbook playbooks/proxmox-audit.yml
 ```
 
@@ -145,14 +136,14 @@ The role does not install Proxmox or modify networking. The staged installation 
 
 ## Inventory and Tailscale
 
-`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian` and the local Docker target `infra-lab-services`. The Docker target is in the `docker_hosts` group and uses `/usr/bin/python3`. The first worker smoke-test host, `inkii`, is defined separately in `Ansible/inventory/worker-1.yml` and is not loaded by the default inventory. It currently requires manual runtime setup; see [`agent-worker/README.md`](agent-worker/README.md). Remote Tailscale peers are available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling them.
+`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and the approved worker nodes in the `agent_workers` group. The Docker target is in the `docker_hosts` group and uses `/usr/bin/python3`; worker hosts use their remote Python interpreters. The current worker runtime still requires manual setup; see [`agent-worker/README.md`](agent-worker/README.md). `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated tests and is not loaded separately by default. Remote Tailscale peers are also available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling additional peers.
 
 Observed Tailscale nodes:
 
 - `server-debian` — `100.102.154.23` — this host
 - `infra-lab-services` — `100.94.49.45` — active VM
 - `donatello` — `100.94.145.104` — active
-- `inkii` — `100.98.125.127` — worker smoke-test host
+- `inkii` — `100.98.125.127` — coder worker
 - `naruto-dell-pro-max-14-mc14250` — `100.88.92.78`
 - `raphael` — `100.116.35.103` — active
 
@@ -167,7 +158,7 @@ git@github.com:GnomeServer/TheGarden.git
 Check the working tree from the repository root:
 
 ```bash
-cd /home/infra-lab-user/TheGarden
+cd TheGarden
 git status
 git log --oneline --decorate -5
 ```
@@ -193,7 +184,7 @@ The `infra-lab-services` VM currently runs these Docker Compose services:
 - Grafana, Prometheus, and Node Exporter
 - Agent Manager, its PostgreSQL database, and NATS JetStream
 
-Caddy is the HTTPS entry point; Grafana is available under `/grafana/`, Forgejo under `/forgejo/`, and the LiteLLM gateway under `/litellm/`. Agent Manager is currently a live checkout at `/home/infra-lab-user/agent-manager-service`; its source and Compose project have not yet been moved into TheGarden. The remote worker smoke test uses NATS over the VM's Tailscale address and is documented in [`agent-worker/README.md`](agent-worker/README.md). See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the Docker topology and [`Ansible/README.md`](Ansible/README.md) for deployment through Ansible.
+Caddy is the HTTPS entry point; Grafana is available under `/grafana/`, Forgejo under `/forgejo/`, and the LiteLLM gateway under `/litellm/`. The Agent Manager source and Compose project are stored in `Docker-Documents/agent-manager-service`. The remote worker pool uses NATS over the VM's Tailscale address and is documented in [`agent-worker/README.md`](agent-worker/README.md). See [`Docker-Documents/README.md`](Docker-Documents/README.md) for the Docker topology and [`Ansible/README.md`](Ansible/README.md) for deployment through Ansible.
 
 ## Not managed yet
 

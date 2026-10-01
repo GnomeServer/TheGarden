@@ -23,7 +23,7 @@ The installation was performed in two stages using [`install-pve-inplace.sh`](./
 Run this stage from the local console or another session with recovery access. The network configuration is changed during the process.
 
 ```bash
-sudo bash /home/df-server/install-pve-inplace.sh stage1
+sudo bash ./install-pve-inplace.sh stage1
 ```
 
 Stage 1 performs the following actions:
@@ -51,7 +51,7 @@ The output should contain `pve`.
 After confirming that the Proxmox kernel is running, execute:
 
 ```bash
-sudo bash /home/df-server/install-pve-inplace.sh stage2
+sudo bash ./install-pve-inplace.sh stage2
 ```
 
 Stage 2:

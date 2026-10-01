@@ -45,14 +45,15 @@ open-webui_ollama_data   Ollama models and runtime data
 Caddy must already be running and must create the external `caddy_proxy` network:
 
 ```bash
-cd /home/infra-lab-user/caddy-service
+export REPO_ROOT=/path/to/TheGarden
+cd "$REPO_ROOT/Docker-Documents/caddy_service"
 sudo docker compose up -d caddy
 ```
 
 For a new Open WebUI deployment:
 
 ```bash
-cd /home/infra-lab-user/open-webui-service
+cd "$REPO_ROOT/Docker-Documents/open_webui_services"
 cp .env.example .env
 chmod 600 .env
 ```
@@ -142,10 +143,13 @@ http://ollama:11434
 
 ## Using LiteLLM as the shared gateway
 
-LiteLLM is deployed separately in `/home/infra-lab-user/litellm-service`. It exposes the stable model name `luna`, manages virtual API keys in PostgreSQL, and routes requests to the configured inference worker. Start that project before adding the connection:
+LiteLLM is deployed from `TheGarden/Docker-Documents/litellm-service`. It
+exposes the stable model name `luna`, manages virtual API keys in PostgreSQL,
+and routes requests to the configured inference worker. Start that project
+before adding the connection:
 
 ```bash
-cd /home/infra-lab-user/litellm-service
+cd "$REPO_ROOT/Docker-Documents/litellm-service"
 sudo docker compose up -d
 ./create-luna-key.sh
 ```
@@ -154,7 +158,7 @@ In **Admin Panel → Settings → Connections → OpenAI API Connections**, use:
 
 ```text
 Base URL: http://litellm:4000/v1
-API key:  contents of /home/infra-lab-user/litellm-service/.luna-worker-api-key
+API key:  contents of the local LiteLLM `.luna-worker-api-key` file
 Model:    luna
 ```
 
@@ -176,7 +180,7 @@ Use:
 
 ```text
 Base URL: http://llama:8080/v1
-API key:  LLAMA_API_KEY from /home/infra-lab-user/llama-service/.env
+API key:  `LLAMA_API_KEY` from the local llama.cpp `.env` file
 ```
 
 Select the exact model ID returned by llama.cpp's `/v1/models` endpoint. Use LiteLLM for normal Open WebUI and worker traffic when the request should be authenticated with a virtual key and routed as `luna`.
@@ -211,7 +215,7 @@ The separate-container arrangement used here is preferred because Open WebUI and
 - **No models:** run `ollama list`; models must be pulled intentionally, or check that the LiteLLM virtual key is allowed to use `luna`.
 - **Ollama connection error:** Open WebUI should use `http://ollama:11434`, not a host-published port.
 - **LiteLLM 401:** use the generated `.luna-worker-api-key`, not `LITELLM_MASTER_KEY` or the backend `LLAMA_API_KEY`.
-- **LiteLLM backend error:** verify `LUNA_API_BASE` and `LUNA_BACKEND_API_KEY` in `/home/infra-lab-user/litellm-service/.env`.
+- **LiteLLM backend error:** verify `LUNA_API_BASE` and `LUNA_BACKEND_API_KEY` in the local LiteLLM `.env` file.
 - **llama.cpp 401:** use the current `LLAMA_API_KEY` from the llama.cpp `.env`.
 - **llama.cpp model 404:** use the exact model ID returned from `/v1/models`.
 

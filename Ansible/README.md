@@ -12,7 +12,7 @@ The Docker deployment is intentionally separate from the audit-oriented `site.ym
 Run Ansible from this directory so `ansible.cfg` is loaded automatically:
 
 ```bash
-cd /home/infra-lab-user/TheGarden/Ansible
+cd Ansible
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -56,18 +56,21 @@ The project paths are defined in:
 inventory/group_vars/docker_hosts.yml
 ```
 
-The current live Compose checkouts are outside TheGarden:
+The Compose source directories are stored in the repository under:
 
 ```text
-/home/infra-lab-user/caddy-service
-/home/infra-lab-user/forgejo-service
-/home/infra-lab-user/open-webui-service
-/home/infra-lab-user/llama-service
-/home/infra-lab-user/grafana-service
-/home/infra-lab-user/agent-manager-service
+TheGarden/Docker-Documents/caddy_service
+TheGarden/Docker-Documents/forgejo
+TheGarden/Docker-Documents/open_webui_services
+TheGarden/Docker-Documents/llama_services
+TheGarden/Docker-Documents/grafana_services
+TheGarden/Docker-Documents/agent-manager-service
 ```
 
-Each project keeps its own local `.env` file. Those files contain secrets and are not managed by Git. The Ansible playbook currently uses them as-is.
+Each project keeps its local `.env` file outside Git. Those files contain
+secrets and are not managed by the repository. Set the deployment paths in
+`inventory/group_vars/docker_hosts.yml` to the checkout location used by the
+host running Ansible; do not commit secret values.
 
 Validate the playbook:
 
@@ -106,4 +109,8 @@ Generated state is written under `state/` and is ignored by Git because it conta
 
 Do not add Compose `.env` files, API tokens, passwords, private keys, or vault passwords to TheGarden. The next step for a reproducible rebuild is to store secret values in Ansible Vault and template each Compose `.env` file with mode `0600`.
 
-The current Compose source directories should eventually be moved into TheGarden under `Docker-Documents/`, including the agent manager. Until then, `docker_hosts.yml` deliberately points at the working directories under `/home/infra-lab-user/`.
+Worker nodes are grouped under `agent_workers` in the default inventory. The
+worker role/playbook scaffold is available at
+`roles/agent_worker/` and `playbooks/agent-workers.yml`; use `--limit` for an
+initial rollout. Worker runtime configuration and the NATS/LiteLLM
+troubleshooting guide are in `../agent-worker/README.md`.

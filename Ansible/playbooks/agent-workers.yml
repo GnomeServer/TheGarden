@@ -1,0 +1,8 @@
+---                                                                                          
+   - name: Configure DarkFactory agent workers                                                  
+     hosts: agent_workers                                                                       
+     gather_facts: true                                                                         
+     become: false                                                                              
+                                                                                                
+     roles:                                                                                     
+       - agent_worker

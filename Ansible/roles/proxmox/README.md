@@ -4,9 +4,9 @@ This role validates the existing Proxmox VE installation on `server-debian`.
 It is deliberately read-only: it does not install Proxmox, change APT
 repositories, edit networking, restart services, or reboot the host.
 
-The in-place conversion from Debian 13 to Proxmox VE 9 was performed by the
-staged `/home/df-server/install-pve-inplace.sh` script and is documented in
-[`proxmox-installation.md`](../../../proxmox-installation.md).
+The in-place conversion from Debian 13 to Proxmox VE 9 was performed by a
+host-local staged installation script and is documented in
+[`proxmox-installation.md`](../../../Proxmox-Documents/proxmox-installation.md).
 
 ## Checks
 
@@ -20,6 +20,6 @@ The role verifies:
 Run the validation with:
 
 ```bash
-cd /home/df-server/lab-infra/Ansible
+cd TheGarden/Ansible
 ansible-playbook playbooks/proxmox-audit.yml
 ```

@@ -12,10 +12,10 @@ This Compose project runs the CPU-based `llama.cpp` server for the local VM.
 - GPU offload: disabled (`-ngl 0`)
 - Current VM allocation: 6 virtual CPUs and approximately 15 GiB RAM
 
-The current model is stored at:
+The current model is stored under this repository project:
 
 ```text
-/home/infra-lab-user/llama-service/models/gemma-3-4b-it-Q4_K_M.gguf
+TheGarden/Docker-Documents/llama_services/models/gemma-3-4b-it-Q4_K_M.gguf
 ```
 
 The Compose file mounts `./models` read-only into the container at `/models`. The Compose project does not download models automatically.
@@ -34,7 +34,8 @@ models/           GGUF model files
 Create the environment file if this is a new deployment:
 
 ```bash
-cd /home/infra-lab-user/llama-service
+export REPO_ROOT=/path/to/TheGarden
+cd "$REPO_ROOT/Docker-Documents/llama_services"
 cp .env.example .env
 chmod 600 .env
 ```
@@ -52,14 +53,14 @@ LLAMA_API_KEY=<long-random-secret>
 The external `caddy_proxy` network must exist before starting this service. Start Caddy first if necessary:
 
 ```bash
-cd /home/infra-lab-user/caddy-service
+cd "$REPO_ROOT/Docker-Documents/caddy_service"
 sudo docker compose up -d caddy
 ```
 
 Then start llama.cpp:
 
 ```bash
-cd /home/infra-lab-user/llama-service
+cd "$REPO_ROOT/Docker-Documents/llama_services"
 sudo docker compose config --quiet
 sudo docker compose pull
 sudo docker compose up -d
@@ -85,7 +86,7 @@ https://infra-lab-services.tail494f6d.ts.net/llama/v1/models
 The external endpoint requires the API key from `.env`:
 
 ```bash
-cd /home/infra-lab-user/llama-service
+cd "$REPO_ROOT/Docker-Documents/llama_services"
 set -a
 . ./.env
 set +a
