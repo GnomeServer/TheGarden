@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot Agent Manager worker that generates and runs a Python script."""
+"""Long-running Agent Manager worker that generates and runs Python scripts."""
 
 import asyncio
 import json
@@ -15,14 +15,22 @@ from pathlib import Path
 from typing import Any
 
 import nats
-from nats.js.api import ConsumerConfig, DeliverPolicy
+from nats.errors import TimeoutError as NatsTimeoutError
+from datetime import timedelta
+from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 
-NATS_URL = os.getenv("NATS_URL", "nats://127.0.0.1:4222")
-WORKER_ID = os.getenv("WORKER_ID", "worker-1")
+NATS_URL = os.getenv("NATS_URL", "nats://100.94.49.45:4222")
+WORKER_ID = os.getenv("WORKER_ID", "inkii")
+WORKER_ROLE = os.getenv("WORKER_ROLE", "coder")
 WORKSPACE = Path(
     os.getenv("AGENT_WORKSPACE", str(Path.home() / "agent-workspace"))
 )
+WORKER_CONSUMER = os.getenv(
+    "WORKER_CONSUMER", f"agent-workers-coder"
+)
+
+print(f"connecting to NATSat {NATS_URL}", flush=True)
 
 # MODEL_BASE_URL should include the OpenAI-compatible /v1 path, for example:
 # https://infra-lab-services.tail494f6d.ts.net/litellm/v1
@@ -30,7 +38,7 @@ MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "").rstrip("/")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "luna")
 MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "120"))
-SCRIPT_TIMEOUT = float(os.getenv("SCRIPT_TIMEOUT", "30"))
+SCRIPT_TIMEOUT = float(os.getenv("SCRIPT_TIMEOUT", "300"))
 MAX_SCRIPT_CHARS = int(os.getenv("MAX_SCRIPT_CHARS", "30000"))
 MAX_OUTPUT_CHARS = int(os.getenv("MAX_OUTPUT_CHARS", "12000"))
 ALLOW_GENERATED_CODE = os.getenv("ALLOW_GENERATED_CODE", "0").lower() in {
@@ -49,9 +57,13 @@ Return only the source code, without Markdown fences or commentary.
 Use only the Python standard library. The script must operate only in its
 current working directory, must not use the network, must not invoke a shell
 or subprocess, must not access secrets, and must finish in a bounded amount of
-time. Make the result deterministic when the request involves generated data.
-Include useful validation and concise stdout output. Create any requested
-artifacts in the current working directory.
+time. This is a headless Linux worker: do not import ktinker or other GUI/desktop
+modules, do not require third-party packages, and do not install packages. If a GUI
+is requested, create a text or file-based alternative and explain the assumption.
+Make reasonable assumptions when details are missing and state them in the final
+stdout output. Make the result deterministic when the request involves
+generated data. Include useful validatoin and concise stdout output.
+Create any requested artifacts in the current working directory.
 """
 
 
@@ -149,11 +161,19 @@ async def process_message(js: Any, message: Any) -> None:
     event = json.loads(message.data.decode("utf-8"))
     metadata = event.get("metadata") or {}
 
-    # Do not acknowledge another worker's task. A worker-specific failure is
-    # reported only after confirming that this worker owns the event.
-    if metadata.get("worker_id") != WORKER_ID:
+    # Dynamic tasks omit worker_id and are assigned by the shared NATS
+    # consumer. A worker_id is still honored for explicitly targeted jobs.
+    target_worker = metadata.get("worker_id")
+    if target_worker and target_worker != WORKER_ID:
         raise RuntimeError(
-            f"task is for {metadata.get('worker_id')!r}, not {WORKER_ID!r}"
+            f"task is for {target_worker!r}, not {WORKER_ID!r}"
+        )
+
+    target_role = metadata.get("worker_role", WORKER_ROLE)
+    if target_role != WORKER_ROLE:
+        raise RuntimeError(
+            f"task requires role {target_role!r}, "
+            f"but this worker provides {WORKER_ROLE!r}"
         )
 
     run_id = event.get("run_id")
@@ -239,12 +259,21 @@ async def main() -> None:
     subscription = await js.pull_subscribe(
         "agent.runs.created",
         stream="AGENT_RUNS",
-        config=ConsumerConfig(deliver_policy=DeliverPolicy.NEW),
+        durable=WORKER_CONSUMER,
+        config=ConsumerConfig(
+            ack_policy=AckPolicy.EXPLICIT,
+            ack_wait=300,
+            deliver_policy=DeliverPolicy.NEW,
+        ),
     )
 
     try:
-        messages = await subscription.fetch(1, timeout=120)
-        await process_message(js, messages[0])
+        while True:
+            try:
+                messages = await subscription.fetch(1, timeout=120)
+            except NatsTimeoutError:
+                continue
+            await process_message(js, messages[0])
     finally:
         await subscription.unsubscribe()
         await nc.close()
