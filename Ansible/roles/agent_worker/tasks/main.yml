@@ -1,0 +1,76 @@
+---                                                                                             
+   - name: Create Pi directories                                                                   
+     ansible.builtin.file:                                                                         
+       path: "{{ item }}"                                                                          
+       state: directory                                                                            
+       owner: "{{ ansible_user_id }}"                                                              
+       mode: "0700"                                                                                
+     loop:                                                                                         
+       - "{{ ansible_user_dir }}/.pi"                                                              
+       - "{{ ansible_user_dir }}/.pi/agent"                                                        
+       - "{{ ansible_user_dir }}/.pi/agent/certs"                                                  
+       - "{{ ansible_user_dir }}/.config"                                                          
+       - "{{ ansible_user_dir }}/.config/litellm"                                                  
+                                                                                                   
+   - name: Require a LiteLLM key source                                                            
+     ansible.builtin.assert:                                                                       
+       that:                                                                                       
+         - litellm_key_source is defined                                                           
+         - litellm_key_source | length > 0                                                         
+       fail_msg: "litellm_key_source is missing for {{ inventory_hostname }}"                      
+                                                                                                   
+   - name: Check LiteLLM key source on controller                                                  
+     ansible.builtin.stat:                                                                         
+       path: "{{ litellm_key_source }}"                                                            
+     delegate_to: localhost                                                                        
+     register: litellm_key_source_stat                                                             
+                                                                                                   
+   - name: Require the LiteLLM key source to exist                                                 
+     ansible.builtin.assert:                                                                       
+       that:                                                                                       
+         - litellm_key_source_stat.stat.exists                                                     
+         - litellm_key_source_stat.stat.isreg                                                      
+       fail_msg: "Missing LiteLLM key source: {{ litellm_key_source }}"                            
+                                                                                                   
+   - name: Install the worker LiteLLM key                                                          
+     ansible.builtin.copy:                                                                         
+       src: "{{ litellm_key_source }}"                                                             
+       dest: "{{ ansible_user_dir }}/.config/litellm/worker-api-key"                               
+       owner: "{{ ansible_user_id }}"                                                              
+       mode: "0600"                                                                                
+     no_log: true                                                                                  
+                                                                                                   
+   - name: Install the Caddy root certificate                                                      
+     ansible.builtin.copy:                                                                         
+       src: caddy-local-root.crt                                                                   
+       dest: "{{ ansible_user_dir }}/.pi/agent/certs/caddy-local-root.crt"                         
+       owner: "{{ ansible_user_id }}"                                                              
+       mode: "0644"                                                                                
+                                                                                                   
+   - name: Install Pi models configuration                                                         
+     ansible.builtin.template:                                                                     
+       src: models.json.j2                                                                         
+       dest: "{{ ansible_user_dir }}/.pi/agent/models.json"                                        
+       owner: "{{ ansible_user_id }}"                                                              
+       mode: "0600"                                                                                
+       backup: true                                                                                
+     no_log: true                                                                                  
+                                                                                                   
+   - name: Install Pi settings configuration                                                       
+     ansible.builtin.template:                                                                     
+       src: settings.json.j2                                                                       
+       dest: "{{ ansible_user_dir }}/.pi/agent/settings.json"                                      
+       owner: "{{ ansible_user_id }}"                                                              
+       mode: "0600"                                                                                
+       backup: true                                                                                
+     no_log: true                                                                                  
+                                                                                                   
+   - name: Configure Node to trust the Caddy root                                                  
+     ansible.builtin.lineinfile:                                                                   
+       path: "{{ ansible_user_dir }}/.profile"                                                     
+       regexp: '^export NODE_EXTRA_CA_CERTS='                                                      
+       line: 'export NODE_EXTRA_CA_CERTS="$HOME/.pi/agent/certs/caddy-local-root.crt"'             
+       create: true
+     loop:
+        - "{{ ansible_user_dir }}/.profile"
+        - "{{ ansible_user_dir }}/.bashrc"

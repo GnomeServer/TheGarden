@@ -263,7 +263,10 @@ async def main() -> None:
         config=ConsumerConfig(
             ack_policy=AckPolicy.EXPLICIT,
             ack_wait=900,
-            deliver_policy=DeliverPolicy.NEW,
+            # A newly-created durable consumer must replay tasks that were
+            # published before the worker connected. Existing consumer state
+            # is preserved by JetStream across worker restarts.
+            deliver_policy=DeliverPolicy.ALL,
         ),
     )
 
