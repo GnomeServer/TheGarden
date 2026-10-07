@@ -24,6 +24,13 @@ Worker heartbeat -> NATS -----|
 ```
 
 Public routes are `/dashboard/`, `/auth/*`, and `/v1/*`. PostgreSQL, NATS, and `/metrics` are not routed publicly by Caddy.
+For an existing central deployment, follow the
+[manager-only rollout and recovery guide](central-dashboard-deployment.md).
+Do not run a blanket Compose update against the live VM; the installation
+commands below are for a new isolated stack. The optional
+[Open WebUI Pipe](../Docker-Documents/open_webui_services/README.md#agent-manager-coder-function-manual-opt-in)
+is installed separately by an administrator and needs a disposable worker.
+
 
 ## Initial configuration
 
@@ -71,6 +78,10 @@ openssl rand -base64 48
 A login listed in `DASHBOARD_ADMINS` becomes an administrator when first observed. Changing the environment later does not silently overwrite an existing database role; use the People screen to change established roles.
 
 The API-token login is bootstrap access. It maps to the `api-admin` identity and should not be the normal human login.
+`api-admin` and `service:open-webui` are reserved service identities, not
+Forgejo accounts. A Forgejo login must carry a valid immutable Forgejo user ID;
+renamed or recycled logins cannot inherit another person's dashboard role.
+Disabled dashboard accounts cannot re-enter through OAuth.
 
 ### Forgejo webhook
 
@@ -85,9 +96,12 @@ Agent Manager verifies `X-Forgejo-Signature` as a hexadecimal HMAC-SHA256 of the
 
 Do not place the OAuth client secret or webhook secret in webhook URLs.
 
-## Deploy or upgrade
+## New-stack install (not a live VM upgrade)
 
-From the service directory:
+The following commands create/update a new isolated stack. For the existing VM,
+use [the guarded central rollout](central-dashboard-deployment.md), which backs
+up state and replaces only the Agent Manager service.
+
 
 ```bash
 sudo docker compose config --quiet

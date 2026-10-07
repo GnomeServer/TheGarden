@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
+    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore", hide_input_in_errors=True)
 
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
     database_host: str = Field(default="postgres", validation_alias="DB_HOST")
@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     database_password: str = Field(default="agent_manager", validation_alias="DB_PASSWORD")
     nats_url: str = Field(default="nats://nats:4222", validation_alias="NATS_URL")
     api_token: str = Field(validation_alias="AGENT_MANAGER_API_TOKEN")
+    openwebui_token: str = Field(default="", validation_alias="AGENT_MANAGER_OPENWEBUI_TOKEN")
     session_secret: str = Field(default="", validation_alias="DASHBOARD_SESSION_SECRET")
     session_secure: bool = Field(default=True, validation_alias="DASHBOARD_SESSION_SECURE")
     public_url: str = Field(
@@ -71,6 +72,12 @@ class Settings(BaseSettings):
     )
     model_api_key: str = Field(default="", validation_alias="MODEL_API_KEY")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+
+    @model_validator(mode="after")
+    def separate_service_credentials(self) -> "Settings":
+        if self.openwebui_token and self.openwebui_token == self.api_token:
+            raise ValueError("AGENT_MANAGER_OPENWEBUI_TOKEN must differ from the administrator token")
+        return self
 
     @property
     def sqlalchemy_url(self) -> str | URL:

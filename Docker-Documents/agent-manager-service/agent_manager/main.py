@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import current_user, require_csrf
+from .auth import current_user, require_csrf, require_run_submission, run_client
 from .dashboard import activity_out, record_activity, router as dashboard_router, worker_out
 from .database import SessionLocal, engine, get_session, initialise_database
 from .live import live_broker
@@ -533,7 +533,7 @@ async def readyz(request: Request) -> HealthOut:
 async def create_run(
     body: RunCreate,
     request: Request,
-    actor: UserRecord = Depends(require_csrf),
+    actor: UserRecord = Depends(require_run_submission),
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
     worker_role = body.metadata.get("worker_role", "coder")
@@ -558,6 +558,9 @@ async def create_run(
             headers={"Retry-After": "15"},
         )
     run_id = str(uuid.uuid4())
+    metadata = {**body.metadata, "submitted_by": actor.id}
+    if getattr(request.state, "auth_method", "") == "open-webui":
+        metadata["source"] = "open-webui"
     record = RunRecord(
         id=run_id,
         goal=body.goal,
@@ -565,7 +568,7 @@ async def create_run(
         base_ref=body.base_ref,
         model=body.model,
         status="queued",
-        run_metadata=body.metadata,
+        run_metadata=metadata,
     )
     session.add(record)
     await session.flush()
@@ -589,7 +592,7 @@ async def create_run(
         "forgejo_repository": body.forgejo_repository,
         "base_ref": body.base_ref,
         "model": body.model,
-        "metadata": body.metadata,
+        "metadata": metadata,
     }
     try:
         await publish_run_event(request, RUN_CREATED_SUBJECT, event)
@@ -607,12 +610,15 @@ async def create_run(
 @app.get("/v1/runs/{run_id}", response_model=RunOut)
 async def get_run(
     run_id: str,
-    user: UserRecord = Depends(current_user),
+    request: Request,
+    user: UserRecord = Depends(run_client),
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
-    del user
     record = await session.get(RunRecord, run_id)
-    if record is None:
+    if record is None or (
+        getattr(request.state, "auth_method", "") == "open-webui"
+        and (record.run_metadata or {}).get("submitted_by") != user.id
+    ):
         raise HTTPException(status_code=404, detail="run not found")
     return RunOut.from_record(record)
 

@@ -208,13 +208,17 @@ async def upsert_forgejo_user(session: AsyncSession, data: dict[str, Any]) -> Us
     login = data.get("login") or data.get("username")
     if not isinstance(login, str) or not login:
         return None
-    forgejo_id = data.get("id") if isinstance(data.get("id"), int) else None
-    query = select(UserRecord).where(UserRecord.forgejo_login == login)
-    if forgejo_id is not None:
-        query = select(UserRecord).where(
-            or_(UserRecord.forgejo_user_id == forgejo_id, UserRecord.forgejo_login == login)
-        )
-    user = (await session.execute(query)).scalars().first()
+    if login == "api-admin" or login.startswith("service:"):
+        raise HTTPException(status_code=409, detail="Reserved dashboard identity")
+    forgejo_id = data.get("id")
+    if type(forgejo_id) is not int or forgejo_id <= 0:
+        return None
+    # Login names can be renamed or recycled. Only the immutable Forgejo ID
+    # links an account; never attach OAuth to the bootstrap/service identity.
+    user = await session.scalar(select(UserRecord).where(UserRecord.forgejo_user_id == forgejo_id))
+    collision = await session.scalar(select(UserRecord).where(UserRecord.forgejo_login == login))
+    if collision is not None and (user is None or collision.id != user.id):
+        raise HTTPException(status_code=409, detail="Forgejo login conflicts with an existing dashboard identity")
     if user is None:
         user = UserRecord(
             id=str(uuid.uuid4()),
@@ -223,8 +227,6 @@ async def upsert_forgejo_user(session: AsyncSession, data: dict[str, Any]) -> Us
             role="admin" if login.lower() in settings.admin_logins else "member",
         )
         session.add(user)
-    elif forgejo_id is not None:
-        user.forgejo_user_id = forgejo_id
     user.forgejo_login = login
     user.display_name = str(data.get("full_name") or data.get("display_name") or login)[:255]
     user.email = str(data["email"])[:320] if data.get("email") else None
@@ -249,8 +251,10 @@ async def validate_task_links(session: AsyncSession, values: dict[str, Any]) -> 
     )
     for field, model, label in checks:
         value = values.get(field)
-        if value is not None and await session.get(model, value) is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown {label}")
+        if value is not None:
+            linked = await session.get(model, value)
+            if linked is None or (field == "assignee_user_id" and (not linked.active or linked.role == "service")):
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown {label}")
 
 
 @router.get("/auth/forgejo/login")
@@ -317,6 +321,8 @@ async def forgejo_callback(
     user = await upsert_forgejo_user(session, user_response.json())
     if user is None:
         raise HTTPException(status_code=502, detail="Forgejo returned an invalid user")
+    if not user.active:
+        raise HTTPException(status_code=403, detail="Dashboard account is disabled")
     user.last_login_at = utcnow()
     await session.flush()
     await record_activity(
@@ -482,6 +488,8 @@ async def update_user_role(
     target = await session.get(UserRecord, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if target.role == "service":
+        raise HTTPException(status_code=409, detail="Service credentials are managed through deployment configuration")
     if target.id == actor.id and (body.role != "admin" or not body.active):
         raise HTTPException(status_code=409, detail="Administrators cannot remove their own access")
     target.role = body.role

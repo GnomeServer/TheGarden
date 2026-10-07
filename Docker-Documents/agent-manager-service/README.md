@@ -14,6 +14,13 @@ tracks runs, deadline-aware tasks, Forgejo users and activity, worker presence,
 and audit history. Complete deployment, OAuth, webhook, task, worker, backup,
 and troubleshooting procedures are in
 [`../../docs/dark-factory-dashboard.md`](../../docs/dark-factory-dashboard.md).
+For an **existing central VM**, use the guarded manager-only
+[`central deployment procedure`](../../docs/central-dashboard-deployment.md), not
+the new-install commands below. It preserves live credentials, the NATS override,
+database volumes, Caddy routes, and the current manager image for recovery.
+Open WebUI integration is [opt-in](../open_webui_services/README.md#agent-manager-coder-function-manual-opt-in);
+generated Python is not sandboxed and must run only on disposable workers.
+
 
 ## Networks
 
@@ -119,7 +126,10 @@ bash consume-test-event.txt
 
 ## Submit a run
 
-The API token is required for all `/v1` endpoints:
+The bootstrap API token is accepted by the manager's run and dashboard APIs.
+Normal human sessions use Forgejo OAuth. The separate Open WebUI run-only token
+is accepted only on run submission and individual-run retrieval; it cannot
+authorize dashboard, tasks, user management, or run listing.
 
 ```bash
 export AGENT_MANAGER_API_TOKEN='the-value-from-.env'

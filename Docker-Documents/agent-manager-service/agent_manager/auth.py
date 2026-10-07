@@ -14,6 +14,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert
 
 from .database import get_session
 from .models import UserRecord
@@ -131,6 +132,45 @@ def require_roles(*roles: str):
         return user
 
     return dependency
+
+
+async def run_client(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    session: AsyncSession = Depends(get_session),
+) -> UserRecord:
+    """Accept the WebUI key only on explicitly opted-in run endpoints.
+
+    This service identity is not a Forgejo user. Chat-supplied identity is
+    recorded as metadata, never trusted to grant human dashboard permissions.
+    """
+    if credentials is not None and credentials.scheme.lower() == "bearer":
+        expected = settings.openwebui_token.encode("utf-8")
+        if expected and hmac.compare_digest(credentials.credentials.encode("utf-8"), expected):
+            request.state.auth_method = "open-webui"
+            login = "service:open-webui"
+            user = await session.scalar(select(UserRecord).where(UserRecord.forgejo_login == login))
+            if user is None:
+                # Concurrent first submissions must share a single audit actor.
+                await session.execute(insert(UserRecord).values(
+                    id=str(uuid.uuid4()), forgejo_login=login,
+                    display_name="Open WebUI service", role="service", active=True,
+                ).on_conflict_do_nothing(index_elements=["forgejo_login"]))
+                await session.commit()
+                user = await session.scalar(select(UserRecord).where(UserRecord.forgejo_login == login))
+            if user is None or not user.active:
+                raise HTTPException(status_code=401, detail="Service access disabled")
+            return user
+    return await current_user(request, credentials, session)
+
+
+async def require_run_submission(
+    request: Request, actor: UserRecord = Depends(run_client),
+) -> UserRecord:
+    await require_csrf(request, actor)
+    if getattr(request.state, "auth_method", "") != "open-webui" and actor.role not in {"admin", "manager", "member"}:
+        raise HTTPException(status_code=403, detail="Run submission is not permitted")
+    return actor
 
 
 def session_payload(request: Request) -> dict[str, Any] | None:

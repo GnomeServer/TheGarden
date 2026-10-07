@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -622,7 +623,9 @@ def vector_by_node(vector: list[dict[str, Any]]) -> dict[str, float]:
         value = item.get("value")
         if isinstance(name, str) and isinstance(value, list) and len(value) == 2:
             try:
-                values[name] = round(float(value[1]), 1)
+                number = float(value[1])
+                if math.isfinite(number):
+                    values[name] = round(number, 1)
             except (TypeError, ValueError):
                 continue
     return values
@@ -642,7 +645,7 @@ def grafana_node_url(host: str = "infra-lab-services") -> str:
 async def node_health(actor: UserRecord = Depends(current_user)) -> dict[str, Any]:
     del actor
     expressions = (
-        'max by (node_id, host, worker_id, instance) (up{job=~".*(node-exporter|agent-worker).*"})',
+        'max by (node_id, host, worker_id, instance) (up{job=~".*(node-exporter|agent-worker).*|bare-metal-server"})',
         '100 - (avg by (node_id, host, worker_id, instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
         '100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))',
         'max by (node_id, host, worker_id, instance) (100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}))',
