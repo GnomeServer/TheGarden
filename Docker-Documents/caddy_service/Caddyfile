@@ -9,6 +9,24 @@ infra-lab-services.tail494f6d.ts.net {
 		reverse_proxy grafana:3000
 	}
 
+	@llama {
+		path /llama /llama/*
+	}
+
+	handle @llama {
+		uri strip_prefix /llama
+		reverse_proxy llama:8080
+	}
+
+	@litellm {
+		path /litellm /litellm/*
+	}
+
+	handle @litellm {
+		uri strip_prefix /litellm
+		reverse_proxy litellm:4000
+	}
+
 	@forgejo {
 		path /forgejo /forgejo/*
 	}
@@ -18,6 +36,14 @@ infra-lab-services.tail494f6d.ts.net {
 		reverse_proxy forgejo:3000
 	}
 
+	@agent_manager {
+		path /dashboard /dashboard/* /auth/* /v1/* /docs /docs/* /openapi.json
+	}
+
+	handle @agent_manager {
+		reverse_proxy agent-manager:8000
+	}
+
 	handle {
 		reverse_proxy https://10.1.10.156:8006 {
 			transport http {
@@ -25,4 +51,9 @@ infra-lab-services.tail494f6d.ts.net {
 			}
 		}
 	}
+}
+
+https://infra-lab-services.tail494f6d.ts.net:8443 {
+	tls internal
+	reverse_proxy open-webui:8080
 }

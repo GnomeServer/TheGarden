@@ -1,6 +1,6 @@
 ---
 - name: Capture the current lab host state
-  hosts: lab_local
+  hosts: proxmox_hosts
   gather_facts: true
   become: false
   vars:

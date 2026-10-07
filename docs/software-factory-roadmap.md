@@ -684,6 +684,7 @@ Use this section for the current sprint. Move completed items into the phase che
 - Ansible project: [`../Ansible/README.md`](../Ansible/README.md)
 - Docker services overview: [`../Docker-Documents/README.md`](../Docker-Documents/README.md)
 - Agent Manager documentation: [`../Docker-Documents/agent-manager-service/README.md`](../Docker-Documents/agent-manager-service/README.md)
+- GitHub implementation handoff: [`github-handoff-dark-factory.md`](github-handoff-dark-factory.md)
 
 ---
 

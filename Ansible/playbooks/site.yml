@@ -1,6 +1,6 @@
 ---
 - name: Evaluate the lab-infra baseline
-  hosts: lab_local
+  hosts: proxmox_hosts
   gather_facts: true
   become: false
   roles:

@@ -11,23 +11,60 @@ scrape_configs:
       - targets:
           - prometheus:9090
 
-  # Node Exporter runs in a separate container with the server's host network
-  # namespace. Prometheus reaches it through Docker's host-gateway alias.
+  # Node Exporter joins the same Docker network as Prometheus in compose.yml.
+  # Its host PID/rootfs access does not put it in the host network namespace.
   - job_name: node-exporter
     static_configs:
       - targets:
-          - host.docker.internal:9100
+          - node-exporter:9100
         labels:
           host: infra-lab-services
           role: server
+          node_id: infra-lab-services
   - job_name: agent-worker-inkii-host
     static_configs:
       - targets:
         - 100.98.125.127:9100
         labels:
           host: inkii
-          worker_id: inkii
+          worker_id: worker-02
+          node_id: worker-02
           role: coder
+  - job_name: agent-worker-naruto-host
+    static_configs:
+      - targets:
+        - 100.88.92.78:9100
+        labels:
+          host: naruto
+          worker_id: worker-04
+          node_id: worker-04
+          role: coder
+  - job_name: agent-worker-raphael-host
+    static_configs:
+      - targets:
+        - 100.116.35.103:9100
+        labels:
+          host: raphael
+          worker_id: worker-01
+          node_id: worker-01
+          role: coder
+  - job_name: agent-worker-donatello-host
+    static_configs:
+      - targets:
+        - 100.94.145.104:9100
+        labels:
+          host: donatello
+          worker_id: worker-03
+          node_id: worker-03
+          role: coder
+  - job_name: bare-metal-server
+    static_configs:
+      - targets:
+        - 100.102.154.23:9100
+        labels:
+          host: server-debian
+          role: server
+          node_id: server-debian
   - job_name: agent-manager
     metrics_path: /metrics/
     static_configs:
@@ -35,3 +72,10 @@ scrape_configs:
         - agent-manager:8000
         labels:
           service: agent-manager
+  - job_name: nats-jetstream
+    static_configs:
+      - targets:
+        - nats-exporter:7777
+        labels:
+          service: nats
+          role: jetstream

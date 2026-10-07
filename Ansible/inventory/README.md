@@ -5,9 +5,6 @@ The default inventory is `hosts.yml`.
 ## Active groups
 
 ```text
-lab_local
-└── server-debian
-
 proxmox_hosts
 └── server-debian
 
@@ -21,9 +18,13 @@ agent_workers
 └── donatello
 ```
 
-`server-debian` is the local Proxmox host used by the audit and Proxmox validation playbooks. `infra-lab-services` is the local Docker VM used by `playbooks/docker-services.yml`.
-
-Both targets currently use a local connection. The Docker VM uses `/usr/bin/python3`.
+Run the active inventory only as `infra-lab-user` on `infra-lab-services`, the
+infrastructure VM (LAN `10.1.10.2`, Tailscale `100.94.49.45`). It is the sole
+local target. `server-debian` is the separate bare-metal Proxmox host reached
+over SSH as `df-server@100.102.154.23`; audit and site playbooks target
+`proxmox_hosts`. Running this inventory on another machine would misdirect
+the VM's local tasks. Historical `hosts.yml.backup.*` files are not active
+inventories and must not be loaded.
 
 Inspect the active inventory from the Ansible project directory:
 
@@ -44,12 +45,12 @@ inventory/group_vars/docker_hosts.yml
 They list the live Compose projects in their required startup order:
 
 ```text
-TheGarden/Docker-Documents/caddy_service
-TheGarden/Docker-Documents/forgejo
-TheGarden/Docker-Documents/open_webui_services
-TheGarden/Docker-Documents/llama_services
-TheGarden/Docker-Documents/grafana_services
-TheGarden/Docker-Documents/agent-manager-service
+/home/infra-lab-user/caddy-service
+/home/infra-lab-user/forgejo-service
+/home/infra-lab-user/open-webui-service
+/home/infra-lab-user/llama-service
+/home/infra-lab-user/grafana-service
+/home/infra-lab-user/agent-manager-service
 ```
 
 The Docker deployment uses the `community.docker` collection:
@@ -91,9 +92,15 @@ for isolated testing. Do not load it together with `hosts.yml` unless you
 intentionally want to maintain duplicate definitions for `inkii`.
 
 The worker runtime is documented in
-[`../../agent-worker/README.md`](../../agent-worker/README.md). The worker role
-scaffold targets `agent_workers`; use `--limit` during initial rollout, for
-example:
+[`../../agent-worker/README.md`](../../agent-worker/README.md).
+`agent-workers.yml` is the one canonical playbook; the captured
+`configure-agent-workers.yml` duplicate is intentionally omitted. The role
+preserves Pi/LiteLLM provisioning until the planned OMP cutover (not implemented
+here). Each worker retains its own controller key at
+`/home/infra-lab-user/litellm-service/.worker-XX-api-key`. Activity collector
+keys are provisioned separately under
+`/home/infra-lab-user/.config/dark-factory/activity-keys/<node>` and are never
+reused LiteLLM keys. Use `--limit` during initial rollout:
 
 ```bash
 ansible-playbook playbooks/agent-workers.yml --limit inkii
@@ -101,7 +108,7 @@ ansible-playbook playbooks/agent-workers.yml --limit inkii
 
 ## Proxmox guest template
 
-`proxmox-guests.example.yml` is not loaded by default. It documents VMID `100`, the Debian guest named `infra-lab-services`, and the connection values that must be confirmed before using SSH-based management.
+`proxmox-guests.example.yml` is not loaded by default. It is an optional SSH-based guest inventory example for VMID `100`, not a second active definition of the VM controller.
 
 Before activating a remote guest entry, verify:
 

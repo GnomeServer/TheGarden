@@ -5,18 +5,31 @@ This Compose project deploys the first control-plane slice for agentic coding ru
 - `agent-manager`: FastAPI API, run-state persistence, and NATS JetStream publishing
 - `postgres`: private PostgreSQL database for manager state
 - `nats`: private NATS server with JetStream enabled and persistent storage
+- `nats-exporter`: private Prometheus metrics for NATS clients, subscriptions, and JetStream
 
 The manager does not execute repository code. Long-running workers consume durable NATS events and publish completion events. The manager consumes `agent.runs.completed` through a durable JetStream consumer and updates the run status and result metadata. The pooled worker protocol is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md).
+
+The human control surface is available at `/dashboard/` through Caddy. It
+tracks runs, deadline-aware tasks, Forgejo users and activity, worker presence,
+and audit history. Complete deployment, OAuth, webhook, task, worker, backup,
+and troubleshooting procedures are in
+[`../../docs/dark-factory-dashboard.md`](../../docs/dark-factory-dashboard.md).
 
 ## Networks
 
 The manager joins the existing networks used by the lab:
 
-- `caddy_proxy` for Forgejo HTTP/API access and optional Caddy routing
+- `caddy_proxy` for Forgejo and LiteLLM HTTP/API access and Caddy routing
 - `open-webui_internal` for Ollama access
 - `agent_manager_internal` for PostgreSQL and NATS
 
 The manager does **not** join `forgejo_internal`; Forgejo's database network remains isolated.
+
+The NATS exporter joins only `agent_manager_internal` and `caddy_proxy`.
+It reads `http://nats:8222` with `-varz -connz -subz -jsz=all` and exposes
+`nats-exporter:7777` to Prometheus without publishing a host port. Its pinned
+default image is `natsio/prometheus-nats-exporter:0.20.2`; like NATS, it uses
+`restart: unless-stopped`.
 
 Caddy and the Open WebUI Compose project must already be running so that the two external networks exist:
 
@@ -102,7 +115,7 @@ bash verify-nats.txt
 bash consume-test-event.txt
 ```
 
-`submit-test-run.txt` stores the most recent run ID in `.last-run-id`, which is ignored by Git. A run submitted without a matching worker remains `queued`. When a worker publishes `agent.runs.completed`, the manager updates the database status and stores the worker result under `metadata.result`.
+`submit-test-run.txt` stores an accepted run ID in `.last-run-id`, which is ignored by Git. Before creating a row, Agent Manager probes `agent.workers.health.<role>`. Without a matching execution-enabled worker it returns HTTP `503`, `NO_WORKER_AVAILABLE`, and `Retry-After: 15`; no run is created or queued. An accepted run remains `queued` until a worker starts it. Completion stores the worker result under `metadata.result`.
 
 ## Submit a run
 
@@ -156,28 +169,32 @@ The defaults match the current Docker networks:
 
 ```text
 Forgejo API:  http://forgejo:3000/api/v1
-llama.cpp:    http://llama:8080/v1
+LiteLLM:      http://litellm:4000/v1 (default MODEL_BASE_URL)
+llama.cpp:    http://llama:8080/v1 (optional direct endpoint)
 Ollama:       http://ollama:11434
 ```
 
 `MODEL_BASE_URL`, `MODEL_API_KEY`, `FORGEJO_API_URL`, and `FORGEJO_TOKEN` are included in the environment for the next planner/orchestrator implementation. The initial API does not call those services yet.
 
-## Optional Caddy route
+## Caddy routes and metrics
 
-The manager is not publicly routed by default. If an authenticated external API endpoint is needed, add this route to the Caddy site that serves the lab hostname:
+The tracked Caddy configuration routes `/dashboard`, `/dashboard/*`, `/auth/*`,
+`/v1/*`, `/docs`, `/docs/*`, and `/openapi.json` to `agent-manager:8000` without
+stripping their prefixes. Human dashboard sessions use Forgejo OAuth; machine
+API clients use their bearer token. Keep tokens secret and prefer the internal
+`http://agent-manager:8000` endpoint for containers on `caddy_proxy`.
 
-```caddyfile
-@agent_manager {
-    path /agent-manager /agent-manager/*
-}
+These manager routes coexist with the captured `/llama/` and `/litellm/` model
+routes, `/grafana/`, `/forgejo/`, and the Proxmox fallback. Open WebUI remains
+available at `https://infra-lab-services.tail494f6d.ts.net:8443` through Caddy.
+The manager defaults to LiteLLM's internal URL rather than taking this external
+proxy path; an existing `.env` override must be changed deliberately to use the
+new default.
 
-handle @agent_manager {
-    uri strip_prefix /agent-manager
-    reverse_proxy agent-manager:8000
-}
-```
-
-Keep the bearer token secret and prefer calling `http://agent-manager:8000` directly from an Open WebUI Function while both containers are on `caddy_proxy`.
+Prometheus scrapes the manager at `http://agent-manager:8000/metrics/` and the
+exporter at `http://nats-exporter:7777/metrics`. Neither metrics endpoint is
+added as a public Caddy route. The exporter is part of this Compose project,
+while its scrape job lives in `../grafana_services/prometheus/prometheus.yml`.
 
 ## Troubleshooting
 
@@ -261,3 +278,23 @@ agent-manager_nats_data
 ```
 
 PostgreSQL is the authoritative run-state store. NATS JetStream is durable work delivery; retaining it allows queued events to survive a NATS restart.
+
+## Dashboard references
+
+- [Dashboard operations](../../docs/dark-factory-dashboard.md)
+- [MCP integration contract](../../docs/mcp-dashboard.md)
+- [Node activity collector](../../node-activity-collector/README.md)
+- Interactive API schema: `/docs` on Agent Manager
+
+Normal users sign in with Forgejo OAuth. The bearer token remains available
+for approved machine clients and bootstrap recovery; do not expose it to
+browser JavaScript or store it in Forgejo webhook configuration.
+
+## Infrastructure reconciliation
+
+The live capture `70838b3` has been reconciled with the dashboard source; this
+does not deploy it to the VM. Follow
+[the reviewed deployment procedure](../../docs/infra-reconciliation.md).
+Availability probes are Core NATS request/reply and are not task reservations.
+The `AGENT_WORKERS` stream stores only `agent.workers.heartbeat`; do not widen
+it to `agent.workers.>` or storage acknowledgements can race health replies.

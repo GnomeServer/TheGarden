@@ -44,6 +44,24 @@ services:
     networks:
       - manager_internal
 
+  nats-exporter:
+    image: ${NATS_EXPORTER_IMAGE:-natsio/prometheus-nats-exporter:0.20.2}
+    restart: unless-stopped
+    command:
+      - -varz
+      - -connz
+      - -subz
+      - -jsz=all
+      - http://nats:8222
+    depends_on:
+      nats:
+        condition: service_healthy
+    expose:
+      - "7777"
+    networks:
+      - manager_internal
+      - caddy_proxy
+
   agent-manager:
     build:
       context: .
@@ -64,7 +82,23 @@ services:
       AGENT_MANAGER_API_TOKEN: ${AGENT_MANAGER_API_TOKEN:?Set AGENT_MANAGER_API_TOKEN in .env}
       FORGEJO_API_URL: ${FORGEJO_API_URL:-http://forgejo:3000/api/v1}
       FORGEJO_TOKEN: ${FORGEJO_TOKEN:-}
-      MODEL_BASE_URL: ${MODEL_BASE_URL:-http://llama:8080/v1}
+      FORGEJO_PUBLIC_URL: ${FORGEJO_PUBLIC_URL:-https://infra-lab-services.tail494f6d.ts.net/forgejo}
+      FORGEJO_WEBHOOK_SECRET: ${FORGEJO_WEBHOOK_SECRET:-}
+      FORGEJO_OAUTH_CLIENT_ID: ${FORGEJO_OAUTH_CLIENT_ID:-}
+      FORGEJO_OAUTH_CLIENT_SECRET: ${FORGEJO_OAUTH_CLIENT_SECRET:-}
+      DASHBOARD_PUBLIC_URL: ${DASHBOARD_PUBLIC_URL:-https://infra-lab-services.tail494f6d.ts.net}
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
+      DASHBOARD_SESSION_SECURE: ${DASHBOARD_SESSION_SECURE:-true}
+      DASHBOARD_ADMINS: ${DASHBOARD_ADMINS:-}
+      WORKER_OFFLINE_AFTER_SECONDS: ${WORKER_OFFLINE_AFTER_SECONDS:-45}
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
+      PROMETHEUS_TIMEOUT: ${PROMETHEUS_TIMEOUT:-5}
+      GRAFANA_PUBLIC_URL: ${GRAFANA_PUBLIC_URL:-https://infra-lab-services.tail494f6d.ts.net/grafana}
+      GRAFANA_NODE_DASHBOARD_UID: ${GRAFANA_NODE_DASHBOARD_UID:-server-overview}
+      NOTIFICATION_WEBHOOK_URL: ${NOTIFICATION_WEBHOOK_URL:-}
+      NOTIFICATION_WEBHOOK_TOKEN: ${NOTIFICATION_WEBHOOK_TOKEN:-}
+      NOTIFICATION_SCAN_SECONDS: ${NOTIFICATION_SCAN_SECONDS:-60}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-http://litellm:4000/v1}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:

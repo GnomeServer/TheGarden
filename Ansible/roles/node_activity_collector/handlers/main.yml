@@ -1,0 +1,6 @@
+---
+- name: Restart node activity collector
+  ansible.builtin.systemd:
+    name: dark-factory-activity-collector
+    state: restarted
+    daemon_reload: true

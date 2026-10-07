@@ -20,7 +20,7 @@ VM 100: infra-lab-services
 
 The VM is connected to the Proxmox bridge and has its own network identity. The VM can reach the Proxmox host over the LAN address after the host firewall path was allowed. Tailscale is now also installed on the VM.
 
-The address confirmed on the running VM is `10.1.10.2`. The Ansible guest inventory template and related documentation use this address; the guest remains inactive as an Ansible target until SSH credentials are intentionally configured.
+The confirmed VM address is `10.1.10.2`. The active Ansible inventory reaches it as `infra-lab-user@10.1.10.2` from the approved controller.
 
 ## Current validated status
 
@@ -86,7 +86,10 @@ caddy-service/
 
 ## Current Caddy routes
 
-The Caddyfile routes Grafana under `/grafana/`, Forgejo under `/forgejo/`, and keeps Proxmox as the fallback route:
+The Caddyfile routes Grafana under `/grafana/`, Forgejo under `/forgejo/`, and
+Agent Manager under `/dashboard/`, `/auth/*`, and `/v1/*`. It keeps Proxmox as
+the fallback route. Agent Manager's metrics, PostgreSQL, and NATS are not
+public routes.
 
 ```caddyfile
 infra-lab-services.tail494f6d.ts.net {
@@ -107,6 +110,14 @@ infra-lab-services.tail494f6d.ts.net {
     handle @forgejo {
         uri strip_prefix /forgejo
         reverse_proxy forgejo:3000
+    }
+
+    @agent_manager {
+        path /dashboard /dashboard/* /auth/* /v1/* /docs /docs/* /openapi.json
+    }
+
+    handle @agent_manager {
+        reverse_proxy agent-manager:8000
     }
 
     handle {

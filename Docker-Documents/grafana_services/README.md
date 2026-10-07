@@ -83,6 +83,28 @@ grafana:3000
 
 Grafana is provisioned automatically with Prometheus as its default data source.
 
+## Scrape configuration
+
+The tracked Compose file attaches both Prometheus and Node Exporter to
+`caddy_proxy`; Node Exporter uses host PID and root-filesystem access, not host
+networking. The central scrape therefore uses `node-exporter:9100`, retaining
+`host: infra-lab-services` and `node_id: infra-lab-services`. The captured
+`host.docker.internal:9100` target assumed a host-network exporter and a
+host-gateway alias that this Compose file does not configure.
+
+The manager is scraped at `agent-manager:8000` with `metrics_path: /metrics/`.
+The `nats-jetstream` job scrapes `nats-exporter:7777` on the shared network with
+`service: nats` and `role: jetstream`. That exporter belongs to the separate
+Agent Manager Compose project and reads NATS varz, connz, subz, and all JetStream
+metrics; start that project separately to make the target available. No exporter
+host port or Caddy route is required.
+
+The captured monitoring additions preserve all four worker targets and the
+bare-metal `server-debian` target, including their dashboard `node_id` labels.
+Inkii remains `worker-02`, not the stale captured `worker-1` identity. This
+configuration reconciliation does not replace the existing central Grafana
+dashboard with UID `server-overview` or imply that the VM has been redeployed.
+
 ## Caddy route
 
 Grafana is served under the existing Caddy hostname at:
@@ -171,3 +193,43 @@ MagicDNS resolves the VM directly for tailnet devices, so `--resolve` is not req
 ## Upgrade notes
 
 Image tags are pinned in `.env.example`. Review release notes, back up the Grafana and Prometheus volumes, then change tags deliberately. The `.env` file contains the Grafana administrator password and must remain untracked.
+
+## Remote node metrics
+
+Prometheus scrapes Node Exporter over Tailscale for all four coder workers and
+`server-debian`. Stable labels use `worker-01` through `worker-04`; host labels
+retain Raphael, Inkii, Donatello, and Naruto. The tracked targets are in
+`prometheus/prometheus.yml`.
+
+Deploy Tailscale-bound exporters from the Ansible controller:
+
+```bash
+cd Ansible
+ansible-playbook playbooks/node-metrics-exporters.yml --check
+ansible-playbook playbooks/node-metrics-exporters.yml
+```
+
+The role binds port `9100` to each node's Tailscale address rather than
+`0.0.0.0`. A target remains down while that Tailscale node is offline; do not
+change the listener to a public or LAN-wide address to hide an unavailable
+tailnet path.
+
+## Dark Factory dashboard integration
+
+The existing central dashboard is Infrastructure – Server, UID `server-overview`.
+Dark Factory links to it using `var-host` and the Prometheus `host` label.
+The overview selects `infra-lab-services`; per-node links select the observed
+host label. The repository's `dark-factory-node` dashboard is an optional
+additional dashboard, not the central deployment's selected destination.
+
+After updating provisioning or scrape labels:
+
+```bash
+sudo docker compose config --quiet
+sudo docker compose up -d --force-recreate prometheus grafana
+sudo docker compose exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
+```
+
+Grafana remains authenticated: anonymous access and public embedding stay
+disabled. Team members may use the Dark Factory summary without Grafana access;
+administrators following a deep link must sign into Grafana.

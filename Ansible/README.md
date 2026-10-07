@@ -1,15 +1,16 @@
 # Ansible
 
-This directory contains the Ansible project for TheGarden. It currently manages two different concerns:
+This directory contains the Ansible project for TheGarden. It manages:
 
 - read-only audits of the Proxmox host;
-- deployment of the Docker Compose stacks on `infra-lab-services`.
+- deployment of the Docker Compose stacks on `infra-lab-services`;
+- existing Pi/LiteLLM worker configuration and node activity collectors.
 
 The Docker deployment is intentionally separate from the audit-oriented `site.yml` playbook.
 
 ## Project root
 
-Run Ansible from this directory so `ansible.cfg` is loaded automatically:
+Run Ansible as `infra-lab-user` from the checkout on the infrastructure VM, in this directory so `ansible.cfg` is loaded automatically. Do not run the active inventory on Donatello or bare metal: its only local target is the VM.
 
 ```bash
 cd Ansible
@@ -25,7 +26,7 @@ server-debian       Proxmox host used by the audit playbooks
 infra-lab-services  Docker VM used by docker-services.yml
 ```
 
-`infra-lab-services` is currently a local Ansible target. It is in the `docker_hosts` group and uses `/usr/bin/python3`.
+`infra-lab-services` is the controller and sole local target (`infra-lab-user`, LAN `10.1.10.2`, Tailscale `100.94.49.45`). It belongs to `docker_hosts` and uses `/usr/bin/python3`. `server-debian` is the separate Proxmox host reached explicitly over SSH as `df-server@100.102.154.23`; it is not the controller. Workers also use SSH.
 
 Inspect the inventory with:
 
@@ -67,10 +68,10 @@ TheGarden/Docker-Documents/grafana_services
 TheGarden/Docker-Documents/agent-manager-service
 ```
 
-Each project keeps its local `.env` file outside Git. Those files contain
-secrets and are not managed by the repository. Set the deployment paths in
-`inventory/group_vars/docker_hosts.yml` to the checkout location used by the
-host running Ansible; do not commit secret values.
+Each live project runs from its separate `/home/infra-lab-user/<name>-service`
+directory, as recorded in `inventory/group_vars/docker_hosts.yml`, not directly
+from `Docker-Documents`. Local `.env` files remain outside Git and are not
+managed here. Do not commit secret values.
 
 Validate the playbook:
 
@@ -109,8 +110,36 @@ Generated state is written under `state/` and is ignored by Git because it conta
 
 Do not add Compose `.env` files, API tokens, passwords, private keys, or vault passwords to TheGarden. The next step for a reproducible rebuild is to store secret values in Ansible Vault and template each Compose `.env` file with mode `0600`.
 
-Worker nodes are grouped under `agent_workers` in the default inventory. The
-worker role/playbook scaffold is available at
-`roles/agent_worker/` and `playbooks/agent-workers.yml`; use `--limit` for an
-initial rollout. Worker runtime configuration and the NATS/LiteLLM
-troubleshooting guide are in `../agent-worker/README.md`.
+Worker nodes are grouped under `agent_workers` in the default inventory.
+`playbooks/agent-workers.yml` is the canonical worker playbook; the captured
+`configure-agent-workers.yml` duplicate is intentionally not imported.
+`roles/agent_worker/` provisions existing Pi models/settings, the public Caddy
+CA, and each worker's separate LiteLLM key from
+`/home/infra-lab-user/litellm-service/.worker-XX-api-key` on the VM controller.
+The shell CA export is installed in both `.profile` and `.bashrc`. Use
+`--limit inkii` for an initial rollout. Pi remains in use until the planned
+OMP cutover; this role does not install or implement OMP. Worker runtime
+configuration is documented in `../agent-worker/README.md`.
+
+## Node activity collectors
+
+`playbooks/node-activity-collectors.yml` targets the infrastructure VM, four
+coder workers, and the bare-metal Proxmox host. Limit the initial deployment
+to `agent_workers:docker_hosts`; deploy to `server-debian` only when approved.
+Worker IDs stay `worker-01` through `worker-04` for Raphael, Inkii, Donatello,
+and Naruto respectively.
+
+Create the node-scoped keys first as documented in
+[`../node-activity-collector/README.md`](../node-activity-collector/README.md),
+then validate and deploy:
+
+```bash
+ansible-playbook playbooks/node-activity-collectors.yml --syntax-check
+ansible-playbook playbooks/node-activity-collectors.yml --limit 'agent_workers:docker_hosts' --check --diff --ask-become-pass
+ansible-playbook playbooks/node-activity-collectors.yml --limit 'agent_workers:docker_hosts' --ask-become-pass
+```
+
+The plaintext node keys remain under the private controller directory
+`/home/infra-lab-user/.config/dark-factory/activity-keys/<node>` (directory
+mode `0700`, files `0600`) and are copied with `no_log: true`. Provision them
+independently of existing `.env`, LiteLLM, Forgejo, and worker credentials.

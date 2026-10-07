@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dark Factory Control</title>
+  <link rel="stylesheet" href="/dashboard/static/styles.css?v=0.3.1">
+</head>
+<body>
+  <section id="login" class="login-shell hidden" aria-labelledby="login-title">
+    <form id="login-form" class="login-card">
+      <p class="eyebrow">THE GARDEN</p>
+      <h1 id="login-title">Dark Factory Control</h1>
+      <p class="muted">Use Forgejo when configured centrally, or the local Agent Manager bootstrap token.</p>
+      <a id="oauth-login" class="button primary full hidden" href="/auth/forgejo/login">Continue with Forgejo</a>
+      <p id="oauth-unavailable" class="muted">Forgejo OAuth is not configured for this deployment. Use the local bootstrap token.</p>
+      <div id="login-divider" class="divider hidden"><span>bootstrap access</span></div>
+      <label>Agent Manager API token<input id="token" type="password" autocomplete="current-password" required></label>
+      <button class="button full" type="submit">Sign in with token</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </section>
+
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div><p class="eyebrow">THE GARDEN</p><h1>Dark Factory</h1></div>
+      <div class="top-actions"><span id="connection" class="connection">Connecting</span><span id="identity"></span><button id="logout" class="button ghost">Sign out</button></div>
+    </header>
+
+    <nav class="tabs" aria-label="Dashboard sections">
+      <button data-view="overview" class="active">Overview</button>
+      <button data-view="tasks">Tasks</button>
+      <button data-view="time">Time</button>
+      <button data-view="nodes">Nodes</button>
+      <button data-view="access">Access</button>
+      <button data-view="workers">Workers</button>
+      <button data-view="people">People</button>
+      <button data-view="runs">Runs</button>
+      <button data-view="activity">Activity</button>
+    </nav>
+
+    <main>
+      <section id="view-overview" class="view active">
+        <div id="summary" class="metric-grid"></div>
+        <div class="two-column">
+          <article class="panel"><header><h2>Attention</h2></header><div id="attention"></div></article>
+          <article class="panel"><header><h2>Latest activity</h2></header><div id="overview-activity" class="timeline"></div></article>
+        </div>
+      </section>
+
+      <section id="view-tasks" class="view">
+        <div class="section-heading"><div><h2>Tasks</h2><p class="muted">Deadline-aware work ledger with durable ownership and audit history.</p></div><button id="new-task" class="button primary">New task</button></div>
+        <div class="filters"><select id="task-status-filter"><option value="">All statuses</option><option value="todo">Todo</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="cancelled">Cancelled</option></select><label class="check"><input id="overdue-filter" type="checkbox"> Overdue only</label></div>
+        <div id="task-board" class="task-board"></div>
+      </section>
+
+      <section id="view-time" class="view">
+        <div class="section-heading"><div><h2>Work time</h2><p class="muted">Explicit task-linked timers and manager-approved entries. Login duration is not counted as work time.</p></div></div>
+        <article class="panel timer-panel">
+          <header><h2>Current timer</h2></header>
+          <div id="timer-current"></div>
+          <form id="timer-form" class="timer-form">
+            <label>Task<select id="timer-task"><option value="">No task</option></select></label>
+            <label>Notes<input id="timer-notes" maxlength="10000" placeholder="What are you working on?"></label>
+            <button class="button primary" type="submit">Start timer</button>
+          </form>
+        </article>
+        <div id="work-sessions" class="table-wrap section-gap"></div>
+      </section>
+
+      <section id="view-nodes" class="view"><div class="section-heading"><div><h2>Node health</h2><p class="muted">Prometheus summaries with detailed historical investigation in Grafana.</p></div><a id="grafana-overview" class="button ghost" href="#" target="_blank" rel="noopener noreferrer">Open Grafana</a></div><div id="node-health" class="table-wrap"></div></section>
+
+      <section id="view-access" class="view"><div class="section-heading"><div><h2>Access evidence</h2><p class="muted">Normalized SSH, sudo, Tailscale, service, and application access. Raw logs remain in Loki.</p></div></div><div id="access-events" class="table-wrap"></div></section>
+
+      <section id="view-workers" class="view"><div class="section-heading"><div><h2>Workers</h2><p class="muted">Presence is derived from signed-in-time heartbeats, not stale configuration.</p></div></div><div id="workers" class="table-wrap"></div></section>
+      <section id="view-people" class="view"><div class="section-heading"><div><h2>People</h2><p class="muted">Forgejo identities, authorization, active timers, and submitted or approved time.</p></div></div><div id="people" class="table-wrap"></div></section>
+      <section id="view-runs" class="view"><div class="section-heading"><div><h2>Runs</h2><p class="muted">Queued work, execution state, and worker results.</p></div></div><div id="runs" class="table-wrap"></div></section>
+      <section id="view-activity" class="view"><div class="section-heading"><div><h2>Activity</h2><p class="muted">Normalized Git, task, run, and worker events.</p></div></div><div id="activity" class="timeline panel"></div></section>
+    </main>
+  </div>
+
+  <dialog id="task-dialog">
+    <form id="task-form" method="dialog">
+      <header><div><p class="eyebrow">WORK ITEM</p><h2 id="task-form-title">New task</h2></div><button type="button" id="close-task" class="icon-button" aria-label="Close">×</button></header>
+      <input id="task-id" type="hidden"><input id="task-version" type="hidden">
+      <label>Title<input id="task-title" maxlength="500" required></label>
+      <label>Description<textarea id="task-description" rows="5" maxlength="50000"></textarea></label>
+      <div class="form-grid">
+        <label>Status<select id="task-status"><option value="todo">Todo</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="cancelled">Cancelled</option></select></label>
+        <label>Priority<select id="task-priority"><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+        <label>Due date<input id="task-due" type="datetime-local"></label>
+        <label>Person<select id="task-user"><option value="">Unassigned</option></select></label>
+        <label>Worker<select id="task-worker"><option value="">Unassigned</option></select></label>
+        <label>Repository<input id="task-repository" placeholder="owner/repository" maxlength="512"></label>
+      </div>
+      <p id="task-error" class="error" role="alert"></p>
+      <footer><button id="archive-task" type="button" class="button danger hidden">Archive</button><span class="spacer"></span><button type="button" id="cancel-task" class="button ghost">Cancel</button><button type="submit" class="button primary">Save task</button></footer>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="/dashboard/static/app.js?v=0.3.3" defer></script>
+</body>
+</html>

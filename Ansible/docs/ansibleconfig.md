@@ -6,7 +6,7 @@ worker rollout conventions.
 
 ## Project location
 
-From a checkout of the repository:
+Run as `infra-lab-user` from a checkout on the infrastructure VM only:
 
 ```bash
 cd TheGarden/Ansible
@@ -29,9 +29,6 @@ TheGarden/Ansible/inventory/hosts.yml
 The active inventory contains:
 
 ```text
-lab_local
-└── server-debian
-
 proxmox_hosts
 └── server-debian
 
@@ -44,6 +41,11 @@ agent_workers
 ├── raphael
 └── donatello
 ```
+
+`infra-lab-services` is the controller and sole local target (LAN `10.1.10.2`,
+Tailscale `100.94.49.45`). `server-debian` is reached explicitly by SSH as
+`df-server@100.102.154.23`; audits and the baseline target `proxmox_hosts`.
+Do not use this local-target inventory from Donatello or bare metal.
 
 The worker hosts use their Tailscale addresses, configured SSH usernames, and
 the `coder` worker role. `inventory/worker-1.yml` is retained as an optional
@@ -78,9 +80,9 @@ TheGarden/Docker-Documents/agent-manager-service
 ```
 
 The Compose `.env` files contain secrets and remain local deployment files;
-they must not be committed. The paths used by
-`inventory/group_vars/docker_hosts.yml` must point to the checkout used by the
-machine running the playbook.
+they must not be committed. `inventory/group_vars/docker_hosts.yml` points
+to the live, separate `/home/infra-lab-user/<name>-service` folders on the VM,
+not to the repository's Compose source directories.
 
 Install the Docker collection and validate the deployment playbook:
 
@@ -103,12 +105,19 @@ services are available.
 ## Worker deployment
 
 The worker inventory is in `inventory/hosts.yml` under `agent_workers`. The
-role and playbook scaffold are:
+existing Pi/LiteLLM provisioning role and canonical playbook are:
 
 ```text
 TheGarden/Ansible/roles/agent_worker
 TheGarden/Ansible/playbooks/agent-workers.yml
 ```
+
+The captured duplicate `configure-agent-workers.yml` is intentionally omitted.
+Pi remains supported until the planned OMP cutover; OMP is not implemented
+by this role. Per-worker LiteLLM keys remain in the controller's
+`/home/infra-lab-user/litellm-service/.worker-XX-api-key` files; activity keys
+are independent files under
+`/home/infra-lab-user/.config/dark-factory/activity-keys/<node>`.
 
 The worker runtime contract, NATS shared-consumer configuration, LiteLLM
 variables, CA trust, and troubleshooting steps are documented in:

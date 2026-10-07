@@ -5,3 +5,4 @@ sqlalchemy[asyncio]==2.0.37
 asyncpg==0.30.0
 uvicorn[standard]==0.34.0
 prometheus-client==0.22.1
+httpx==0.28.1

@@ -6,4 +6,7 @@ all:
           ansible_host: 100.98.125.127
           ansible_user: inkii
           ansible_python_interpreter: /usr/bin/python3
+          worker_id: worker-02
           worker_role: coder
+          litellm_key_source: /home/infra-lab-user/litellm-service/.worker-02-api-key
+          activity_key_source: /home/infra-lab-user/.config/dark-factory/activity-keys/worker-02

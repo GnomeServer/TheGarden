@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: Dark Factory
+    orgId: 1
+    folder: Dark Factory
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/json
+      foldersFromFilesStructure: false

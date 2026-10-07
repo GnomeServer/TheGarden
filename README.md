@@ -49,7 +49,10 @@ TheGarden/
 
 The Ansible project and its supporting directories are grouped under `Ansible/`. Installation history remains in `Ansible/docs/`; current operating instructions are in `Ansible/README.md`.
 
-## Current Ansible controller
+Implementation and recovery handoff: [`docs/github-handoff-dark-factory.md`](docs/github-handoff-dark-factory.md).
+JEV routing, token budgeting, OMP migration, and service placement: [`docs/jev-budget-omp-architecture.md`](docs/jev-budget-omp-architecture.md).
+
+## Bare-metal host and worker controller
 
 | Item | Observed value |
 | --- | --- |
@@ -61,8 +64,10 @@ The Ansible project and its supporting directories are grouped under `Ansible/`.
 | Hardware | Dell Pro Max 14 MC14250 |
 | Ansible | `ansible-core 2.21.4` |
 
-The repository checkout is `TheGarden/`. The Ansible project root is
-`TheGarden/Ansible/`.
+The table above describes the bare-metal host. Captured worker provisioning
+runs as `infra-lab-user` on `infra-lab-services`; it is the sole local inventory
+target. `server-debian` is an explicit SSH target, preventing accidental
+Proxmox tasks on the VM. Run Ansible from `TheGarden/Ansible/` on the VM.
 
 ## Using Ansible
 
@@ -86,7 +91,7 @@ ansible-playbook playbooks/audit.yml
 
 The audit records Ansible facts, installed packages, systemd services, Proxmox version output, and Tailscale status under `Ansible/state/`. Generated state files contain machine-specific information and are ignored by Git by default.
 
-A Debian VM now exists on the Proxmox node as VMID `100`, hostname `infra-lab-services`, with address `10.1.10.2/24` on `ens18`. Its Ansible connection template is `Ansible/inventory/proxmox-guests.example.yml`; it should be activated after installing SSH and confirming the guest is routable.
+A Debian VM exists on the Proxmox node as VMID `100`, hostname `infra-lab-services`, with address `10.1.10.2/24` on `ens18`. Its active Ansible target is `infra-lab-user@10.1.10.2`.
 
 ## Playbooks and roles
 
@@ -136,16 +141,20 @@ The role does not install Proxmox or modify networking. The staged installation 
 
 ## Inventory and Tailscale
 
-`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and the approved worker nodes in the `agent_workers` group. The Docker target is in the `docker_hosts` group and uses `/usr/bin/python3`; worker hosts use their remote Python interpreters. The current worker runtime still requires manual setup; see [`agent-worker/README.md`](agent-worker/README.md). `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated tests and is not loaded separately by default. Remote Tailscale peers are also available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling additional peers.
+`Ansible/inventory/hosts.yml` preserves the four coder IDs and separate key
+files. The services VM is `10.1.10.2`; the local Docker networks on Donatello
+and on the VM are separate even when their names match.
 
-Observed Tailscale nodes:
+The operator has restored both central hosts and supplied a running-service
+snapshot. Reconciliation and deployment steps are in
+[`docs/infra-reconciliation.md`](docs/infra-reconciliation.md).
 
-- `server-debian` — `100.102.154.23` — this host
-- `infra-lab-services` — `100.94.49.45` — active VM
-- `donatello` — `100.94.145.104` — active
-- `inkii` — `100.98.125.127` — coder worker
-- `naruto-dell-pro-max-14-mc14250` — `100.88.92.78`
-- `raphael` — `100.116.35.103` — active
+- `server-debian` — `100.102.154.23` — bare-metal host, SSH target
+- `infra-lab-services` — `100.94.49.45` — services VM and worker controller
+- `donatello` — `100.94.145.104` — online coder, `worker-03`
+- `inkii` — `100.98.125.127` — online coder, `worker-02`
+- `naruto-dell-pro-max-14-mc14250` — `100.88.92.78` — online coder, `worker-04`
+- `raphael` — `100.116.35.103` — online coder, `worker-01`
 
 ## Git workflow
 

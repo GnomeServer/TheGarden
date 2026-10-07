@@ -1,0 +1,88 @@
+---
+- name: Require node activity collector configuration
+  ansible.builtin.assert:
+    that:
+      - activity_manager_url is defined
+      - activity_manager_url | length > 0
+      - activity_key_source is defined
+      - activity_key_source | length > 0
+    fail_msg: "Activity manager URL or node key source is missing for {{ inventory_hostname }}"
+
+- name: Check node activity key on controller
+  ansible.builtin.stat:
+    path: "{{ activity_key_source }}"
+  delegate_to: localhost
+  register: activity_key_source_stat
+
+- name: Require node activity key to exist
+  ansible.builtin.assert:
+    that:
+      - activity_key_source_stat.stat.exists
+      - activity_key_source_stat.stat.isreg
+    fail_msg: "Missing node activity key: {{ activity_key_source }}"
+
+- name: Create node activity collector directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /opt/dark-factory/activity-collector, mode: "0755" }
+    - { path: /etc/dark-factory, mode: "0700" }
+    - { path: /var/lib/dark-factory-activity, mode: "0700" }
+
+- name: Install node activity collector
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../node-activity-collector/collector.py"
+    dest: /opt/dark-factory/activity-collector/collector.py
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart node activity collector
+
+- name: Install node-scoped activity key
+  ansible.builtin.copy:
+    src: "{{ activity_key_source }}"
+    dest: /etc/dark-factory/activity-key
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart node activity collector
+
+- name: Install optional Caddy root CA
+  ansible.builtin.copy:
+    src: "{{ activity_ca_source }}"
+    dest: /etc/dark-factory/caddy-root.crt
+    owner: root
+    group: root
+    mode: "0644"
+  when: activity_ca_source is defined and activity_ca_source | length > 0
+  notify: Restart node activity collector
+
+- name: Configure node activity collector
+  ansible.builtin.template:
+    src: activity-collector.env.j2
+    dest: /etc/dark-factory/activity-collector.env
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart node activity collector
+
+- name: Install node activity collector service
+  ansible.builtin.template:
+    src: dark-factory-activity-collector.service.j2
+    dest: /etc/systemd/system/dark-factory-activity-collector.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart node activity collector
+
+- name: Enable and start node activity collector
+  ansible.builtin.systemd:
+    name: dark-factory-activity-collector
+    enabled: true
+    state: started
+    daemon_reload: true

@@ -141,6 +141,9 @@ export WORKER_ROLE='coder'
 export WORKER_CONSUMER='agent-workers-coder'
 export AGENT_WORKSPACE="$HOME/agent-workspace"
 export ALLOW_GENERATED_CODE=1
+export WORKER_VERSION='0.2.0'
+export WORKER_HEARTBEAT_INTERVAL=15
+export WORKER_CAPABILITIES='python-script'
 ```
 
 The model gateway uses the worker-scoped LiteLLM virtual key:
@@ -178,6 +181,33 @@ cd ~/agent-worker
 An idle worker should not print an error for an empty queue. The pull timeout is
 caught and the worker waits for the next event. A worker connection error is
 different and should be investigated rather than hidden.
+
+Stop a foreground test worker with `Ctrl+C`. A normal stop prints
+`worker stopped`, closes its JetStream subscription and NATS connection, and
+exits without a traceback. A traceback on ordinary `Ctrl+C` is a worker
+shutdown bug, not a task failure.
+
+The worker publishes `agent.workers.heartbeat` immediately after connecting,
+every `WORKER_HEARTBEAT_INTERVAL` seconds, and whenever it changes between
+`idle` and `busy`. It also publishes `agent.runs.status` before execution so
+the Manager can move a queued run to `running`. Keep the heartbeat interval
+below the Manager's offline threshold (45 seconds by default). Every event has
+a unique `event_id`; do not put credentials or model input in heartbeat fields.
+
+Agent Manager preserves the live infrastructure admission check:
+`agent.workers.health.<role>` is a Core NATS request/reply subject. An enabled
+worker responds with its ID, role, and hostname; disabled workers and workers
+not matching an explicit target stay silent. Start an execution-enabled test
+worker before submitting the smoke run, or the API returns `503
+NO_WORKER_AVAILABLE` without queueing it. A health reply reports reachability,
+not a reserved worker slot; busy workers may still respond. Durable queue
+consumers retain `DeliverPolicy.ALL` so accepted work can replay after restart.
+
+The captured change does not implement a process lock, leases, fencing,
+mid-run cancellation, or exactly-once execution. Targeted runs are still
+intended for a single-worker test; a shared pull queue does not route a message
+to a particular worker. Use role-only metadata for ordinary pooled work.
+
 
 Optional limits:
 

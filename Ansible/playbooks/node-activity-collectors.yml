@@ -1,0 +1,8 @@
+---
+- name: Configure Dark Factory node activity collectors
+  hosts: agent_workers:docker_hosts:proxmox_hosts
+  gather_facts: true
+  become: true
+
+  roles:
+    - node_activity_collector

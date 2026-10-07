@@ -11,6 +11,7 @@ VM Tailscale:       100.94.49.45
 Shared Docker net:  caddy_proxy
 Caddy hostname:     infra-lab-services.tail494f6d.ts.net
 Grafana URL:        https://infra-lab-services.tail494f6d.ts.net/grafana/
+Dashboard URL:      https://infra-lab-services.tail494f6d.ts.net/dashboard/
 ```
 
 The verified request path is:
@@ -24,10 +25,10 @@ A direct request to `https://infra-lab-services.tail494f6d.ts.net/grafana/login`
 Open WebUI, Ollama, and llama.cpp are also running on the VM. The Agent
 Manager control-plane Compose project is stored in
 `TheGarden/Docker-Documents/agent-manager-service` and includes the manager
-API, a private PostgreSQL database, and NATS JetStream. Its API is
-loopback-bound on port `8090` and is available to containers on `caddy_proxy` at
-`http://agent-manager:8000`. The remote worker pool reaches NATS on the VM's
-Tailscale address and is documented in [`../agent-worker/README.md`](../agent-worker/README.md).
+API, a private PostgreSQL database, and NATS JetStream. Its loopback port is
+`8090`; Caddy publishes only the dashboard, authentication, and API routes.
+The remote worker pool reaches NATS on the VM's Tailscale address and is
+documented in [`../agent-worker/README.md`](../agent-worker/README.md).
 
 The VM now has its own Tailscale identity, so other tailnet devices can use the MagicDNS hostname directly. The older `tail494f6d.ts.net` alias is not the canonical service name.
 
@@ -41,7 +42,10 @@ The VM now has its own Tailscale identity, so other tailnet devices can use the 
 - [`caddy_service/README.md`](caddy_service/README.md) — Caddy Compose deployment, persistent TLS volumes, network membership, and operations.
 - [`agent-manager-service/README.md`](agent-manager-service/README.md) — Agent Manager, PostgreSQL, NATS JetStream, API verification, and Ansible deployment.
 - [`../agent-worker/README.md`](../agent-worker/README.md) — Remote worker installation, dynamic script prompts, and NATS/LiteLLM configuration.
-- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — The Caddy routes for `/grafana/`, `/litellm/`, `/forgejo/`, and the Proxmox fallback route.
+- [`../docs/dark-factory-dashboard.md`](../docs/dark-factory-dashboard.md) — dashboard deployment, OAuth, webhooks, tasks, workers, backups, and troubleshooting.
+- [`../docs/mcp-dashboard.md`](../docs/mcp-dashboard.md) — safe MCP tool and resource contract for dashboard automation.
+- [`../docs/github-handoff-dark-factory.md`](../docs/github-handoff-dark-factory.md) — complete GitHub implementation, recovery, security, deployment, and acceptance-test handoff.
+- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — Caddy routes for Grafana, Forgejo, Agent Manager, and the Proxmox fallback.
 
 ## Important test command
 

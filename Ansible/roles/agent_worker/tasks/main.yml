@@ -67,7 +67,7 @@
                                                                                                    
    - name: Configure Node to trust the Caddy root                                                  
      ansible.builtin.lineinfile:                                                                   
-       path: "{{ ansible_user_dir }}/.profile"                                                     
+       path: "{{ item }}"
        regexp: '^export NODE_EXTRA_CA_CERTS='                                                      
        line: 'export NODE_EXTRA_CA_CERTS="$HOME/.pi/agent/certs/caddy-local-root.crt"'             
        create: true

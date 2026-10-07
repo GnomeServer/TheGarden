@@ -1,0 +1,216 @@
+{
+  "version": 1,
+  "repository": "TheGarden/dark-factory-roadmap",
+  "tasks": [
+    {
+      "title": "[EXEC-01] Install one canonical worker service and process lock",
+      "priority": "urgent",
+      "description": "Deploy exactly one systemd-managed OMP worker per node, remove obsolete worker services, reject a second process through an operating-system lock, and document manual foreground testing. Done when systemd plus a manual launch cannot create two active workers."
+    },
+    {
+      "title": "[EXEC-02] Add task attempts, leases, and fencing tokens",
+      "priority": "urgent",
+      "description": "Persist attempt_id, lease owner, lease expiry, and a monotonic fencing token. Only the current lease holder may update or complete an attempt. Done when an obsolete worker result is rejected with a conflict."
+    },
+    {
+      "title": "[EXEC-03] Extend JetStream acknowledgement while work is active",
+      "priority": "urgent",
+      "description": "Send in-progress acknowledgements below ack_wait while a lease is valid. Stop work when lease renewal fails. Done when a long controlled task is not redelivered and lease loss stops execution."
+    },
+    {
+      "title": "[EXEC-04] Enforce one accepted terminal result per attempt",
+      "priority": "urgent",
+      "description": "Add a database uniqueness invariant for terminal attempt results and make completion ingestion transactional. Done when duplicate and independently generated completion events produce one accepted result and one timeline transition."
+    },
+    {
+      "title": "[EXEC-05] Implement active cancellation in workers",
+      "priority": "high",
+      "description": "Consume targeted cancellation, terminate the bounded child process, preserve evidence, publish a fenced cancellation result, and acknowledge safely. Done when a running smoke task reaches cancelled without an orphan process."
+    },
+    {
+      "title": "[EXEC-06] Add redelivery, restart, and duplicate-process regression tests",
+      "priority": "urgent",
+      "description": "Exercise manager restart, worker restart, ack timeout, duplicate process launch, stale fencing token, duplicate result, and cancellation. Tests must fail before the execution protections and pass afterward."
+    },
+    {
+      "title": "[CODER-01] Define the repository coding mission contract",
+      "priority": "high",
+      "description": "Version required inputs: repository, base ref, goal, allowed and forbidden actions, acceptance criteria, evidence, runtime, attempts, budget, and approval policy. Reject incomplete missions before queueing."
+    },
+    {
+      "title": "[CODER-02] Build disposable Forgejo checkout and branch workflow",
+      "priority": "high",
+      "description": "Clone an approved repository into an isolated per-attempt workspace, verify the base ref, create a bounded feature branch, and prevent protected-branch pushes."
+    },
+    {
+      "title": "[CODER-03] Run approved project checks and produce evidence manifest",
+      "priority": "high",
+      "description": "Execute only mission-approved test, lint, type, and security commands with timeouts. Record command, exit code, duration, output reference, changed files, and environment version in a structured evidence manifest."
+    },
+    {
+      "title": "[CODER-04] Push branch and open Forgejo pull request",
+      "priority": "high",
+      "description": "Push the feature branch with a worker-scoped Forgejo credential and open a pull request linking mission, task, attempt, evidence, and acceptance criteria. Never merge directly."
+    },
+    {
+      "title": "[REVIEW-01] Implement independent reviewer role and queue",
+      "priority": "high",
+      "description": "Create a reviewer capability, subject, consumer, and worker path that cannot reuse the coder workspace or coder model context."
+    },
+    {
+      "title": "[REVIEW-02] Review from a fresh checkout with deterministic checks",
+      "priority": "high",
+      "description": "Fetch the coder branch into a fresh workspace, inspect the diff, rerun approved checks, and compare evidence with acceptance criteria."
+    },
+    {
+      "title": "[REVIEW-03] Return structured approval or changes-requested decision",
+      "priority": "high",
+      "description": "Persist approved, changes_requested, or failed with findings and evidence. Enforce attempt limits and prevent the coder identity from approving its own result."
+    },
+    {
+      "title": "[ORCH-01] Add missions and versioned task dependency graph",
+      "priority": "high",
+      "description": "Persist missions, tasks, dependencies, required capabilities, acceptance criteria, evidence requirements, approval gates, and budget references."
+    },
+    {
+      "title": "[ORCH-02] Implement explicit task and mission state machines",
+      "priority": "urgent",
+      "description": "Define and enforce planned, blocked, ready, leased, running, validating, awaiting_review, changes_requested, awaiting_approval, passed, failed, cancel_requested, and cancelled transitions."
+    },
+    {
+      "title": "[ORCH-03] Implement capability-based scheduling through supervisor",
+      "priority": "high",
+      "description": "Match ready tasks to eligible workers by role, advertised capability, policy, availability, and JEV route decision. Workers must not self-select unauthorized tasks."
+    },
+    {
+      "title": "[ORCH-04] Add human approval gates and bounded retry policy",
+      "priority": "high",
+      "description": "Require policy-defined approval before merge, release, deployment, infrastructure, or secret-sensitive actions. Persist retry reason and cap attempts, model calls, runtime, and spend."
+    },
+    {
+      "title": "[JEV-01] Define JEV routing decision contract",
+      "priority": "high",
+      "description": "Treat JEV as the deterministic routing policy component. Define task features, candidate models and agents, constraints, decision, estimate, confidence, policy version, and explanation. JEV recommends a route; the supervisor enforces it."
+    },
+    {
+      "title": "[JEV-02] Build model and agent capability registry",
+      "priority": "high",
+      "description": "Track model context window, price, supported tools, latency class, privacy tier, worker availability, role compatibility, and observed task outcomes using versioned records."
+    },
+    {
+      "title": "[JEV-03] Implement deterministic cheapest-eligible routing baseline",
+      "priority": "high",
+      "description": "Filter candidates by hard capability, privacy, context, role, and availability requirements, then choose the lowest expected cost that meets configured quality and latency thresholds. Do not use an LLM to make the first routing policy."
+    },
+    {
+      "title": "[JEV-04] Reserve token and cost budget before dispatch",
+      "priority": "high",
+      "description": "Atomically reserve estimated input, output, and cost budget before a task is leased. Reject or require approval when a mission, user, team, or period budget would be exceeded."
+    },
+    {
+      "title": "[JEV-05] Reconcile estimates with authoritative usage",
+      "priority": "high",
+      "description": "After completion, commit actual LiteLLM/provider usage, release unused reservation, record estimate error, and preserve the pricing version used."
+    },
+    {
+      "title": "[JEV-06] Add routing simulation and policy evaluation",
+      "priority": "normal",
+      "description": "Replay historical task metadata without dispatching work, compare route cost and success, and require evidence before changing production routing policy."
+    },
+    {
+      "title": "[BUDGET-01] Design append-only token and cost ledger",
+      "priority": "high",
+      "description": "Create idempotent usage events keyed by provider or gateway request ID. Store model, pricing version, user, mission, task, attempt, worker, input tokens, output tokens, cached tokens, and integer micro-cost."
+    },
+    {
+      "title": "[BUDGET-02] Ingest authoritative LiteLLM usage",
+      "priority": "high",
+      "description": "Collect completed request usage from LiteLLM callbacks or logs without exposing model keys or prompt content. Deduplicate replay and flag requests that cannot be attributed."
+    },
+    {
+      "title": "[BUDGET-03] Ingest OMP execution attribution",
+      "priority": "high",
+      "description": "Have OMP attach mission, task, attempt, worker, human owner, role, and routing-decision IDs to model calls and emit bounded usage telemetry."
+    },
+    {
+      "title": "[BUDGET-04] Implement scoped budgets and reservations",
+      "priority": "high",
+      "description": "Support mission, task, user, team, model, and monthly budgets with reservation, committed spend, released amount, warning threshold, hard limit, and approval override."
+    },
+    {
+      "title": "[BUDGET-05] Build token budget dashboard module",
+      "priority": "high",
+      "description": "Add a Budget module showing current period spend, reserved versus committed cost, tokens by model and role, usage by person and worker, unattributed usage, forecast, and threshold alerts. Keep financial ledger authoritative in PostgreSQL, not Grafana."
+    },
+    {
+      "title": "[BUDGET-06] Add cost alerts and approval workflow",
+      "priority": "normal",
+      "description": "Notify at configured percentages, block at hard limits, allow explicit manager override with reason and expiry, and deduplicate notifications."
+    },
+    {
+      "title": "[OMP-01] Inventory and remove Pi runtime dependencies",
+      "priority": "high",
+      "description": "List every Pi configuration, model adapter, command, environment variable, Ansible task, and documentation dependency. Define clean removal criteria without compatibility aliases."
+    },
+    {
+      "title": "[OMP-02] Define OMP worker execution adapter",
+      "priority": "high",
+      "description": "Specify how the supervisor gives OMP a fenced task, allowed tools, repository workspace, model route, budget reservation, limits, cancellation channel, and required evidence."
+    },
+    {
+      "title": "[OMP-03] Enforce OMP tool, credential, filesystem, and network policy",
+      "priority": "urgent",
+      "description": "Run OMP with least privilege, bounded workspace, approved commands, scoped credentials, resource limits, and no password-manager, Proxmox-admin, controller-key, or Docker-socket access."
+    },
+    {
+      "title": "[OMP-04] Emit OMP lifecycle and usage telemetry",
+      "priority": "high",
+      "description": "Emit started, progress, tool, model usage, evidence, completed, failed, and cancelled events tied to attempt and fencing token without leaking prompt or secret content."
+    },
+    {
+      "title": "[OMP-05] Cut over workers from Pi to OMP",
+      "priority": "high",
+      "description": "Deploy OMP to one disposable worker, pass execution and budget acceptance tests, migrate every worker and Ansible caller, then remove obsolete Pi files, services, docs, and configuration."
+    },
+    {
+      "title": "[FLEET-01] Add per-worker NATS authentication and permissions",
+      "priority": "urgent",
+      "description": "Issue separate worker-01 through worker-04 credentials plus a manager credential. Restrict each to required JetStream pull, inbox, heartbeat, status, and completion subjects."
+    },
+    {
+      "title": "[FLEET-02] Roll out workers one at a time",
+      "priority": "high",
+      "description": "Deploy and verify Inkii, Donatello, Raphael, then Naruto. Require one clean run, one completion, no duplicate process, correct usage attribution, and successful credential revocation before adding the next node."
+    },
+    {
+      "title": "[FLEET-03] Add planner, coder, reviewer, and validator capability pools",
+      "priority": "normal",
+      "description": "Use one durable consumer per role or capability pool. A physical node may advertise approved capabilities, but task assignment must remain supervisor-controlled."
+    },
+    {
+      "title": "[FLEET-04] Run complete mission acceptance test",
+      "priority": "high",
+      "description": "Prove mission planning, JEV route and budget reservation, coder branch, independent review, deterministic validation, human approval, usage reconciliation, notification, and final evidence."
+    },
+    {
+      "title": "[PLACE-01] Measure central VM resource baseline and headroom",
+      "priority": "high",
+      "description": "After recovery, measure CPU, memory, disk, I/O, container restarts, PostgreSQL size, Prometheus growth, and backup duration. Define warning and hard capacity thresholds before adding services."
+    },
+    {
+      "title": "[PLACE-02] Apply Compose resource limits and service priorities",
+      "priority": "high",
+      "description": "Protect PostgreSQL, NATS, Forgejo, and Caddy from observability or dashboard exhaustion using memory, CPU, restart, healthcheck, and disk-retention policies."
+    },
+    {
+      "title": "[PLACE-03] Keep inference and task execution off the services VM",
+      "priority": "urgent",
+      "description": "Run model inference and OMP task execution on workers. The services VM should coordinate, persist, proxy, and observe rather than execute generated repository code."
+    },
+    {
+      "title": "[PLACE-04] Define VM split trigger and migration plan",
+      "priority": "normal",
+      "description": "Keep one services VM initially. Split observability into a second VM only when measured memory, disk I/O, retention, or failure isolation thresholds are crossed. Document backup, DNS, network, and rollback steps before moving data."
+    }
+  ]
+}

@@ -12,7 +12,9 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
+import uuid
 
 import nats
 from nats.errors import TimeoutError as NatsTimeoutError
@@ -28,6 +30,13 @@ WORKSPACE = Path(
 WORKER_CONSUMER = os.getenv(
     "WORKER_CONSUMER", f"agent-workers-{WORKER_ROLE}"
 )
+WORKER_VERSION = os.getenv("WORKER_VERSION", "0.2.0")
+HEARTBEAT_INTERVAL = float(os.getenv("WORKER_HEARTBEAT_INTERVAL", "15"))
+WORKER_CAPABILITIES = [
+    value.strip()
+    for value in os.getenv("WORKER_CAPABILITIES", "python-script").split(",")
+    if value.strip()
+]
 
 # MODEL_BASE_URL should include the OpenAI-compatible /v1 path, for example:
 # https://infra-lab-services.tail494f6d.ts.net/litellm/v1
@@ -156,7 +165,57 @@ async def generate_source(goal: str, metadata: dict[str, Any]) -> tuple[str, str
     return source, "model"
 
 
-async def process_message(js: Any, message: Any) -> None:
+async def respond_to_health(message: Any) -> None:
+    """Advertise an execution-enabled worker without claiming or reserving work."""
+    if not message.reply or not ALLOW_GENERATED_CODE:
+        return
+    try:
+        request = json.loads(message.data.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not isinstance(request, dict):
+        return
+    target_worker = request.get("worker_id")
+    if target_worker is not None and target_worker != WORKER_ID:
+        return
+    await message.respond(json.dumps({
+        "worker_id": WORKER_ID,
+        "worker_role": WORKER_ROLE,
+        "hostname": socket.gethostname(),
+    }).encode("utf-8"))
+
+def worker_event(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event": "worker.heartbeat",
+        "event_id": str(uuid.uuid4()),
+        "worker_id": WORKER_ID,
+        "worker_role": WORKER_ROLE,
+        "hostname": socket.gethostname(),
+        "status": state["status"],
+        "current_run_id": state.get("current_run_id"),
+        "version": WORKER_VERSION,
+        "capabilities": WORKER_CAPABILITIES,
+        "error": state.get("error"),
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def publish_worker_state(js: Any, state: dict[str, Any]) -> None:
+    event = worker_event(state)
+    await js.publish(
+        "agent.workers.heartbeat",
+        json.dumps(event).encode("utf-8"),
+        headers={"Nats-Msg-Id": event["event_id"]},
+    )
+
+
+async def heartbeat_loop(js: Any, state: dict[str, Any]) -> None:
+    while True:
+        await publish_worker_state(js, state)
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+
+async def process_message(js: Any, message: Any, state: dict[str, Any]) -> None:
     event = json.loads(message.data.decode("utf-8"))
     metadata = event.get("metadata") or {}
 
@@ -179,9 +238,26 @@ async def process_message(js: Any, message: Any) -> None:
     if not isinstance(run_id, str) or not run_id:
         raise RuntimeError("event is missing run_id")
 
+    state.update(status="busy", current_run_id=run_id, error=None)
+    await publish_worker_state(js, state)
+    started = {
+        "event": "run.status",
+        "event_id": str(uuid.uuid4()),
+        "run_id": run_id,
+        "worker_id": WORKER_ID,
+        "status": "running",
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await js.publish(
+        "agent.runs.status",
+        json.dumps(started).encode("utf-8"),
+        headers={"Nats-Msg-Id": started["event_id"]},
+    )
+
     script_path = WORKSPACE / run_id / "generated_agent.py"
     result: dict[str, Any] = {
         "event": "run.completed",
+        "event_id": str(uuid.uuid4()),
         "run_id": run_id,
         "worker_id": WORKER_ID,
         "hostname": socket.gethostname(),
@@ -244,7 +320,17 @@ async def process_message(js: Any, message: Any) -> None:
         # completion event so the manager can mark the database run failed.
         result["error"] = str(exc)[:2000]
 
-    await js.publish("agent.runs.completed", json.dumps(result).encode("utf-8"))
+    await js.publish(
+        "agent.runs.completed",
+        json.dumps(result).encode("utf-8"),
+        headers={"Nats-Msg-Id": result["event_id"]},
+    )
+    state.update(
+        status="idle",
+        current_run_id=None,
+        error=result.get("error") or result.get("stderr") or None,
+    )
+    await publish_worker_state(js, state)
     print(json.dumps(result, indent=2), flush=True)
     await message.ack()
 
@@ -255,6 +341,8 @@ async def main() -> None:
         name=f"{WORKER_ID}-{socket.gethostname()}",
     )
     js = nc.jetstream()
+    state: dict[str, Any] = {"status": "idle", "current_run_id": None, "error": None}
+    heartbeat_task = asyncio.create_task(heartbeat_loop(js, state))
 
     subscription = await js.pull_subscribe(
         "agent.runs.created",
@@ -269,6 +357,11 @@ async def main() -> None:
             deliver_policy=DeliverPolicy.ALL,
         ),
     )
+    health_subscription = await nc.subscribe(
+        f"agent.workers.health.{WORKER_ROLE}",
+        cb=respond_to_health,
+    )
+    await nc.flush()
 
     try:
         while True:
@@ -276,11 +369,17 @@ async def main() -> None:
                 messages = await subscription.fetch(1, timeout=120)
             except NatsTimeoutError:
                 continue
-            await process_message(js, messages[0])
+            await process_message(js, messages[0], state)
     finally:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
         await subscription.unsubscribe()
+        await health_subscription.unsubscribe()
         await nc.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("worker stopped", flush=True)
