@@ -55,6 +55,15 @@ class CredentialBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(existing.forgejo_user_id, 1)
         self.assertEqual(existing.role, "admin")
 
+    async def test_first_forgejo_login_creates_an_active_account(self):
+        added = []
+        session = SimpleNamespace(scalar=AsyncMock(side_effect=[None, None]), add=added.append)
+        with patch("agent_manager.dashboard.settings.bootstrap_admins", "donatello"):
+            user = await upsert_forgejo_user(session, {"id": 7, "login": "donatello"})
+        self.assertIs(user.active, True)
+        self.assertEqual(user.role, "admin")
+        self.assertEqual(added, [user])
+
     async def test_service_account_cannot_be_assigned_human_tasks(self):
         for role, active, allowed in (("service", True, False), ("member", False, False), ("member", True, True)):
             with self.subTest(role=role, active=active):

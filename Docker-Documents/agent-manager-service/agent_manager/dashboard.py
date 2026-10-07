@@ -225,6 +225,7 @@ async def upsert_forgejo_user(session: AsyncSession, data: dict[str, Any]) -> Us
             forgejo_user_id=forgejo_id,
             forgejo_login=login,
             role="admin" if login.lower() in settings.admin_logins else "member",
+            active=True,
         )
         session.add(user)
     user.forgejo_login = login
