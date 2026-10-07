@@ -1,0 +1,35 @@
+{                                                                                               
+     "providers": {                                                                                
+       "litellm": {                                                                                
+         "name": "LiteLLM (TheGarden)",                                                            
+         "baseUrl": {{ litellm_base_url | to_json }},                                              
+         "api": "openai-completions",                                                              
+         "apiKey": {{ litellm_api_key_expression | to_json }},                                     
+         "models": [                                                                               
+           {                                                                                       
+             "id": {{ litellm_model_id | to_json }},                                               
+             "name": {{ litellm_model_name | to_json }},                                           
+             "reasoning": true,                                                                    
+             "input": [                                                                            
+               "text"                                                                              
+             ],                                                                                    
+             "contextWindow": 272000,                                                              
+             "maxTokens": 32768,                                                                   
+             "cost": {                                                                             
+               "input": 0,                                                                         
+               "output": 0,                                                                        
+               "cacheRead": 0,                                                                     
+               "cacheWrite": 0                                                                     
+             },                                                                                    
+             "compat": {                                                                           
+               "supportsStore": false,                                                             
+               "supportsDeveloperRole": true,                                                      
+               "supportsReasoningEffort": true,                                                    
+               "supportsUsageInStreaming": true,                                                   
+               "maxTokensField": "max_completion_tokens"                                           
+             }                                                                                     
+           }                                                                                       
+         ]                                                                                         
+       }                                                                                           
+     }                                                                                             
+   }

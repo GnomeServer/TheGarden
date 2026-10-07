@@ -156,6 +156,29 @@ async def generate_source(goal: str, metadata: dict[str, Any]) -> tuple[str, str
     return source, "model"
 
 
+async def respond_to_health(msg: Any) -> None:
+    try:
+        request = json.loads(msg.data.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        request = {}
+
+    target_worker = request.get("worker_id")
+    if target_worker and target_worker != WORKER_ID:
+        return
+    if not ALLOW_GENERATED_CODE:
+        return
+
+    await msg.respond(
+        json.dumps(
+            {
+                "worker_id": WORKER_ID,
+                "worker_role": WORKER_ROLE,
+                "hostname": socket.gethostname(),
+            }
+        ).encode("utf-8")
+    )
+
+
 async def process_message(js: Any, message: Any) -> None:
     event = json.loads(message.data.decode("utf-8"))
     metadata = event.get("metadata") or {}
@@ -256,6 +279,11 @@ async def main() -> None:
     )
     js = nc.jetstream()
 
+    health_subscription = await nc.subscribe(
+        f"agent.workers.health.{WORKER_ROLE}",
+        cb=respond_to_health,
+    )
+
     subscription = await js.pull_subscribe(
         "agent.runs.created",
         stream="AGENT_RUNS",
@@ -279,6 +307,7 @@ async def main() -> None:
             await process_message(js, messages[0])
     finally:
         await subscription.unsubscribe()
+        await health_subscription.unsubscribe()
         await nc.close()
 
 

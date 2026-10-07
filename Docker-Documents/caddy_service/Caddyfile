@@ -8,15 +8,32 @@ infra-lab-services.tail494f6d.ts.net {
 	handle @grafana {
 		reverse_proxy grafana:3000
 	}
-
-	@forgejo {
-		path /forgejo /forgejo/*
+	@llama {                                                                               
+       		path /llama /llama/*                                                               
+  	 }                                                                                      
+                                                                                          
+   	handle @llama {                                                                        
+       		uri strip_prefix /llama                                                            
+       		reverse_proxy llama:8080                                                           
+   	}
+	
+	@litellm {
+		path /litellm /litellm/*
 	}
 
-	handle @forgejo {
-		uri strip_prefix /forgejo
-		reverse_proxy forgejo:3000
+	handle @litellm {
+		uri strip_prefix /litellm
+		reverse_proxy litellm:4000
 	}
+
+	@forgejo {                                                                                      
+       		path /forgejo /forgejo/*                                                                    
+   	}                                                                                               
+                                                                                                   
+	 handle @forgejo {
+		uri strip_prefix /forgejo                                                                               
+       		reverse_proxy forgejo:3000                                                                  
+   	}
 
 	handle {
 		reverse_proxy https://10.1.10.156:8006 {
@@ -25,4 +42,9 @@ infra-lab-services.tail494f6d.ts.net {
 			}
 		}
 	}
+}
+
+https://infra-lab-services.tail494f6d.ts.net:8443 {
+	tls internal
+	reverse_proxy open-webui:8080
 }

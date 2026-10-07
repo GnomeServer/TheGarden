@@ -43,6 +43,22 @@ services:
       retries: 10
     networks:
       - manager_internal
+  nats-exporter:
+    image: ${NATS_EXPORTER_IMAGE:-natsio/prometheus-nats-exporter:0.20.2}
+    command:
+      - -varz
+      - -connz
+      - -subz
+      - -jsz=all
+      - http://nats:8222
+    depends_on:
+      nats:
+        condition: service_healthy
+    expose:
+      - "7777"
+    networks:
+      - manager_internal
+      - caddy_proxy
 
   agent-manager:
     build:
@@ -64,7 +80,7 @@ services:
       AGENT_MANAGER_API_TOKEN: ${AGENT_MANAGER_API_TOKEN:?Set AGENT_MANAGER_API_TOKEN in .env}
       FORGEJO_API_URL: ${FORGEJO_API_URL:-http://forgejo:3000/api/v1}
       FORGEJO_TOKEN: ${FORGEJO_TOKEN:-}
-      MODEL_BASE_URL: ${MODEL_BASE_URL:-http://llama:8080/v1}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-http://litellm:4000/v1}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:

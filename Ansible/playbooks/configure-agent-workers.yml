@@ -1,0 +1,8 @@
+---                                                                                             
+   - name: Configure all agent workers for LiteLLM luna                                            
+     hosts: agent_workers                                                                          
+     gather_facts: true                                                                            
+     become: false                                                                                 
+                                                                                                   
+     roles:                                                                                        
+       - agent_worker

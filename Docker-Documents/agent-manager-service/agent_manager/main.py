@@ -13,7 +13,7 @@ from typing import Any, AsyncGenerator
 import nats
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from nats.errors import TimeoutError as NatsTimeoutError
+from nats.errors import NoRespondersError, TimeoutError as NatsTimeoutError
 from nats.js.api import (
     AckPolicy,
     ConsumerConfig,
@@ -259,6 +259,35 @@ async def publish_run_event(request: Request, subject: str, payload: dict[str, A
     )
 
 
+async def find_available_worker(
+    connection: nats.NATS,
+    worker_role: str,
+    target_worker: str | None,
+) -> dict[str, Any] | None:
+    """Return one live worker for a role, or None if none responds."""
+    try:
+        response = await connection.request(
+            f"agent.workers.health.{worker_role}",
+            json.dumps({"worker_id": target_worker}).encode("utf-8"),
+            timeout=1,
+        )
+        worker = json.loads(response.data.decode("utf-8"))
+    except (
+        NatsTimeoutError,
+        NoRespondersError,
+        asyncio.TimeoutError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ):
+        return None
+
+    if worker.get("worker_role") != worker_role:
+        return None
+    if target_worker and worker.get("worker_id") != target_worker:
+        return None
+    return worker
+
+
 async def apply_run_completion(payload: dict[str, Any]) -> None:
     run_id = payload.get("run_id")
     worker_status = payload.get("status")
@@ -413,6 +442,44 @@ async def create_run(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
+    worker_role = body.metadata.get("worker_role", "coder")
+    target_worker = body.metadata.get("worker_id")
+    if (
+        not isinstance(worker_role, str)
+        or not worker_role
+        or not worker_role.replace("-", "").replace("_", "").isalnum()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="metadata.worker_role must be a simple worker role name",
+        )
+    if target_worker is not None and (
+        not isinstance(target_worker, str) or not target_worker
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="metadata.worker_id must be a non-empty string",
+        )
+
+    worker = await find_available_worker(
+        request.app.state.nats,
+        worker_role,
+        target_worker,
+    )
+    if worker is None:
+        target_text = f" {target_worker!r}" if target_worker else ""
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "NO_WORKER_AVAILABLE",
+                "message": (
+                    f"No active{target_text} worker is available for role "
+                    f"{worker_role!r}. Start a worker and retry."
+                ),
+            },
+            headers={"Retry-After": "15"},
+        )
+
     run_id = str(uuid.uuid4())
     record = RunRecord(
         id=run_id,

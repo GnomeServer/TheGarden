@@ -1,37 +1,46 @@
-global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
-
-rule_files:
-  - /etc/prometheus/rules/*.yml
-
-scrape_configs:
-  - job_name: prometheus
-    static_configs:
-      - targets:
-          - prometheus:9090
-
-  # Node Exporter runs in a separate container with the server's host network
-  # namespace. Prometheus reaches it through Docker's host-gateway alias.
-  - job_name: node-exporter
-    static_configs:
-      - targets:
-          - host.docker.internal:9100
-        labels:
-          host: infra-lab-services
-          role: server
-  - job_name: agent-worker-inkii-host
-    static_configs:
-      - targets:
-        - 100.98.125.127:9100
-        labels:
-          host: inkii
-          worker_id: inkii
-          role: coder
-  - job_name: agent-manager
-    metrics_path: /metrics/
-    static_configs:
-      - targets:
-        - agent-manager:8000
-        labels:
-          service: agent-manager
+   global:                                                                                      
+     scrape_interval: 15s                                                                       
+     evaluation_interval: 15s                                                                   
+                                                                                                
+   rule_files:                                                                                  
+     - /etc/prometheus/rules/*.yml                                                              
+                                                                                                
+   scrape_configs:                                                                              
+     - job_name: prometheus                                                                     
+       static_configs:                                                                          
+         - targets:                                                                             
+             - prometheus:9090                                                                  
+                                                                                                
+     - job_name: node-exporter                                                                  
+       static_configs:                                                                          
+         - targets:                                                                             
+             - host.docker.internal:9100                                                        
+           labels:                                                                              
+             host: infra-lab-services                                                           
+             role: server                                                                       
+                                                                                                
+     - job_name: agent-worker-1-host                                                            
+       static_configs:                                                                          
+         - targets:                                                                             
+             - 100.98.125.127:9100                                                              
+           labels:                                                                              
+             host: inkii                                                                        
+             worker_id: worker-1                                                                
+             role: coder                                                                        
+                                                                                                
+     - job_name: agent-manager                                                                  
+       metrics_path: /metrics                                                                   
+       static_configs:                                                                          
+         - targets:                                                                             
+             - agent-manager:8000                                                               
+           labels:                                                                              
+             service: agent-manager                                                             
+                                                                                                
+     - job_name: nats-jetstream                                                                 
+       static_configs:                                                                          
+         - targets:                                                                             
+             - nats-exporter:7777                                                               
+           labels:                                                                              
+             service: nats                                                                      
+             role: jetstream                                                                    
+   
