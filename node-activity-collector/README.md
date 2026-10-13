@@ -54,7 +54,12 @@ create_key infra-lab-services
 
 The plaintext token is returned once. PostgreSQL stores only a keyed hash. Revoking a credential does not affect any other node.
 
-Create a separate `server-debian` key when the collector is approved for the bare-metal host. Its inventory group is intentionally separate from the worker deployment.
+For the requested bare-metal SSH coverage, create `server-debian`'s scoped key
+separately from the worker and VM keys:
+
+```bash
+create_key server-debian
+```
 
 ## Identity correlation
 
@@ -74,6 +79,15 @@ curl -fsS \
 
 Use immutable external IDs where available. A shared Linux account cannot prove which human used it; individual Unix accounts are preferred.
 
+SSH identity is the account authenticated on the target host. For example, a
+connection to `server-debian` as `df-server` is recorded as `df-server`; a
+connection to `infra-lab-services` as `infra-lab-user` is recorded as
+`infra-lab-user`. The event also contains the source address. If `inkii` or
+`donatello` connect through one of those shared accounts, the dashboard cannot
+prove which person initiated the connection from the shared username alone.
+Use distinct target-side Unix accounts and map each Linux username to its
+Forgejo dashboard identity when person-level attribution is required.
+
 ## Deploy with Ansible
 
 Run Ansible as `infra-lab-user` on `infra-lab-services` (LAN `10.1.10.2`,
@@ -84,16 +98,20 @@ bare-metal `server-debian` is reached explicitly over SSH as
 on bare metal or Donatello. Node keys are read from the private controller
 directory `/home/infra-lab-user/.config/dark-factory/activity-keys/<node>`.
 
-The playbook includes all three groups. Limit the initial rollout to workers
-and the VM; provision `server-debian` separately only after approval:
+The playbook includes workers, the infrastructure VM, and the Proxmox host.
+For SSH evidence on the two requested hosts, create independent node keys for
+`infra-lab-services` and `server-debian`, then target only those inventory groups:
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/node-activity-collectors.yml --limit 'agent_workers:docker_hosts' --check --ask-become-pass
-ansible-playbook -i inventory/hosts.yml playbooks/node-activity-collectors.yml --limit 'agent_workers:docker_hosts' --ask-become-pass
+ansible-playbook -i inventory/hosts.yml playbooks/node-activity-collectors.yml --limit 'docker_hosts:proxmox_hosts' --check --diff --ask-become-pass
+ansible-playbook -i inventory/hosts.yml playbooks/node-activity-collectors.yml --limit 'docker_hosts:proxmox_hosts' --ask-become-pass
 ```
 
-For an approved bare-metal rollout, run `create_key server-debian` separately,
-then use the same playbook with `--limit server-debian --ask-become-pass`.
+`infra-lab-services` is the local VM target; `server-debian` is reached over
+SSH as `df-server`. This installs the collector on both hosts, not on the
+worker nodes. Confirm the Agent Manager is reachable, the Caddy CA is trusted,
+and both scoped keys exist before running Ansible. The collector is not
+installed by editing this repository.
 
 The playbook installs:
 

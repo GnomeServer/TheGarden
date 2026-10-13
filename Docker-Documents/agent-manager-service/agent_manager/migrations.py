@@ -22,6 +22,14 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "ON notifications (task_id, kind)",
         ),
     ),
+    (
+        3,
+        (
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS worker_id VARCHAR(255)",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ",
+        ),
+    ),
 )
 
 

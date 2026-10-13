@@ -123,21 +123,20 @@ configuration is documented in `../agent-worker/README.md`.
 
 ## Node activity collectors
 
-`playbooks/node-activity-collectors.yml` targets the infrastructure VM, four
-coder workers, and the bare-metal Proxmox host. Limit the initial deployment
-to `agent_workers:docker_hosts`; deploy to `server-debian` only when approved.
-Worker IDs stay `worker-01` through `worker-04` for Raphael, Inkii, Donatello,
-and Naruto respectively.
-
-Create the node-scoped keys first as documented in
-[`../node-activity-collector/README.md`](../node-activity-collector/README.md),
-then validate and deploy:
+`playbooks/node-activity-collectors.yml` can target the infrastructure VM,
+four coder workers, and bare-metal Proxmox host. For the requested SSH evidence
+on `infra-lab-services` and `server-debian`, provision their node-scoped keys
+as documented in the collector guide, then run:
 
 ```bash
 ansible-playbook playbooks/node-activity-collectors.yml --syntax-check
-ansible-playbook playbooks/node-activity-collectors.yml --limit 'agent_workers:docker_hosts' --check --diff --ask-become-pass
-ansible-playbook playbooks/node-activity-collectors.yml --limit 'agent_workers:docker_hosts' --ask-become-pass
+ansible-playbook playbooks/node-activity-collectors.yml --limit 'docker_hosts:proxmox_hosts' --check --diff --ask-become-pass
+ansible-playbook playbooks/node-activity-collectors.yml --limit 'docker_hosts:proxmox_hosts' --ask-become-pass
 ```
+
+Worker IDs remain `worker-01` through `worker-04` for Raphael, Inkii,
+Donatello, and Naruto. The collector guide documents key provisioning,
+identity attribution, and the shared-account limitation.
 
 The plaintext node keys remain under the private controller directory
 `/home/infra-lab-user/.config/dark-factory/activity-keys/<node>` (directory

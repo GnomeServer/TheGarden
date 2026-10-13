@@ -11,8 +11,12 @@ The dashboard is the human control surface for Agent Manager. PostgreSQL remains
 - Signed, idempotent Forgejo push, branch, pull-request, issue, and release event ingestion.
 - A normalized activity timeline for task, run, worker, and Forgejo events.
 - Server-Sent Events (SSE) for live browser refresh.
+- Agent runs persist the assigned worker, start and completion times, elapsed execution duration, final status, and failure details. Active durations tick in the browser; worker and run updates arrive through SSE.
+- SSH access evidence records successful/failed authentication and session open/close events from each installed node collector. The target-side username and source address are retained.
+- OpenWebUI coverage is limited to submissions made through the opt-in Agent Manager Pipe. Ordinary chats, direct model requests, and full token usage are not ingested.
 
 The dashboard sees server-side Git activity. It cannot observe uncommitted local file changes. Do not present local hooks as an authoritative audit mechanism.
+Shared target accounts such as `df-server` or `infra-lab-user` identify only the account and source address, not the person using it. Use individual Unix accounts for person-level attribution.
 
 ## Request flow
 

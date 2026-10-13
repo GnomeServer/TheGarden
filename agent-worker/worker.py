@@ -240,13 +240,14 @@ async def process_message(js: Any, message: Any, state: dict[str, Any]) -> None:
 
     state.update(status="busy", current_run_id=run_id, error=None)
     await publish_worker_state(js, state)
+    run_started_at = datetime.now(timezone.utc)
     started = {
         "event": "run.status",
         "event_id": str(uuid.uuid4()),
         "run_id": run_id,
         "worker_id": WORKER_ID,
         "status": "running",
-        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "sent_at": run_started_at.isoformat(),
     }
     await js.publish(
         "agent.runs.status",
@@ -262,6 +263,7 @@ async def process_message(js: Any, message: Any, state: dict[str, Any]) -> None:
         "worker_id": WORKER_ID,
         "hostname": socket.gethostname(),
         "status": "failed",
+        "started_at": run_started_at.isoformat(),
         "script": str(script_path),
     }
 
@@ -320,6 +322,7 @@ async def process_message(js: Any, message: Any, state: dict[str, Any]) -> None:
         # completion event so the manager can mark the database run failed.
         result["error"] = str(exc)[:2000]
 
+    result["completed_at"] = datetime.now(timezone.utc).isoformat()
     await js.publish(
         "agent.runs.completed",
         json.dumps(result).encode("utf-8"),

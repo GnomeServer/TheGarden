@@ -72,11 +72,28 @@ class RunOut(BaseModel):
     status: str
     error: str | None
     metadata: dict[str, Any]
+    worker_id: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_seconds: int | None
     created_at: datetime
     updated_at: datetime
 
     @classmethod
     def from_record(cls, record: RunRecord) -> "RunOut":
+        now = datetime.now(timezone.utc)
+        duration_seconds = (
+            max(
+                0,
+                int(
+                    (
+                        (record.completed_at or now) - record.started_at
+                    ).total_seconds()
+                ),
+            )
+            if record.started_at is not None
+            else None
+        )
         return cls(
             id=record.id,
             goal=record.goal,
@@ -88,7 +105,21 @@ class RunOut(BaseModel):
             metadata=record.run_metadata or {},
             created_at=record.created_at,
             updated_at=record.updated_at,
+            worker_id=record.worker_id,
+            started_at=record.started_at,
+            completed_at=record.completed_at,
+            duration_seconds=duration_seconds,
         )
+
+
+def parse_event_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 class HealthOut(BaseModel):
@@ -203,6 +234,12 @@ async def apply_run_status(payload: dict[str, Any]) -> None:
             return
         if record.status == "queued":
             record.status = "running"
+        record.worker_id = worker_id
+        if record.started_at is None:
+            record.started_at = (
+                parse_event_time(payload.get("sent_at"))
+                or datetime.now(timezone.utc)
+            )
         worker = await session.get(WorkerRecord, worker_id)
         if worker is not None:
             worker.reported_status = "busy"
@@ -247,6 +284,15 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
             if worker_status == "failed"
             else None
         )
+        if isinstance(worker_id, str) and worker_id:
+            record.worker_id = worker_id
+        if record.started_at is None:
+            record.started_at = parse_event_time(payload.get("started_at"))
+        if record.completed_at is None:
+            record.completed_at = (
+                parse_event_time(payload.get("completed_at"))
+                or datetime.now(timezone.utc)
+            )
         worker = await session.get(WorkerRecord, worker_id) if isinstance(worker_id, str) else None
         if worker is not None:
             worker.reported_status = "idle" if worker_status == "completed" else "degraded"
@@ -601,6 +647,7 @@ async def create_run(
         logger.exception("failed to publish run %s", run_id)
         record.status = "failed"
         record.error = f"failed to enqueue run: {exc}"[:4000]
+        record.completed_at = datetime.now(timezone.utc)
         await session.commit()
         raise HTTPException(status_code=503, detail="run could not be queued") from exc
     await live_broker.publish("run", {"id": run_id, "status": "queued"})
