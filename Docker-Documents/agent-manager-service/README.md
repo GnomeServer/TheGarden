@@ -21,6 +21,33 @@ database volumes, Caddy routes, and the current manager image for recovery.
 Open WebUI integration is [opt-in](../open_webui_services/README.md#agent-manager-coder-function-manual-opt-in);
 generated Python is not sandboxed and must run only on disposable workers.
 
+## Open the dashboard
+
+After the dashboard release and Caddy route are deployed, connect a device to
+the lab's Tailscale network and open:
+
+```text
+https://infra-lab-services.tail494f6d.ts.net/dashboard/
+```
+
+Choose **Continue with Forgejo** and sign in with your Forgejo account. Agent
+Manager's Forgejo OAuth application must use this callback URL:
+
+```text
+https://infra-lab-services.tail494f6d.ts.net/auth/forgejo/callback
+```
+
+Logins listed in `DASHBOARD_ADMINS` receive the initial administrator role.
+`AGENT_MANAGER_API_TOKEN` and the Open WebUI run-only token are not interactive
+dashboard login credentials.
+
+Caddy uses a private internal CA. The browser device must trust its root
+certificate; do not bypass browser certificate warnings. See the
+[Caddy setup guide](../caddy_service/caddy-setup.md) for TLS details.
+
+A repository checkout does not deploy the dashboard. For an existing central
+VM, follow the [guarded manager-only deployment
+procedure](../../docs/central-dashboard-deployment.md) and its post-deployment checks.
 
 ## Networks
 

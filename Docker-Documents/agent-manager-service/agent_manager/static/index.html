@@ -72,10 +72,10 @@
 
       <section id="view-access" class="view"><div class="section-heading"><div><h2>Access evidence</h2><p class="muted">Normalized SSH, sudo, Tailscale, service, and application access. Raw logs remain in Loki.</p></div></div><div id="access-events" class="table-wrap"></div></section>
 
-      <section id="view-workers" class="view"><div class="section-heading"><div><h2>Workers</h2><p class="muted">Presence is derived from signed-in-time heartbeats, not stale configuration.</p></div></div><div id="workers" class="table-wrap"></div></section>
+      <section id="view-workers" class="view"><div class="section-heading"><div><h2>Workers</h2><p class="muted">Heartbeat shows recent presence and reported state; it does not guarantee run admission. Agent Manager separately requires an enabled worker to answer a NATS health probe.</p></div></div><div id="workers" class="table-wrap"></div></section>
       <section id="view-people" class="view"><div class="section-heading"><div><h2>People</h2><p class="muted">Forgejo identities, authorization, active timers, and submitted or approved time.</p></div></div><div id="people" class="table-wrap"></div></section>
       <section id="view-runs" class="view"><div class="section-heading"><div><h2>Runs</h2><p class="muted">Agent assignment, live elapsed time, final status, and worker results.</p></div></div><div id="runs" class="table-wrap"></div></section>
-      <section id="view-activity" class="view"><div class="section-heading"><div><h2>Activity</h2><p class="muted">Normalized Git, task, run, and worker events.</p></div></div><div id="activity" class="timeline panel"></div></section>
+      <section id="view-activity" class="view"><div class="section-heading"><div><h2>Activity</h2><p class="muted">Normalized Git, task, run, worker, and timer events; updates arrive live.</p></div></div><div id="activity" class="timeline panel"></div></section>
     </main>
   </div>
 

@@ -71,16 +71,25 @@ function table(headers,rows){return `<table><thead><tr>${headers.map(item=>`<th>
 
 function renderTime(){
   const own=state.workSessions.find(item=>item.user_id===state.session.user.id&&item.status==='running');
-  $('timer-current').innerHTML=own?`<div class="active-timer"><div><strong>${esc(taskName(own.task_id))}</strong><p class="muted">Started ${esc(fmt(own.started_at))} · ${duration(own.duration_seconds)}</p></div><button class="button danger" data-stop-timer="${esc(own.id)}">Stop timer</button></div>`:'<p class="muted">No timer is running.</p>';
+  $('timer-current').innerHTML=own?`<div class="active-timer"><div><strong>${esc(taskName(own.task_id))}</strong><p class="muted">Started ${esc(fmt(own.started_at))} · ${duration(own.duration_seconds)}</p></div><button class="button danger" data-stop-timer="${esc(own.id)}">Stop timer</button><button class="button danger" data-discard-time="${esc(own.id)}">Discard</button></div>`:'<p class="muted">No timer is running.</p>';
   $('timer-form').classList.toggle('hidden',Boolean(own));
   $('timer-task').innerHTML='<option value="">No linked task</option>'+state.tasks.filter(task=>!['done','cancelled'].includes(task.status)).map(task=>`<option value="${esc(task.id)}">${esc(task.title)}</option>`).join('');
   const manager=['admin','manager'].includes(state.session.user.role);
-  $('work-sessions').innerHTML=table(['Person','Task','Started','Duration','Status','Notes','Actions'],state.workSessions.map(item=>{let actions='';if(item.user_id===state.session.user.id&&['stopped','rejected'].includes(item.status))actions=`<button class="button ghost" data-submit-time="${esc(item.id)}">Submit</button>`;if(manager&&item.status==='submitted')actions=`<button class="button ghost" data-time-decision="approve" data-session="${esc(item.id)}">Approve</button> <button class="button danger" data-time-decision="reject" data-session="${esc(item.id)}">Reject</button>`;return [esc(userName(item.user_id)),esc(taskName(item.task_id)),esc(fmt(item.started_at)),duration(item.duration_seconds),`<span class="badge ${esc(item.status)}">${esc(item.status)}</span>`,esc(item.notes||'—'),actions]}));
+  $('work-sessions').innerHTML=table(['Person','Task','Started','Duration','Status','Notes','Actions'],state.workSessions.map(item=>{let actions='';if(item.user_id===state.session.user.id&&item.status==='stopped')actions=`<button class="button ghost" data-submit-time="${esc(item.id)}">Submit</button> <button class="button danger" data-discard-time="${esc(item.id)}">Discard</button>`;if(manager&&item.status==='submitted')actions=`<button class="button ghost" data-time-decision="approve" data-session="${esc(item.id)}">Approve</button> <button class="button danger" data-time-decision="reject" data-session="${esc(item.id)}">Reject</button>`;return [esc(userName(item.user_id)),esc(taskName(item.task_id)),esc(fmt(item.started_at)),duration(item.duration_seconds),`<span class="badge ${esc(item.status)}">${esc(item.status)}</span>`,esc(item.notes||'—'),actions]}));
   document.querySelectorAll('[data-stop-timer]').forEach(button=>button.addEventListener('click',()=>timerAction(`/v1/work-sessions/${button.dataset.stopTimer}/stop`,{notes:''},'Timer stopped')));
   document.querySelectorAll('[data-submit-time]').forEach(button=>button.addEventListener('click',()=>timerAction(`/v1/work-sessions/${button.dataset.submitTime}/submit`,{notes:''},'Time submitted')));
+  document.querySelectorAll('[data-discard-time]').forEach(button=>button.addEventListener('click',()=>discardTimer(button.dataset.discardTime)));
   document.querySelectorAll('[data-time-decision]').forEach(button=>button.addEventListener('click',()=>timerAction(`/v1/work-sessions/${button.dataset.session}/decision`,{approved:button.dataset.timeDecision==='approve',reason:''},button.dataset.timeDecision==='approve'?'Time approved':'Time rejected')));
 }
-async function timerAction(path,body,message){try{await api(path,{method:'POST',body:JSON.stringify(body)});toast(message);await refreshAll()}catch(error){toast(error.message)}}
+function discardTimer(sessionId){
+  if(!confirm('Discard this unsubmitted timer? It will disappear from the Time list and totals, but Activity will keep an audit event.'))return;
+  timerAction(`/v1/work-sessions/${sessionId}`,null,'Timer discarded','DELETE');
+}
+async function timerAction(path,body,message,method='POST'){
+  const options={method};
+  if(body!==null)options.body=JSON.stringify(body);
+  try{await api(path,options);toast(message);await refreshAll()}catch(error){toast(error.message)}
+}
 function renderNodes(){
   const overview=$('grafana-overview');
   const grafanaUrl=String(state.nodeHealth.grafana_url||'');

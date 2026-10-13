@@ -473,6 +473,42 @@ async def load_owned_session(
     return record
 
 
+async def record_work_session_activity(
+    session: AsyncSession,
+    record: WorkSessionRecord,
+    actor: UserRecord,
+    *,
+    event_type: str,
+    source_event_id: str,
+    summary: str,
+    occurred_at: datetime,
+    previous_status: str | None = None,
+) -> ActivityRecord:
+    payload: dict[str, Any] = {
+        "work_session_id": record.id,
+        "user_id": record.user_id,
+        "task_id": record.task_id,
+        "status": record.status,
+        "started_at": iso(record.started_at),
+        "ended_at": iso(record.ended_at),
+        "duration_seconds": record.duration_seconds,
+    }
+    if previous_status is not None:
+        payload["previous_status"] = previous_status
+    return await record_activity(
+        session,
+        source="time",
+        source_event_id=source_event_id,
+        event_type=event_type,
+        actor_user_id=actor.id,
+        task_id=record.task_id,
+        summary=f"{actor.display_name or actor.forgejo_login} {summary}",
+        occurred_at=occurred_at,
+        payload=payload,
+    )
+
+
+
 @router.post("/v1/work-sessions/{session_id}/stop")
 async def stop_work_session(
     session_id: str,
@@ -483,16 +519,66 @@ async def stop_work_session(
     record = await load_owned_session(session, session_id, actor)
     if record.status != "running":
         raise HTTPException(status_code=409, detail="Only a running timer can be stopped")
-    record.ended_at = utcnow()
+    event_time = utcnow()
+    record.ended_at = event_time
     record.duration_seconds = max(0, int((record.ended_at - record.started_at).total_seconds()))
     record.status = "stopped"
     if body.notes:
         record.notes = body.notes
+    activity = await record_work_session_activity(
+        session,
+        record,
+        actor,
+        event_type="time.stopped",
+        source_event_id=f"timer-stopped:{record.id}",
+        summary="stopped a work timer",
+        occurred_at=event_time,
+    )
     await session.commit()
     await session.refresh(record)
     output = work_session_out(record)
     await live_broker.publish("time", output)
+    await live_broker.publish("activity", activity_out(activity))
     return output
+
+
+
+@router.delete("/v1/work-sessions/{session_id}", status_code=204)
+async def discard_work_session(
+    session_id: str,
+    actor: UserRecord = Depends(require_csrf),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    record = await load_owned_session(session, session_id, actor, manager_allowed=False)
+    if record.status == "deleted":
+        return Response(status_code=204)
+    if record.source != "timer" or record.status not in {"running", "stopped"}:
+        raise HTTPException(status_code=409, detail="Only your running or stopped timer can be discarded")
+
+    event_time = utcnow()
+    previous_status = record.status
+    if previous_status == "running":
+        record.ended_at = event_time
+        record.duration_seconds = max(0, int((event_time - record.started_at).total_seconds()))
+    record.status = "deleted"
+    activity = await record_work_session_activity(
+        session,
+        record,
+        actor,
+        event_type="time.discarded",
+        source_event_id=f"timer-discarded:{record.id}",
+        summary="discarded a work timer",
+        occurred_at=event_time,
+        previous_status=previous_status,
+    )
+    await session.commit()
+    await live_broker.publish(
+        "time",
+        {"id": record.id, "user_id": record.user_id, "status": "deleted"},
+    )
+    await live_broker.publish("activity", activity_out(activity))
+    return Response(status_code=204)
+
 
 
 @router.post("/v1/work-sessions/{session_id}/submit")
@@ -510,11 +596,23 @@ async def submit_work_session(
     record.status = "submitted"
     record.approved_by = None
     record.approved_at = None
+    event_time = utcnow()
+    activity = await record_work_session_activity(
+        session,
+        record,
+        actor,
+        event_type="time.submitted",
+        source_event_id=f"timer-submitted:{record.id}:{uuid.uuid4()}",
+        summary="submitted a work-time entry",
+        occurred_at=event_time,
+    )
     await session.commit()
     await session.refresh(record)
     output = work_session_out(record)
     await live_broker.publish("time", output)
+    await live_broker.publish("activity", activity_out(activity))
     return output
+
 
 
 @router.post("/v1/work-sessions/{session_id}/decision")
@@ -536,11 +634,24 @@ async def decide_work_session(
     record.approved_at = utcnow() if body.approved else None
     if body.reason:
         record.notes = f"{record.notes}\nReview: {body.reason}".strip()
+    event_time = utcnow()
+    outcome = "approved" if body.approved else "rejected"
+    activity = await record_work_session_activity(
+        session,
+        record,
+        actor,
+        event_type=f"time.{outcome}",
+        source_event_id=f"timer-reviewed:{record.id}:{uuid.uuid4()}",
+        summary=f"{outcome} a work-time entry",
+        occurred_at=event_time,
+    )
     await session.commit()
     await session.refresh(record)
     output = work_session_out(record)
     await live_broker.publish("time", output)
+    await live_broker.publish("activity", activity_out(activity))
     return output
+
 
 
 @router.get("/v1/work-sessions")
@@ -551,7 +662,7 @@ async def list_work_sessions(
     actor: UserRecord = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
-    query = select(WorkSessionRecord)
+    query = select(WorkSessionRecord).where(WorkSessionRecord.status != "deleted")
     if actor.role not in {"admin", "manager"}:
         query = query.where(WorkSessionRecord.user_id == actor.id)
     elif user_id:
@@ -579,7 +690,9 @@ async def people_summary(
                 WorkSessionRecord.user_id,
                 WorkSessionRecord.status,
                 func.coalesce(func.sum(WorkSessionRecord.duration_seconds), 0),
-            ).group_by(WorkSessionRecord.user_id, WorkSessionRecord.status)
+            )
+            .where(WorkSessionRecord.status != "deleted")
+            .group_by(WorkSessionRecord.user_id, WorkSessionRecord.status)
         )
     ).all()
     indexed: dict[str, dict[str, int]] = {}

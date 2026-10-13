@@ -9,9 +9,9 @@ The dashboard is the human control surface for Agent Manager. PostgreSQL remains
 - Forgejo-backed human identities and role-based dashboard access.
 - Worker registration, heartbeat, capability, current-run, and status tracking.
 - Signed, idempotent Forgejo push, branch, pull-request, issue, and release event ingestion.
-- A normalized activity timeline for task, run, worker, and Forgejo events.
+- A normalized activity timeline for task, run, worker, timer, and Forgejo events.
 - Server-Sent Events (SSE) for live browser refresh.
-- Agent runs persist the assigned worker, start and completion times, elapsed execution duration, final status, and failure details. Active durations tick in the browser; worker and run updates arrive through SSE.
+- Agent runs persist the assigned worker, start and completion times, elapsed execution duration, final status, and failure details. Active durations tick in the browser; worker, run, and timer updates arrive through SSE.
 - SSH access evidence records successful/failed authentication and session open/close events from each installed node collector. The target-side username and source address are retained.
 - OpenWebUI coverage is limited to submissions made through the opt-in Agent Manager Pipe. Ordinary chats, direct model requests, and full token usage are not ingested.
 
@@ -194,6 +194,12 @@ Workers publish `agent.workers.heartbeat` every 15 seconds. The payload includes
 
 Agent Manager treats a worker as offline when its latest heartbeat is older than `WORKER_OFFLINE_AFTER_SECONDS` (45 seconds by default). Offline is derived at read time; no cleanup job rewrites worker rows.
 
+Heartbeat presence is not run-admission readiness. Before accepting a run,
+Agent Manager separately requires a matching execution-enabled worker to answer
+a Core NATS request/reply on `agent.workers.health.<role>`. A worker may therefore
+appear online and idle while a request is rejected with
+`503 NO_WORKER_AVAILABLE`; no run is queued.
+
 A worker publishes:
 
 1. An idle heartbeat after connecting.
@@ -236,6 +242,7 @@ The Activity view normalizes sources without replacing their authoritative store
 - `worker`: registration, state transitions, run starts, and completions.
 - `task`: task creation, updates, and archival.
 - `run`: run creation.
+- `time`: timer start, stop, submission, approval, rejection, and discard transitions.
 
 For pushes, the authenticated pusher, commit author, and committer remain separate fields. Do not use commit count as a productivity score.
 
@@ -357,6 +364,13 @@ when two browsers submit simultaneously. Managers can review all entries;
 members and viewers receive only their own entries. Approved duration and
 submitted duration are shown separately on the People view.
 
+Owners can discard their own running or stopped timer if it was started by
+mistake. Discard soft-deletes the timer row and hides it from the Time list and
+People totals. The Activity feed retains a `time.discarded` event with the actor
+and timer details. Submitted, rejected, and approved entries cannot be discarded.
+
+Every timer transition appears in Activity and publishes a live refresh event.
+
 The work-session endpoints are:
 
 ```text
@@ -366,6 +380,7 @@ POST /v1/work-sessions/{id}/submit
 POST /v1/work-sessions/{id}/decision
 GET  /v1/work-sessions
 GET  /v1/people/summary
+DELETE /v1/work-sessions/{id}
 ```
 
 ## Node health summaries
