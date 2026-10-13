@@ -41,6 +41,10 @@ RUNS_CREATED = Counter(
     "agent_runs_created_total",
     "Number of agent runs successfully published to the queue.",
 )
+RUNS_STARTED = Counter(
+    "agent_runs_started_total",
+    "Number of agent runs accepted by a worker.",
+)
 RUNS_COMPLETED = Counter(
     "agent_runs_completed_total",
     "Number of agent runs completed by a worker.",
@@ -90,6 +94,7 @@ logger = logging.getLogger("agent-manager")
 
 STREAM_NAME = "AGENT_RUNS"
 RUN_CREATED_SUBJECT = "agent.runs.created"
+RUN_STARTED_SUBJECT = "agent.runs.started"
 RUN_COMPLETED_SUBJECT = "agent.runs.completed"
 RUN_CANCELLED_SUBJECT = "agent.runs.cancelled"
 
@@ -259,6 +264,39 @@ async def publish_run_event(request: Request, subject: str, payload: dict[str, A
     )
 
 
+async def apply_run_started(payload: dict[str, Any]) -> None:
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("start event is missing run_id")
+
+    transitioned = False
+    async with SessionLocal() as session:
+        record = await session.get(RunRecord, run_id)
+        if record is None:
+            logger.warning("start event received for unknown run %s", run_id)
+            return
+
+        if record.status == "queued":
+            record.status = "running"
+            metadata = dict(record.run_metadata or {})
+            metadata["worker"] = {
+                key: payload[key]
+                for key in ("worker_id", "worker_role", "hostname")
+                if payload.get(key) is not None
+            }
+            record.run_metadata = metadata
+            await session.commit()
+            transitioned = True
+
+    if transitioned:
+        RUNS_STARTED.inc()
+        logger.info(
+            "worker %s started run %s",
+            payload.get("worker_id", "unknown"),
+            run_id,
+        )
+
+
 async def apply_run_completion(payload: dict[str, Any]) -> None:
     run_id = payload.get("run_id")
     worker_status = payload.get("status")
@@ -305,6 +343,40 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
     )
 
 
+async def consume_started_events(connection: nats.NATS) -> None:
+    subscription = await connection.jetstream().pull_subscribe(
+        RUN_STARTED_SUBJECT,
+        stream=STREAM_NAME,
+        durable="agent-manager-started",
+        config=ConsumerConfig(
+            ack_policy=AckPolicy.EXPLICIT,
+            deliver_policy=DeliverPolicy.ALL,
+        ),
+    )
+    logger.info("started durable worker-start consumer")
+
+    try:
+        while True:
+            try:
+                messages = await subscription.fetch(1, timeout=1)
+            except NatsTimeoutError:
+                continue
+
+            try:
+                message = messages[0]
+                payload = json.loads(message.data.decode("utf-8"))
+                await apply_run_started(payload)
+                await message.ack()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                logger.exception("discarding invalid worker-start event")
+                await message.ack()
+            except Exception:
+                logger.exception("failed to process worker-start event")
+    finally:
+        await subscription.unsubscribe()
+        logger.info("stopped durable worker-start consumer")
+
+
 async def consume_completion_events(connection: nats.NATS) -> None:
     subscription = await connection.jetstream().pull_subscribe(
         RUN_COMPLETED_SUBJECT,
@@ -347,14 +419,17 @@ async def lifespan(app: FastAPI):
     connection = await connect_nats_with_retry()
     await ensure_stream(connection)
     app.state.nats = connection
+    started_task = asyncio.create_task(consume_started_events(connection))
     completion_task = asyncio.create_task(consume_completion_events(connection))
+    app.state.started_task = started_task
     app.state.completion_task = completion_task
     logger.info("agent manager started")
     try:
         yield
     finally:
+        started_task.cancel()
         completion_task.cancel()
-        await asyncio.gather(completion_task, return_exceptions=True)
+        await asyncio.gather(started_task, completion_task, return_exceptions=True)
         await connection.drain()
         await engine.dispose()
         logger.info("agent manager stopped")

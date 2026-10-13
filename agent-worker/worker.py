@@ -190,6 +190,19 @@ async def process_message(js: Any, message: Any) -> None:
     }
 
     try:
+        await js.publish(
+            "agent.runs.started",
+            json.dumps(
+                {
+                    "event": "run.started",
+                    "run_id": run_id,
+                    "worker_id": WORKER_ID,
+                    "worker_role": WORKER_ROLE,
+                    "hostname": socket.gethostname(),
+                }
+            ).encode("utf-8"),
+        )
+
         if metadata.get("operation") != "create-python-script":
             raise RuntimeError("unsupported worker operation")
 
