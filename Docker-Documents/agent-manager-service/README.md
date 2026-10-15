@@ -5,18 +5,66 @@ This Compose project deploys the first control-plane slice for agentic coding ru
 - `agent-manager`: FastAPI API, run-state persistence, and NATS JetStream publishing
 - `postgres`: private PostgreSQL database for manager state
 - `nats`: private NATS server with JetStream enabled and persistent storage
+- `nats-exporter`: private Prometheus metrics for NATS clients, subscriptions, and JetStream
 
 The manager does not execute repository code and does not call Forgejo or a model. Workers consume `agent.runs.created`. The manager consumes `agent.runs.started` on durable consumer `agent-manager-started` and `agent.runs.completed` on durable consumer `agent-manager-completions`. A start event moves only `queued` to `running` and stores `metadata.worker`. A completion event writes `metadata.result` and sets status to the worker's `completed` or `failed`, even if the run was already terminal. Those consumers redeliver unacknowledged messages after a restart; already-acked messages are not replayed. The worker protocol is in [`../../agent-worker/README.md`](../../agent-worker/README.md).
+
+The human control surface is available at `/dashboard/` through Caddy. It
+tracks runs, deadline-aware tasks, Forgejo users and activity, worker presence,
+and audit history. Complete deployment, OAuth, webhook, task, worker, backup,
+and troubleshooting procedures are in
+[`../../docs/dark-factory-dashboard.md`](../../docs/dark-factory-dashboard.md).
+For an **existing central VM**, use the guarded manager-only
+[`central deployment procedure`](../../docs/central-dashboard-deployment.md), not
+the new-install commands below. It preserves live credentials, the NATS override,
+database volumes, Caddy routes, and the current manager image for recovery.
+Open WebUI integration is [opt-in](../open_webui_services/README.md#agent-manager-coder-function-manual-opt-in);
+generated Python is not sandboxed and must run only on disposable workers.
+
+## Open the dashboard
+
+After the dashboard release and Caddy route are deployed, connect a device to
+the lab's Tailscale network and open:
+
+```text
+https://infra-lab-services.tail494f6d.ts.net/dashboard/
+```
+
+Choose **Continue with Forgejo** and sign in with your Forgejo account. Agent
+Manager's Forgejo OAuth application must use this callback URL:
+
+```text
+https://infra-lab-services.tail494f6d.ts.net/auth/forgejo/callback
+```
+
+OAuth access is allowlisted by `DASHBOARD_MEMBERS` (defaults to
+`raphael`, `inkii`, `bgurrol4`, and `naruto`). These Forgejo users sign in as
+shared-workspace members; browser mutations require the session CSRF token.
+The API and Open WebUI bearer tokens are not dashboard login credentials.
+
+Caddy uses a private internal CA. The browser device must trust its root
+certificate; do not bypass browser certificate warnings. See the
+[Caddy setup guide](../caddy_service/caddy-setup.md) for TLS details.
+
+A repository checkout does not deploy the dashboard. For an existing central
+VM, follow the [guarded manager-only deployment
+procedure](../../docs/central-dashboard-deployment.md) and its post-deployment checks.
 
 ## Networks
 
 The manager joins the existing networks used by the lab:
 
-- `caddy_proxy` for Forgejo HTTP/API access and optional Caddy routing
+- `caddy_proxy` for Forgejo and LiteLLM HTTP/API access and Caddy routing
 - `open-webui_internal` for Ollama access
 - `agent_manager_internal` for PostgreSQL and NATS
 
 The manager does **not** join `forgejo_internal`; Forgejo's database network remains isolated.
+
+The NATS exporter joins only `agent_manager_internal` and `caddy_proxy`.
+It reads `http://nats:8222` with `-varz -connz -subz -jsz=all` and exposes
+`nats-exporter:7777` to Prometheus without publishing a host port. Its pinned
+default image is `natsio/prometheus-nats-exporter:0.20.2`; like NATS, it uses
+`restart: unless-stopped`.
 
 Caddy and the Open WebUI Compose project must already be running so that the two external networks exist:
 
@@ -102,11 +150,15 @@ bash verify-nats.txt
 bash consume-test-event.txt
 ```
 
-`submit-test-run.txt` stores the most recent run ID in `.last-run-id`, which is ignored by Git. A run with no worker remains `queued`. A start event sets `running`. A completion event sets `completed` or `failed` and stores the worker payload under `metadata.result`. A later completion overwrites an earlier terminal status.
+`submit-test-run.txt` stores an accepted run ID in `.last-run-id`, which is ignored by Git. Before creating a row, Agent Manager probes `agent.workers.health.<role>`. Without a matching execution-enabled worker it returns HTTP `503`, `NO_WORKER_AVAILABLE`, and `Retry-After: 15`; no run is created or queued, and a sanitized `run.rejected` activity is recorded. An accepted run remains `queued` until a worker starts it. Completion stores the worker result under `metadata.result`.
 
 ## Submit a run
 
-The API token is required for all `/v1` endpoints:
+The bootstrap API token protects the machine `/v1/runs` API and administrator
+operations such as node-credential and identity-mapping management. Normal
+human dashboard APIs require a Forgejo OAuth session and CSRF header. The
+separate Open WebUI run-only token is accepted only on run submission and
+individual-run retrieval; it cannot authorize dashboard, task, or user APIs.
 
 ```bash
 export AGENT_MANAGER_API_TOKEN='the-value-from-.env'
@@ -125,10 +177,10 @@ curl -sS \
   }'
 ```
 
-`project_name` and `script_name` are optional. The manager keeps its UUID run
-ID for queueing and status tracking; the worker uses the project slug as its
-workspace directory. Script names must be filenames, not paths; `.py` is
-appended when the extension is omitted.
+`project_name` and `script_name` are optional for direct API clients. The
+manager retains its UUID run ID for queueing and status tracking; the worker
+uses a filesystem-safe project slug as its working directory instead of the
+UUID. Script names are filenames, not paths; `.py` is appended if omitted.
 
 The request is stored in PostgreSQL and published to the JetStream subject:
 
@@ -187,22 +239,26 @@ Bearer token required. A missing or wrong token is 401.
 
 Compose and `.env.example` set `MODEL_BASE_URL` to `http://llama:8080/v1`. The Python fallback `http://litellm:4000/v1` is unused while Compose sets the variable. The API does not call Forgejo, llama.cpp, LiteLLM, or Ollama. Ollama is on `open-webui_internal` at `http://ollama:11434`.
 
-## Optional Caddy route
+## Caddy routes and metrics
 
-The manager is not publicly routed by default. If an authenticated external API endpoint is needed, add this route to the Caddy site that serves the lab hostname:
+The tracked Caddy configuration routes `/`, `/dashboard`, `/dashboard/*`,
+`/auth/*`, `/v1/*`, `/docs`, `/docs/*`, and `/openapi.json` to
+`agent-manager:8000` without stripping their prefixes. Human dashboard sessions
+use Forgejo OAuth; machine run and administrator APIs use bearer tokens. Keep
+tokens secret and prefer the internal `http://agent-manager:8000` endpoint for
+containers on `caddy_proxy`.
 
-```caddyfile
-@agent_manager {
-    path /agent-manager /agent-manager/*
-}
+These manager routes coexist with the captured `/llama/` and `/litellm/` model
+routes, `/grafana/`, `/forgejo/`, and the Proxmox fallback. Open WebUI remains
+available at `https://infra-lab-services.tail494f6d.ts.net:8443` through Caddy.
+The manager defaults to LiteLLM's internal URL rather than taking this external
+proxy path; an existing `.env` override must be changed deliberately to use the
+new default.
 
-handle @agent_manager {
-    uri strip_prefix /agent-manager
-    reverse_proxy agent-manager:8000
-}
-```
-
-Keep the bearer token secret and prefer calling `http://agent-manager:8000` directly from an Open WebUI Function while both containers are on `caddy_proxy`.
+Prometheus scrapes the manager at `http://agent-manager:8000/metrics/` and the
+exporter at `http://nats-exporter:7777/metrics`. Neither metrics endpoint is
+added as a public Caddy route. The exporter is part of this Compose project,
+while its scrape job lives in `../grafana_services/prometheus/prometheus.yml`.
 
 ## Troubleshooting
 
@@ -291,3 +347,23 @@ agent-manager_nats_data
 ```
 
 PostgreSQL is the authoritative run-state store. NATS JetStream is durable work delivery; retaining it allows queued events to survive a NATS restart.
+
+## Dashboard references
+
+- [Dashboard operations](../../docs/dark-factory-dashboard.md)
+- [MCP integration contract](../../docs/mcp-dashboard.md)
+- [Node activity collector](../../node-activity-collector/README.md)
+- Interactive API schema: `/docs` on Agent Manager
+
+Normal users sign in with Forgejo OAuth. The bearer token remains available
+for approved machine clients and bootstrap recovery; do not expose it to
+browser JavaScript or store it in Forgejo webhook configuration.
+
+## Infrastructure reconciliation
+
+The live capture `70838b3` has been reconciled with the dashboard source; this
+does not deploy it to the VM. Follow
+[the reviewed deployment procedure](../../docs/infra-reconciliation.md).
+Availability probes are Core NATS request/reply and are not task reservations.
+The `AGENT_WORKERS` stream stores only `agent.workers.heartbeat`; do not widen
+it to `agent.workers.>` or storage acknowledgements can race health replies.

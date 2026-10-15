@@ -1,22 +1,19 @@
 from __future__ import annotations
 
-import os
 import unittest
-
-os.environ.setdefault("AGENT_MANAGER_API_TOKEN", "test-token")
 
 from pydantic import ValidationError
 
 from agent_manager.main import RunCreate
 
 
-class RunNamingTests(unittest.TestCase):
-    def test_names_are_optional_for_existing_api_clients(self) -> None:
+class RunNamingContractTests(unittest.TestCase):
+    def test_names_are_optional_and_default_to_legacy_behavior(self) -> None:
         request = RunCreate(goal="Build a report", forgejo_repository="owner/repo")
         self.assertIsNone(request.project_name)
         self.assertIsNone(request.script_name)
 
-    def test_project_is_trimmed_and_script_gets_python_extension(self) -> None:
+    def test_project_name_is_trimmed_and_script_name_gets_python_extension(self) -> None:
         request = RunCreate(
             goal="Build a report",
             forgejo_repository="owner/repo",

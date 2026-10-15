@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" id="theme-color" content="#f4f5f1">
+  <title>TheGarden — Team dashboard</title>
+  <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.3.0">
+  <script src="/dashboard/static/app.js?v=1.3.0" defer></script>
+</head>
+<body>
+  <section id="login" class="login-shell hidden" aria-labelledby="login-title">
+    <div class="login-card">
+      <button type="button" class="button ghost theme-toggle" data-theme-toggle aria-pressed="false">Dark mode</button>
+      <p class="eyebrow">THEGARDEN / TEAM SPACE</p>
+      <h1 id="login-title">A clear view of the work.</h1>
+      <p class="muted">Sign in with Forgejo to edit the TODO board and report time.</p>
+      <a id="oauth-login" class="button primary full hidden" href="/auth/forgejo/start">Continue with Forgejo</a>
+      <p id="oauth-status" class="login-auth-status" role="status">Checking Forgejo sign-in configuration…</p>
+      <p id="login-error" class="error" role="alert"></p>
+    </div>
+  </section>
+
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <a href="#work" class="brand" aria-label="TheGarden home"><span class="brand-mark" aria-hidden="true">T</span><span><strong>TheGarden</strong><small>Team dashboard</small></span></a>
+      <div class="top-actions"><span id="connection" class="connection" role="status">Connecting</span><span id="identity" class="identity"></span><button type="button" class="button ghost theme-toggle" data-theme-toggle aria-pressed="false">Dark mode</button><button id="logout" class="button ghost" type="button">Sign out</button></div>
+    </header>
+
+    <nav class="area-nav" aria-label="Dashboard areas">
+      <button type="button" class="area-tab active" data-view="work" aria-current="page"><span class="nav-index">01</span>TODO board</button>
+      <button type="button" class="area-tab" data-view="operations"><span class="nav-index">02</span>Agent tasks</button>
+    </nav>
+
+    <main>
+      <section id="view-work" class="view active" aria-labelledby="work-title">
+        <header class="page-heading"><div><p class="eyebrow">HUMAN WORK</p><h1 id="work-title">TODO board</h1><p class="muted">Editable tasks and self-reported time for Donatello, Raphael, Naruto, Inkii, and the rest of the team.</p></div><button id="new-task" class="button primary" type="button">＋ New task</button></header>
+        <section class="work-summary" aria-label="Team work summary"><div id="summary" class="metric-grid" aria-live="polite"><p class="loading">Loading team summary…</p></div></section>
+        <section class="content-section" aria-labelledby="tasks-title">
+          <div class="section-heading"><div><p class="eyebrow">SHARED BOARD</p><h2 id="tasks-title">Problems and tasks</h2></div><div class="filters"><label class="visually-hidden" for="task-status-filter">Filter tasks by status</label><select id="task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select></div></div>
+          <p class="section-note">Team members can create, edit, reassign, and move these tasks. Assign a worker to send a task to the agent board.</p>
+          <p class="notice assignment-note">This board is manual. It does not start an agent run by itself.</p>
+          <div id="task-board" class="task-board" aria-live="polite"><p class="loading">Loading tasks…</p></div>
+        </section>
+        <section class="content-section" aria-labelledby="reported-time-title">
+          <div class="section-heading"><div><p class="eyebrow">OPTIONAL SELF-REPORT</p><h2 id="reported-time-title">Reported time</h2></div></div>
+          <p class="notice"><strong>Manual time entries are separate from activity estimates.</strong> Start an optional timer and submit the reported duration for review. Event-derived estimates are not included in manual time totals.</p>
+          <article class="panel timer-panel">
+            <div id="timer-current" class="timer-current" aria-live="polite"><p class="loading">Loading reported time…</p></div>
+            <form id="timer-form" class="timer-form">
+              <label>Task<select id="timer-task"><option value="">No linked task</option></select></label>
+              <label>Notes (optional)<input id="timer-notes" maxlength="10000" autocomplete="off"></label>
+              <button id="start-time" class="button primary" type="submit" disabled>Start reported-time timer</button>
+            </form>
+          </article>
+          <div id="work-sessions" class="table-wrap section-gap" aria-live="polite"><p class="loading">Loading reported entries…</p></div>
+        </section>
+        <section class="content-section" aria-labelledby="estimates-title">
+          <div class="section-heading"><div><p class="eyebrow">OBSERVED TIME</p><h2 id="estimates-title">Activity estimates</h2></div><div class="date-filters"><label for="estimate-from">From (UTC)</label><input id="estimate-from" type="date"><label for="estimate-to">To (UTC)</label><input id="estimate-to" type="date"><button id="load-estimates" class="button secondary" type="button">Update</button></div></div>
+          <p class="notice"><strong>Estimates, not hours worked.</strong> Activity is inferred from SSH and recent foreground dashboard use. It can be incomplete or inaccurate; review before relying on it. The selected date range uses UTC days.</p>
+          <div id="estimates" class="estimate-list" aria-live="polite"><p class="loading">Loading estimates…</p></div>
+        </section>
+      </section>
+
+      <section id="view-operations" class="view" aria-labelledby="operations-title">
+        <header class="page-heading"><div><p class="eyebrow">AGENT EXECUTION</p><h1 id="operations-title">Agent task board</h1><p class="muted">Worker assignments, runs, and links into Grafana, Forgejo, and NATS.</p></div></header>
+        <section class="content-section" aria-labelledby="agent-assignments-title">
+          <div class="section-heading"><div><p class="eyebrow">WORKER ASSIGNMENTS</p><h2 id="agent-assignments-title">Agent tasks</h2></div><div class="filters"><label class="visually-hidden" for="agent-task-status-filter">Filter agent tasks by status</label><select id="agent-task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select></div></div>
+          <p class="section-note">Only tasks with a worker assignment appear here.</p>
+          <div id="agent-task-board" class="task-board" aria-live="polite"><p class="loading">Loading agent tasks…</p></div>
+        </section>
+        <section class="content-section" aria-labelledby="nodes-title">
+          <div class="section-heading"><div><p class="eyebrow">INFRASTRUCTURE</p><h2 id="nodes-title">Node health</h2></div><div class="filters"><a id="grafana-overview-link" class="button ghost hidden" href="#" target="_blank" rel="noopener noreferrer">Grafana</a><a id="grafana-jetstream-link" class="button ghost hidden" href="#" target="_blank" rel="noopener noreferrer">NATS JetStream</a><a id="forgejo-link" class="button ghost" href="https://infra-lab-services.tail494f6d.ts.net/forgejo" target="_blank" rel="noopener noreferrer">Forgejo</a></div></div>
+          <div id="node-health" class="table-wrap" aria-live="polite"><p class="loading">Loading node health…</p></div>
+        </section>
+        <section class="content-section" aria-labelledby="workers-title">
+          <div class="section-heading"><div><p class="eyebrow">PRESENCE</p><h2 id="workers-title">Workers</h2></div></div>
+          <p class="notice"><strong>Heartbeat is presence, not readiness.</strong> Online or idle means a worker has checked in recently. It does not guarantee that a run can be admitted; run-admission checks are separate.</p>
+          <div id="workers" class="worker-grid" aria-live="polite"><p class="loading">Loading workers…</p></div>
+        </section>
+        <section class="content-section" aria-labelledby="runs-title">
+          <div class="section-heading"><div><p class="eyebrow">RUN HISTORY</p><h2 id="runs-title">Agent runs</h2></div><span class="safe-label">Sanitized summaries only</span></div>
+          <p class="section-note">Request bodies and credentials are never shown here. A queued run was accepted; rejected or unavailable requests did not enter the queue.</p>
+          <div id="runs" class="table-wrap" aria-live="polite"><p class="loading">Loading runs…</p></div>
+        </section>
+        <section class="content-section" aria-labelledby="activity-title">
+          <div class="section-heading"><div><p class="eyebrow">AUDIT TRAIL</p><h2 id="activity-title">Activity</h2></div></div>
+          <p class="section-note">Event summaries are shown; event payloads are intentionally not rendered.</p>
+          <div id="activity" class="timeline" aria-live="polite"><p class="loading">Loading activity…</p></div>
+        </section>
+        <section class="content-section" aria-labelledby="access-title">
+          <div class="section-heading"><div><p class="eyebrow">ACCESS EVIDENCE</p><h2 id="access-title">Access timeline</h2></div></div>
+          <p class="section-note">Normalized access events only. Arbitrary event metadata and raw log details are not displayed.</p>
+          <div id="access-events" class="table-wrap" aria-live="polite"><p class="loading">Loading access events…</p></div>
+        </section>
+        <section id="identity-admin" class="content-section hidden" aria-labelledby="identity-title">
+          <div class="section-heading"><div><p class="eyebrow">ADMIN ONLY</p><h2 id="identity-title">Linux identity mappings</h2></div></div>
+          <p class="notice"><strong>Manual mapping only.</strong> Linux identities are never mapped automatically. Shared accounts <code>infra-lab-user</code> and <code>df-server</code> must remain unmapped.</p>
+          <div class="identity-columns">
+            <section aria-labelledby="unmapped-title"><h3 id="unmapped-title">Unmapped Linux identities</h3><p class="section-note">Recent identities from access events. Choose a person explicitly to add a mapping.</p><div id="identity-candidates" class="identity-list" aria-live="polite"><p class="loading">Loading identities…</p></div></section>
+            <section aria-labelledby="mappings-title"><h3 id="mappings-title">Current mappings</h3><div id="identity-mapping-list" class="identity-list" aria-live="polite"><p class="loading">Loading mappings…</p></div></section>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="task-dialog" aria-labelledby="task-form-title">
+    <form id="task-form">
+      <header class="dialog-heading"><div><p class="eyebrow">WORK ITEM</p><h2 id="task-form-title">New task</h2></div><button type="button" id="close-task" class="icon-button" aria-label="Close task editor">×</button></header>
+      <input id="task-id" type="hidden"><input id="task-version" type="hidden">
+      <label>Title<input id="task-title" maxlength="500" required autocomplete="off"></label>
+      <label>Description<textarea id="task-description" rows="4" maxlength="50000"></textarea></label>
+      <div class="form-grid">
+        <label>Status<select id="task-status"><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="cancelled">Cancelled</option></select></label>
+        <label>Priority<select id="task-priority"><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+        <label>Due date<input id="task-due" type="datetime-local"></label>
+        <label>Assigned person<select id="task-user"><option value="">Unassigned</option></select></label>
+        <label>Assigned worker<select id="task-worker"><option value="">Unassigned</option></select></label>
+      </div>
+      <p id="task-error" class="error" role="alert"></p>
+      <footer><button id="archive-task" type="button" class="button danger hidden">Archive task</button><span class="spacer"></span><button type="button" id="cancel-task" class="button secondary">Cancel</button><button id="save-task" type="submit" class="button primary">Save task</button></footer>
+    </form>
+  </dialog>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"><span id="toast-message"></span><button id="toast-undo" class="button ghost hidden" type="button">Undo</button></div>
+</body>
+</html>
