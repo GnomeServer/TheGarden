@@ -119,9 +119,16 @@ curl -sS \
     "goal": "Fix the failing authentication tests",
     "forgejo_repository": "owner/project",
     "base_ref": "main",
-    "model": "local-model"
+    "model": "local-model",
+    "project_name": "auth-repair",
+    "script_name": "verify_auth.py"
   }'
 ```
+
+`project_name` and `script_name` are optional. The manager keeps its UUID run
+ID for queueing and status tracking; the worker uses the project slug as its
+workspace directory. Script names must be filenames, not paths; `.py` is
+appended when the extension is omitted.
 
 The request is stored in PostgreSQL and published to the JetStream subject:
 

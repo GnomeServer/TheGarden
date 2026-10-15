@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+SPEC = importlib.util.spec_from_file_location(
+    "worker_under_test", Path(__file__).parents[1] / "worker.py"
+)
+assert SPEC and SPEC.loader
+worker = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(worker)
+
+
+class CapturingJetStream:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    async def publish(self, subject: str, data: bytes) -> None:
+        self.events.append((subject, json.loads(data.decode("utf-8"))))
+
+
+class WorkerNamingTests(unittest.IsolatedAsyncioTestCase):
+    async def run_worker(self, workspace: Path, metadata: dict) -> dict:
+        event = {
+            "run_id": "run-42",
+            "goal": "Run a deterministic test script",
+            "metadata": {
+                "operation": "create-python-script",
+                "worker_role": "coder",
+                "script": "print('named script ran')",
+                **metadata,
+            },
+        }
+        message = SimpleNamespace(
+            data=json.dumps(event).encode("utf-8"),
+            ack=AsyncMock(),
+        )
+        js = CapturingJetStream()
+        with (
+            patch.object(worker, "WORKSPACE", workspace),
+            patch.object(worker, "ALLOW_GENERATED_CODE", True),
+        ):
+            await worker.process_message(js, message)
+        message.ack.assert_awaited_once()
+        return next(
+            payload
+            for subject, payload in js.events
+            if subject == "agent.runs.completed"
+        )
+
+    async def test_project_and_script_names_define_saved_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            result = await self.run_worker(
+                workspace,
+                {
+                    "project_name": "Quarterly Reports",
+                    "script_name": "audit_report",
+                },
+            )
+            script = Path(result["script"])
+            self.assertEqual(
+                script.relative_to(workspace),
+                Path("quarterly-reports/audit_report.py"),
+            )
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["stdout"], "named script ran\n")
+            self.assertTrue(script.is_file())
+
+    async def test_duplicate_script_names_do_not_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            project = {
+                "project_name": "Quarterly Reports",
+                "script_name": "audit_report.py",
+            }
+            first = await self.run_worker(workspace, project)
+            second = await self.run_worker(
+                workspace,
+                {**project, "script": "print('second script ran')"},
+            )
+            self.assertEqual(
+                Path(first["script"]),
+                workspace / "quarterly-reports" / "audit_report.py",
+            )
+            self.assertEqual(
+                Path(second["script"]),
+                workspace / "quarterly-reports" / "audit_report_2.py",
+            )
+            self.assertEqual(
+                Path(first["script"]).read_text(encoding="utf-8"),
+                "print('named script ran')\n",
+            )
+            self.assertEqual(second["stdout"], "second script ran\n")
+
+    async def test_unnamed_direct_api_run_keeps_uuid_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            result = await self.run_worker(workspace, {})
+            self.assertEqual(
+                Path(result["script"]),
+                workspace / "run-42" / "generated_agent.py",
+            )
+            self.assertEqual(result["status"], "completed")
+
+    async def test_script_name_cannot_escape_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            result = await self.run_worker(
+                workspace,
+                {"project_name": "Quarterly Reports", "script_name": "../escape.py"},
+            )
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("not a path", result["error"])
+            self.assertIsNone(result["script"])
+            self.assertFalse((workspace.parent / "escape.py").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

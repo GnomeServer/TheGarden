@@ -23,7 +23,7 @@ from nats.js.api import (
     StreamConfig,
 )
 from nats.js.errors import NotFoundError
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import DateTime, JSON, String, desc, func, select, text
 from sqlalchemy.engine import URL
@@ -129,7 +129,45 @@ class RunCreate(BaseModel):
     forgejo_repository: str = Field(min_length=1, max_length=512)
     base_ref: str = Field(default="main", min_length=1, max_length=256)
     model: str | None = Field(default=None, max_length=512)
+    project_name: str | None = Field(default=None, max_length=120)
+    script_name: str | None = Field(default=None, max_length=128)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("project_name")
+    @classmethod
+    def validate_project_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or any(not character.isprintable() for character in value):
+            raise ValueError("project_name must contain printable text")
+        return value
+
+    @field_validator("script_name")
+    @classmethod
+    def normalize_script_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if value.casefold().endswith(".py"):
+            stem = value[:-3]
+        elif "." in value:
+            raise ValueError("script_name must use the .py extension")
+        else:
+            stem = value
+        if (
+            not stem
+            or not stem[0].isalnum()
+            or any(
+                not character.isalnum() and character not in " _.-"
+                for character in stem
+            )
+        ):
+            raise ValueError("script_name must be a simple Python filename, not a path")
+        filename = f"{stem}.py"
+        if len(filename) > 128:
+            raise ValueError("script_name must be at most 128 characters")
+        return filename
 
 
 class RunOut(BaseModel):
@@ -489,6 +527,13 @@ async def create_run(
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
     run_id = str(uuid.uuid4())
+    metadata = dict(body.metadata)
+    metadata.pop("project_name", None)
+    metadata.pop("script_name", None)
+    if body.project_name is not None:
+        metadata["project_name"] = body.project_name
+    if body.script_name is not None:
+        metadata["script_name"] = body.script_name
     record = RunRecord(
         id=run_id,
         goal=body.goal,
@@ -496,7 +541,7 @@ async def create_run(
         base_ref=body.base_ref,
         model=body.model,
         status="queued",
-        run_metadata=body.metadata,
+        run_metadata=metadata,
     )
     session.add(record)
     await session.commit()
@@ -509,7 +554,7 @@ async def create_run(
         "forgejo_repository": body.forgejo_repository,
         "base_ref": body.base_ref,
         "model": body.model,
-        "metadata": body.metadata,
+        "metadata": metadata,
     }
     try:
         await publish_run_event(request, RUN_CREATED_SUBJECT, event)

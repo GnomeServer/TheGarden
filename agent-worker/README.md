@@ -188,11 +188,23 @@ export MAX_SCRIPT_CHARS=30000
 export MAX_OUTPUT_CHARS=12000
 ```
 
-The generated file is written to:
+The UUID remains the internal run ID for queueing and status tracking. When a
+project name is supplied, its filesystem-safe slug replaces the run ID as the
+worker's workspace directory. The script is saved directly in that directory:
 
 ```text
-~/agent-workspace/<run-id>/generated_agent.py
+~/agent-workspace/<project-slug>/<script-name>.py
 ```
+
+Without a project name, direct API callers retain the UUID workspace path:
+
+```text
+~/agent-workspace/<run-id>/<script-name>.py
+```
+
+If no script name is provided, the worker uses `generated_agent.py`. Existing
+scripts are not overwritten; duplicates get `_2`, `_3`, and so on. Scripts
+execute in the project directory, so their output artifacts are written there.
 
 ## Generated-script contract
 
@@ -227,6 +239,8 @@ The Pipe or a test client should omit `worker_id` for pooled work:
 {
   "goal": "Create a dependency-free Python script that writes a report.json file.",
   "model": "luna",
+  "project_name": "quarterly-audit",
+  "script_name": "audit_report.py",
   "metadata": {
     "worker_role": "coder",
     "operation": "create-python-script"

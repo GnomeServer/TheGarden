@@ -9,6 +9,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -156,6 +157,71 @@ async def generate_source(goal: str, metadata: dict[str, Any]) -> tuple[str, str
     return source, "model"
 
 
+def project_directory_name(project_name: Any) -> str | None:
+    if project_name is None:
+        return None
+    if (
+        not isinstance(project_name, str)
+        or not project_name.strip()
+        or len(project_name) > 120
+        or any(not character.isprintable() for character in project_name)
+    ):
+        raise ValueError("project_name must contain printable text")
+    ascii_name = (
+        unicodedata.normalize("NFKD", project_name)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name.casefold()).strip("-")
+    return slug[:80].rstrip("-") or "project"
+
+
+def python_script_filename(script_name: Any) -> str:
+    if script_name is None:
+        return "generated_agent.py"
+    if not isinstance(script_name, str):
+        raise ValueError("script_name must be a filename")
+    value = script_name.strip()
+    if value.casefold().endswith(".py"):
+        stem = value[:-3]
+    elif "." in value:
+        raise ValueError("script_name must use the .py extension")
+    else:
+        stem = value
+    if (
+        not stem
+        or not stem[0].isalnum()
+        or any(
+            not character.isalnum() and character not in " _.-"
+            for character in stem
+        )
+    ):
+        raise ValueError("script_name must be a simple Python filename, not a path")
+    filename = f"{stem}.py"
+    if len(filename) > 128:
+        raise ValueError("script_name must be at most 128 characters")
+    return filename
+
+
+def write_script_without_overwrite(
+    directory: Path, filename: str, source: str
+) -> Path:
+    stem = filename[:-3]
+    candidate = filename
+    suffix = 2
+    while True:
+        path = directory / candidate
+        try:
+            with path.open("x", encoding="utf-8") as script_file:
+                script_file.write(source)
+            return path
+        except FileExistsError:
+            suffix_text = f"_{suffix}"
+            stem_limit = 128 - len(suffix_text) - len(".py")
+            candidate = f"{stem[:stem_limit]}{suffix_text}.py"
+            suffix += 1
+
+
 async def process_message(js: Any, message: Any) -> None:
     event = json.loads(message.data.decode("utf-8"))
     metadata = event.get("metadata") or {}
@@ -179,14 +245,13 @@ async def process_message(js: Any, message: Any) -> None:
     if not isinstance(run_id, str) or not run_id:
         raise RuntimeError("event is missing run_id")
 
-    script_path = WORKSPACE / run_id / "generated_agent.py"
     result: dict[str, Any] = {
         "event": "run.completed",
         "run_id": run_id,
         "worker_id": WORKER_ID,
         "hostname": socket.gethostname(),
         "status": "failed",
-        "script": str(script_path),
+        "script": None,
     }
 
     try:
@@ -215,17 +280,29 @@ async def process_message(js: Any, message: Any) -> None:
                 "only on a disposable/test worker"
             )
 
-        run_dir = WORKSPACE / run_id
-        run_dir.mkdir(parents=True, exist_ok=False)
+        project_component = project_directory_name(metadata.get("project_name"))
+        script_filename = python_script_filename(metadata.get("script_name"))
+        execution_dir = (
+            WORKSPACE / project_component
+            if project_component
+            else WORKSPACE / run_id
+        )
+        execution_dir.mkdir(
+            parents=True,
+            exist_ok=project_component is not None,
+        )
         source, source_origin = await generate_source(goal, metadata)
-        compile(source, str(script_path), "exec")
-        script_path.write_text(source, encoding="utf-8")
+        compile(source, str(execution_dir / script_filename), "exec")
+        script_path = write_script_without_overwrite(
+            execution_dir, script_filename, source
+        )
+        result["script"] = str(script_path)
 
         try:
             completed = await asyncio.to_thread(
                 subprocess.run,
                 [sys.executable, str(script_path)],
-                cwd=run_dir,
+                cwd=execution_dir,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,

@@ -168,6 +168,28 @@ Enter this URL in Open WebUI's server-side connection settings; do not open it d
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
 
+## Naming Agent Manager work from Open WebUI
+
+Open WebUI's Pipe source is `agent_manager_pipe.py`; `test_agent_manager_pipe.py`
+is a unit-test file and must not be imported as the Pipe. When a user submits a
+task without `Project: <name>`, the Pipe asks for the project name in an input
+dialog. A leading `Script: <filename>` directive overrides the filename
+derived from the task:
+
+```text
+Project: quarterly-audit
+Script: audit_report.py
+
+Create a dependency-free script that writes a report.json file.
+```
+
+Named scripts are stored at
+`<workspace>/<project-slug>/<script-name>.py`. Existing scripts are preserved;
+duplicates get `_2`, `_3`, and so on. The project replaces the UUID only in the
+worker workspace path and normal user-facing status. The UUID remains the
+internal Agent Manager ID. API callers without an input dialog must include
+`Project: <name>`.
+
 ## Using llama.cpp directly
 
 The direct llama.cpp connection remains useful for backend diagnostics and bypass testing. It is also attached to `caddy_proxy` and can be added under:

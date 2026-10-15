@@ -2,7 +2,9 @@
 
 import asyncio
 import inspect
+import re
 import time
+import unicodedata
 from typing import Any
 
 import httpx
@@ -65,6 +67,100 @@ class Pipe:
 
         raise ValueError("Could not find a text prompt in the latest user message.")
 
+
+    @staticmethod
+    def _extract_run_directives(
+        text: str,
+    ) -> tuple[str, str | None, str | None]:
+        lines = text.splitlines()
+        directives: dict[str, str] = {}
+        index = 0
+        while index < len(lines):
+            line = lines[index].strip()
+            if not line:
+                index += 1
+                continue
+            label, separator, value = line.partition(":")
+            directive = label.strip().casefold()
+            if not separator or directive not in {"project", "script"}:
+                break
+            if directive in directives:
+                raise ValueError(f"Specify {directive.title()} only once.")
+            value = value.strip()
+            if not value:
+                raise ValueError(f"{directive.title()} needs a name.")
+            directives[directive] = value
+            index += 1
+
+        if not directives:
+            return text, None, None
+        goal = "\n".join(lines[index:]).strip()
+        if not goal:
+            raise ValueError("Add task instructions after the Project/Script lines.")
+        return goal, directives.get("project"), directives.get("script")
+
+    @staticmethod
+    def _suggest_script_name(goal: str) -> str:
+        normalized = (
+            unicodedata.normalize("NFKD", goal)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+            .casefold()
+        )
+        generic_words = {
+            "a", "an", "and", "app", "application", "build", "builds",
+            "create", "creates", "develop", "development", "file", "for",
+            "generate", "generates", "implement", "make", "makes", "me",
+            "my", "of", "please", "program", "python", "script", "the",
+            "that", "this", "to", "using", "with", "write", "writes",
+        }
+        words = [
+            word
+            for word in re.findall(r"[a-z0-9]+", normalized)
+            if word not in generic_words
+        ]
+        stem = "_".join(words[:8]) or "generated_script"
+        return f"{stem[:125].rstrip('_')}.py"
+
+    @staticmethod
+    def _validate_project_name(value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Project name is required.")
+        project_name = value.strip()
+        if (
+            not project_name
+            or len(project_name) > 120
+            or any(not character.isprintable() for character in project_name)
+        ):
+            raise ValueError("Project name must be 1–120 printable characters.")
+        return project_name
+
+    @classmethod
+    async def _ask_project_name(cls, event_call: Any) -> str:
+        if not callable(event_call):
+            raise ValueError(
+                "Project name is required. Start the prompt with "
+                "`Project: <name>` when submitting through an API client."
+            )
+        try:
+            response = await event_call(
+                {
+                    "type": "input",
+                    "data": {
+                        "title": "Name this project",
+                        "message": "Choose a project name for the generated script.",
+                        "placeholder": "e.g. quarterly-audit",
+                    },
+                }
+            )
+        except Exception as exc:
+            raise ValueError("Open WebUI could not collect a project name.") from exc
+        if isinstance(response, dict):
+            if response.get("error"):
+                raise ValueError("Project name entry was cancelled or unavailable.")
+            response = response.get("value")
+        return cls._validate_project_name(response)
+
     @staticmethod
     async def _emit_status(
         emitter: Any, description: str, *, done: bool = False
@@ -97,17 +193,23 @@ class Pipe:
 
     @staticmethod
     def _render_result(run: dict[str, Any]) -> str:
-        run_id = run.get("id", "unknown")
         metadata = run.get("metadata") or {}
         result = metadata.get("result") or {}
         worker = metadata.get("worker") or {}
         worker_id = result.get("worker_id") or worker.get("worker_id")
         worker_text = f" on worker `{worker_id}`" if worker_id else ""
 
+        project_name = metadata.get("project_name")
+        project_line = (
+            [f"Project: {project_name}"]
+            if isinstance(project_name, str) and project_name
+            else []
+        )
+
         if run.get("status") == "completed":
             lines = [
                 f"**Worker run completed{worker_text}.**",
-                f"Run ID: `{run_id}`",
+                *project_line,
             ]
             stdout = result.get("stdout")
             stderr = result.get("stderr")
@@ -124,7 +226,7 @@ class Pipe:
             return "\n".join(lines)
 
         if run.get("status") == "cancelled":
-            return f"**Worker run cancelled.**\nRun ID: `{run_id}`"
+            return "\n".join(["**Worker run cancelled.**", *project_line])
 
         detail = (
             result.get("error")
@@ -134,7 +236,7 @@ class Pipe:
         )
         lines = [
             f"**Worker run failed{worker_text}.**",
-            f"Run ID: `{run_id}`",
+            *project_line,
             "",
             str(detail).rstrip(),
         ]
@@ -149,10 +251,14 @@ class Pipe:
         body: dict[str, Any],
         __user__: dict[str, Any] | None = None,
         __event_emitter__: Any = None,
+        __event_call__: Any = None,
     ) -> str:
         del __user__  # Authentication to Agent Manager uses the server-side valve.
         try:
-            goal = self._latest_user_message(body)
+            message_text = self._latest_user_message(body)
+            goal, project_name, script_name = self._extract_run_directives(
+                message_text
+            )
         except ValueError as exc:
             return f"Could not submit the worker request: {exc}"
 
@@ -174,6 +280,15 @@ class Pipe:
                 "API token in this Pipe's valves."
             )
 
+        try:
+            project_name = (
+                self._validate_project_name(project_name)
+                if project_name
+                else await self._ask_project_name(__event_call__)
+            )
+        except ValueError as exc:
+            return f"Could not submit the worker request: {exc}"
+        script_name = script_name or self._suggest_script_name(goal)
         base_url = self.valves.AGENT_MANAGER_URL.rstrip("/")
         headers = {"Authorization": f"Bearer {token}"}
         request_body = {
@@ -181,6 +296,8 @@ class Pipe:
             "forgejo_repository": self.valves.FORGEJO_REPOSITORY.strip(),
             "base_ref": self.valves.BASE_REF,
             "model": body.get("model"),
+            "project_name": project_name,
+            "script_name": script_name,
             "metadata": {
                 "worker_role": self.valves.WORKER_ROLE,
                 "operation": "create-python-script",
@@ -207,13 +324,24 @@ class Pipe:
             run_id = run.get("id")
             if not isinstance(run_id, str) or not run_id:
                 return "Agent Manager accepted an unexpected response without a run ID."
+            run_metadata = run.get("metadata")
+            project = (
+                run_metadata.get("project_name")
+                if isinstance(run_metadata, dict)
+                else None
+            )
+            run_reference = (
+                f"project `{project}`"
+                if isinstance(project, str) and project
+                else f"run `{run_id}`"
+            )
 
             start_time = time.monotonic()
             deadline = start_time + self.valves.RUN_TIMEOUT_SECONDS
             last_status: str | None = None
             last_status_emit = 0.0
             await self._emit_status(
-                __event_emitter__, f"Run `{run_id}` queued; waiting for a worker…"
+                __event_emitter__, f"{run_reference} queued; waiting for a worker…"
             )
 
             while time.monotonic() < deadline:
@@ -228,7 +356,7 @@ class Pipe:
                     if now - last_status_emit >= 15:
                         await self._emit_status(
                             __event_emitter__,
-                            f"Run `{run_id}` is still active; retrying the status check…",
+                            f"{run_reference} is still active; retrying the status check…",
                         )
                         last_status_emit = now
                     await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
@@ -238,7 +366,7 @@ class Pipe:
                         await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
                         continue
                     return (
-                        f"Run `{run_id}` was submitted, but its status could not be read "
+                        f"{run_reference} was submitted, but its status could not be read "
                         f"(HTTP {exc.response.status_code}): {self._error_detail(exc.response)}"
                     )
                 except ValueError:
@@ -249,14 +377,14 @@ class Pipe:
                 now = time.monotonic()
                 if state != last_status:
                     if state == "queued":
-                        description = f"Run `{run_id}` is queued; waiting for a worker…"
+                        description = f"{run_reference} is queued; waiting for a worker…"
                     elif state == "running":
                         worker = (run.get("metadata") or {}).get("worker") or {}
                         worker_id = worker.get("worker_id")
                         who = f" `{worker_id}`" if worker_id else ""
-                        description = f"Worker{who} is processing run `{run_id}`…"
+                        description = f"Worker{who} is processing {run_reference}…"
                     else:
-                        description = f"Run `{run_id}` status: {state}."
+                        description = f"{run_reference} status: {state}."
                     await self._emit_status(__event_emitter__, description)
                     last_status = state
                     last_status_emit = now
@@ -273,18 +401,18 @@ class Pipe:
                 if now - last_status_emit >= 20:
                     await self._emit_status(
                         __event_emitter__,
-                        f"Run `{run_id}` is still {state} ({int(now - start_time)}s elapsed)…",
+                        f"{run_reference} is still {state} ({int(now - start_time)}s elapsed)…",
                     )
                     last_status_emit = now
                 await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
 
         await self._emit_status(
             __event_emitter__,
-            f"Run `{run_id}` is still processing. The worker continues in the background.",
+            f"{run_reference} is still processing. The worker continues in the background.",
             done=True,
         )
         return (
-            f"Run `{run_id}` is still processing after "
+            f"{run_reference} is still processing after "
             f"{self.valves.RUN_TIMEOUT_SECONDS}s. The worker continues in the background; "
-            "submit the run ID to your administrator to retrieve its status."
+            f"internal run ID: `{run_id}`."
         )
