@@ -7,6 +7,8 @@ This document explains the lab in two ways:
 
 These are not strict OSI layers. They are practical defense-in-depth boundaries for this pilot.
 
+Current repository state, separate from the target names below: the host is already Proxmox VE 9 on Debian 13 (`server-debian`), installed in place, not by replacing the disk with the official ISO. The guest is Debian VMID `100`, hostname `infra-lab-services`, not Ubuntu `infra-01`. Inventory names four workers: `inkii`, `naruto`, `raphael`, and `donatello`. `agent-worker/worker.py` runs generated Python as the worker OS user in `AGENT_WORKSPACE`. It does not start a sandbox container, clone Forgejo, or push a branch.
+
 ## 1. Functional layers
 
 ```text
@@ -45,14 +47,11 @@ A user should not connect directly to PostgreSQL, NATS, Docker, or Agent Control
 
 This is where work happens:
 
-- Agent Control contains the Planner and Supervisor.
-- NATS carries task messages.
-- `llama-server` provides model inference.
-- DF Workers receive tasks.
-- Sandboxes run generated code.
-- Workers push branches and evidence to Forgejo.
-
-Agents do not communicate directly with one another. They communicate through Agent Control, NATS, and Forgejo.
+- Agent Control in the target design contains the Planner and Supervisor. The checked-in service is Agent Manager: it stores runs and publishes NATS events. It does not plan work or call Forgejo.
+- NATS carries `agent.runs.>` messages. The checked-in server has JetStream and no user or subject ACL.
+- llama.cpp in this repository runs on the VM at `http://llama:8080`, not as `llama-server` on a worker.
+- `agent-worker/worker.py` consumes `agent.runs.created` and publishes start and completion events.
+- Sandboxes, Forgejo checkouts, and branch pushes are not implemented. The current worker executes the script as its OS user.
 
 ### Records, evidence, and visibility
 
@@ -88,9 +87,9 @@ Physical server laptop: df-control-01
         └── No Docker, PostgreSQL, Forgejo, NATS, or agent code on the host
 ```
 
-The current server has Debian installed. Installing Proxmox VE from the official ISO replaces that installation with the Debian-based Proxmox VE operating system. The final physical host is therefore a Proxmox host, not a general-purpose Debian server.
+The diagram above uses target names. The physical host is already a Proxmox VE host (`server-debian`), converted in place from Debian 13. It should stay minimal: the checked-in Compose projects run on the `infra-lab-services` VM, not on the Proxmox host.
 
-The five other physical laptops are bare-metal Ubuntu workers:
+The worker laptops in the target design are bare-metal Ubuntu:
 
 ```text
 df-worker-01 ... df-worker-05
@@ -165,7 +164,7 @@ A host firewall answers:
 
 > If traffic reaches this operating system, which ports may accept it?
 
-The current Debian system was configured as a temporary pre-Proxmox baseline:
+The pre-Proxmox UFW baseline below is historical. The host is already Proxmox VE. Do not treat that UFW snippet as the current host firewall, and do not assume an ISO reinstall will replace it.
 
 ```text
 default deny incoming
@@ -173,12 +172,10 @@ default allow outgoing
 allow traffic arriving on tailscale0
 ```
 
-That is reasonable for the current Debian laptop, but it is not the final Proxmox configuration. Installing Proxmox from the ISO replaces the current system and its UFW rules.
+After the in-place installation:
 
-After Proxmox installation:
-
-- The Proxmox host has its own host/firewall configuration.
-- The `infra-01` Ubuntu VM has its own firewall.
+- The Proxmox host has its own firewall configuration, separate from the VM.
+- `infra-lab-services` is a Debian guest, not Ubuntu `infra-01`, and has its own firewall.
 - A firewall rule on the Proxmox host must not be assumed to secure every service inside the VM.
 - VM traffic through `vmbr0` must be handled deliberately.
 
@@ -207,13 +204,13 @@ NATS       <-> Workers
 
 These connections do not need to be published to every laptop.
 
-Only deliberately exposed services should be published:
+The publish matrix below is the original target, not the checked-in Caddyfile. The repository Caddy publishes ports `80` and `443` only. It routes `/grafana/` and `/forgejo/`, and sends every other path on that site to Proxmox port `8006`. It does not publish `8443` or `9443`. NATS port `4222` is published only by `compose.worker-test.yml`, bound to `100.94.49.45`.
 
 ```text
-443    Caddy/Open WebUI
-8443   Caddy/Forgejo
-9443   Caddy/Grafana
-4222   NATS, restricted to the Tailscale IP if required
+443    target: Caddy/Open WebUI
+8443   target: Caddy/Forgejo
+9443   target: Caddy/Grafana
+4222   target: NATS, restricted to the Tailscale IP if required
 ```
 
 PostgreSQL should not be published.
@@ -229,7 +226,7 @@ Even when a device can reach a service, the service performs its own authorizati
 | Caddy | HTTPS and routing |
 | Forgejo | Human accounts, bot accounts, and repository permissions |
 | PostgreSQL | Separate database users and privileges |
-| NATS | Separate users and subject permissions |
+| NATS | Target: separate users and subject permissions. Checked-in server: no authentication; remote access is the Tailscale bind only |
 | Open WebUI | Individual user accounts |
 | Grafana | Individual user accounts and dashboard permissions |
 | Forgejo | Branch protection and human approval |

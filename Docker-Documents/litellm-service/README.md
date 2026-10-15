@@ -17,12 +17,11 @@ are not committed to Git.
 
 ## Endpoints
 
-Remote workers use the Tailscale-only Caddy route:
+The checked-in Caddyfile does not route `/litellm/`. This URL is not served:
 
 ```text
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
-
 Containers attached to `caddy_proxy` use:
 
 ```text
@@ -35,8 +34,7 @@ The host-local gateway uses:
 http://127.0.0.1:4000/v1
 ```
 
-`litellm` is a Docker-only hostname. It does not resolve on a remote worker or
-in a normal browser.
+`litellm` is a Docker-only hostname. A remote worker cannot resolve it, and it cannot use the VM loopback address. Remote dynamic prompts have no routed model URL until a Caddy handle is added.
 
 ## Configuration
 
@@ -61,14 +59,9 @@ LUNA_BACKEND_API_KEY=<key-accepted-by-the-inference-backend>
 `LUNA_MODEL` and `LUNA_API_BASE` describe the backend route. The public model
 name presented to clients remains `luna`.
 
-The worker must use the worker-scoped LiteLLM virtual key, not
-`LITELLM_MASTER_KEY` or `LUNA_BACKEND_API_KEY`:
+The worker reads `MODEL_API_KEY` from the environment, not from a file. The Ansible role destination, when the role can run, is `~/.config/litellm/worker-api-key`.
 
-```dotenv
-MODEL_BASE_URL=https://infra-lab-services.tail494f6d.ts.net/litellm/v1
-MODEL_API_KEY=<contents of the worker virtual key>
-MODEL_NAME=luna
-```
+`create-luna-key.sh` writes one `.luna-worker-api-key` in this directory. Inventory expects separate controller files such as `/home/infra-lab-user/litellm-service/.worker-01-api-key`. The script does not create those files.
 
 The model key is installed on a worker through a secure channel, for example:
 
@@ -141,13 +134,7 @@ curl -sS \
   }'
 ```
 
-For a remote worker, use the Caddy hostname and the existing Caddy root CA:
-
-```bash
-curl --cacert "$SSL_CERT_FILE" \
-  -H "Authorization: Bearer ${MODEL_API_KEY}" \
-  "${MODEL_BASE_URL}/models"
-```
+A remote worker cannot use the Caddy hostname for LiteLLM until `/litellm` is added to `caddy_service/Caddyfile`. A `401` from loopback or from `http://litellm:4000` means LiteLLM is up and the key was rejected. A failure against the MagicDNS `/litellm/` URL is a missing route, not a model error.
 
 A `401` response confirms that TLS and routing work but authentication failed.
 A timeout or model error requires inspecting the LiteLLM and backend logs.
@@ -169,7 +156,7 @@ Open WebUI and LiteLLM are both attached to `caddy_proxy`.
 Each worker keeps a unique identity but shares the consumer for its role:
 
 ```text
-WORKER_ID=inkii
+WORKER_ID=worker-02
 WORKER_ROLE=coder
 WORKER_CONSUMER=agent-workers-coder
 ```
@@ -181,10 +168,7 @@ ID. JetStream assigns each event to an available worker.
 
 ### LiteLLM health works but completions time out
 
-Test `chat/completions` locally first. If the local request times out, inspect
-the LiteLLM-to-backend route, `LUNA_API_BASE`, `LUNA_MODEL`, and the backend
-logs. If local works but the Caddy URL fails, inspect Caddy, certificate trust,
-and the `/litellm` route.
+Test `chat/completions` locally first. If the local request times out, inspect the LiteLLM-to-backend route, `LUNA_API_BASE`, `LUNA_MODEL`, and the backend logs. If local `chat/completions` works but `https://infra-lab-services.tail494f6d.ts.net/litellm/v1` fails, that matches the repository: the Caddyfile has no `/litellm` route.
 
 ### Certificate verification fails
 

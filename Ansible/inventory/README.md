@@ -9,7 +9,10 @@ lab_local
 └── server-debian
 
 proxmox_hosts
-└── server-debian
+└── lab_local
+
+proxmox_guests
+└── (empty)
 
 docker_hosts
 └── infra-lab-services
@@ -41,16 +44,18 @@ The `docker_hosts` variables are defined in:
 inventory/group_vars/docker_hosts.yml
 ```
 
-They list the live Compose projects in their required startup order:
+They list the live Compose project paths used by the playbook. These are not the repository source directories:
 
 ```text
-TheGarden/Docker-Documents/caddy_service
-TheGarden/Docker-Documents/forgejo
-TheGarden/Docker-Documents/open_webui_services
-TheGarden/Docker-Documents/llama_services
-TheGarden/Docker-Documents/grafana_services
-TheGarden/Docker-Documents/agent-manager-service
+caddy          /home/infra-lab-user/caddy-service
+forgejo        /home/infra-lab-user/forgejo-service
+open-webui     /home/infra-lab-user/open-webui-service
+llama          /home/infra-lab-user/llama-service
+grafana        /home/infra-lab-user/grafana-service
+agent-manager  /home/infra-lab-user/agent-manager-service          build: always
 ```
+
+`litellm-service` is not in this list. The playbook does not SSH to the VM; `infra-lab-services` is a local connection.
 
 The Docker deployment uses the `community.docker` collection:
 
@@ -90,14 +95,7 @@ The existing `inventory/worker-1.yml` is an optional single-worker inventory
 for isolated testing. Do not load it together with `hosts.yml` unless you
 intentionally want to maintain duplicate definitions for `inkii`.
 
-The worker runtime is documented in
-[`../../agent-worker/README.md`](../../agent-worker/README.md). The worker role
-scaffold targets `agent_workers`; use `--limit` during initial rollout, for
-example:
-
-```bash
-ansible-playbook playbooks/agent-workers.yml --limit inkii
-```
+The worker runtime is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md). `playbooks/agent-workers.yml` is not a working rollout: the role is missing `caddy-local-root.crt`, `models.json.j2`, and `settings.json.j2`, and it does not install `worker.py`. `proxmox-guests.example.yml` also defines `infra-lab-services`; do not load it beside `hosts.yml`.
 
 ## Proxmox guest template
 

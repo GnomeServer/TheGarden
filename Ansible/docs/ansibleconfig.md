@@ -26,14 +26,15 @@ TheGarden/Ansible/inventory/hosts.yml
 
 ## Inventory groups
 
-The active inventory contains:
-
 ```text
 lab_local
 └── server-debian
 
 proxmox_hosts
-└── server-debian
+└── lab_local
+
+proxmox_guests
+└── (empty)
 
 docker_hosts
 └── infra-lab-services
@@ -77,10 +78,7 @@ TheGarden/Docker-Documents/litellm-service
 TheGarden/Docker-Documents/agent-manager-service
 ```
 
-The Compose `.env` files contain secrets and remain local deployment files;
-they must not be committed. The paths used by
-`inventory/group_vars/docker_hosts.yml` must point to the checkout used by the
-machine running the playbook.
+The paths in `inventory/group_vars/docker_hosts.yml` are absolute VM checkout paths under `/home/infra-lab-user/`, not these repository directories. The playbook does not deploy `litellm-service`.
 
 Install the Docker collection and validate the deployment playbook:
 
@@ -117,16 +115,7 @@ variables, CA trust, and troubleshooting steps are documented in:
 TheGarden/agent-worker/README.md
 ```
 
-Start with one host:
-
-```bash
-cd TheGarden/Ansible
-ansible-playbook playbooks/agent-workers.yml --limit inkii
-```
-
-The worker must have a unique `WORKER_ID`, while workers with the same role
-share `WORKER_ROLE` and `WORKER_CONSUMER`. Generated code execution remains an
-explicit opt-in with `ALLOW_GENERATED_CODE=1` and is not sandboxed.
+The playbook is not a working NATS-worker rollout. It attempts a user-level Pi/LiteLLM file install and requires `litellm_key_source`. It does not set `WORKER_ID`, `WORKER_ROLE`, `WORKER_CONSUMER`, or `ALLOW_GENERATED_CODE`, and it does not copy `worker.py`. The role is missing `files/caddy-local-root.crt`, `templates/models.json.j2`, and `templates/settings.json.j2`. Use `agent-worker/README.md` for the Python worker.
 
 ## Proxmox validation
 

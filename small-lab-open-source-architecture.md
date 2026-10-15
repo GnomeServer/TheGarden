@@ -2,16 +2,14 @@
 
 ## Scope
 
-This is the deliberately small first version of the lab.
+This file is the original small-lab design. From `# 1` onward, names such as `infra-01` and services such as Garage, Conduit, and Element are the target, not a claim that they are deployed.
 
-Current hardware and state:
+Repository facts that override the bullets below:
 
-- One Debian server laptop
-- Five Ubuntu worker laptops
-- 32 GB RAM and approximately 512 GB SSD per laptop
-- Intel integrated Arc graphics on the laptops
-- Tailscale tailnet already configured
-- No other services currently deployed
+- The server is already Proxmox VE 9 on Debian 13, hostname `server-debian`. It is not a general-purpose Debian laptop waiting for an ISO install.
+- Ansible inventory names four workers: `inkii`, `naruto`, `raphael`, and `donatello`. The hardware plan is still five Ubuntu laptops.
+- Compose projects exist for Caddy, Forgejo, Open WebUI, llama.cpp, LiteLLM, Grafana, and Agent Manager. Ansible deploys all of those except LiteLLM. See `Docker-Documents/README.md`.
+- The checked-in Caddyfile routes `/grafana/` and `/forgejo/` and falls back to Proxmox. It does not route `/litellm/`, `/llama/`, or Open WebUI.
 
 The goal is to build a useful multi-node AI and software-agent lab without introducing Kubernetes, high-availability storage, or a large number of complex services too early.
 
@@ -171,9 +169,10 @@ Use ext4 or LVM-thin for the Proxmox server storage. Do not introduce ZFS or Cep
 
 ## Services to add after the first version works
 
+LiteLLM is no longer only a later idea. `Docker-Documents/litellm-service` exists, and `config.yaml` exposes the public model name `luna`. Ansible's `docker_compose_projects` list does not deploy it, and the checked-in Caddyfile has no `/litellm/` route. Containers on `caddy_proxy` use `http://litellm:4000/v1`. The MagicDNS URL is not served until that route is added.
+
 | Service | Why defer it | Later interactions |
 |---|---|---|
-| LiteLLM | Deployed after the first direct endpoint test. | Open WebUI and agent workers call one gateway using scoped virtual keys. The gateway currently exposes the `luna` model route and can later route to multiple inference workers. |
 | Loki + Grafana Alloy or Promtail | Journald and Docker log rotation are enough during initial bring-up. | Workers send logs to Loki. Grafana queries both Loki and Prometheus. Add this when agent runs become frequent. |
 | OpenTelemetry Collector + Grafana Tempo or Jaeger | Distributed tracing is not needed for the first single-worker test. | Agent, supervisor, queue, model, and tool spans are correlated by run and task IDs. Add this when timing and failure analysis become difficult. |
 | Proxmox metrics exporter | Node Exporter covers basic host metrics initially. | Exposes VM state, CPU, memory, storage, and task metrics from the Proxmox host to Prometheus. |

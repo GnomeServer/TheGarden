@@ -1,9 +1,11 @@
 # Agent worker
 
 `worker.py` is a long-running Agent Manager worker. It consumes
-`agent.runs.created` events from NATS JetStream, asks the configured
-OpenAI-compatible gateway to generate a Python script, executes that script in
-a per-run workspace, and publishes one `agent.runs.completed` event.
+`agent.runs.created` from NATS JetStream, publishes `agent.runs.started`,
+then publishes one `agent.runs.completed` event. It calls the configured
+OpenAI-compatible gateway only when `metadata.script` is absent. The workspace
+is `AGENT_WORKSPACE/<project-slug>/` when `metadata.project_name` is set, and
+`AGENT_WORKSPACE/<run-id>/` otherwise.
 
 The worker currently supports the `create-python-script` operation. A script
 may also be supplied as `metadata.script` for deterministic pipeline tests,
@@ -50,13 +52,14 @@ Workers use a shared durable pull consumer for load balancing. Every worker
 that provides the same role uses the same consumer name:
 
 ```text
-worker_id       unique identity, for example inkii or donatello
+worker_id       inventory id, not the hostname: worker-01 raphael, worker-02 inkii, worker-03 donatello, worker-04 naruto
 worker_role     capability label, normally coder
 worker_consumer shared JetStream consumer, normally agent-workers-coder
 ```
 
 An available worker pulls the next event. The Open WebUI Pipe should not choose
-a worker for normal jobs. It should submit role metadata:
+a worker for normal jobs. It should submit this metadata, not a top-level
+`worker_role` field:
 
 ```json
 {
@@ -65,8 +68,10 @@ a worker for normal jobs. It should submit role metadata:
 }
 ```
 
-A specific `worker_id` may be included for an intentional targeted test, but it
-should not be used for pooled work.
+That object belongs inside the run's `metadata`, together with a required
+`forgejo_repository`. Do not set `metadata.worker_id` on the shared consumer.
+A mismatch raises before publish or ack, and `main` does not catch it, so the
+worker process exits and JetStream redelivers the unacked message.
 
 ## NATS network
 
@@ -146,16 +151,29 @@ export ALLOW_GENERATED_CODE=1
 The model gateway uses the worker-scoped LiteLLM virtual key:
 
 ```bash
-export MODEL_BASE_URL='https://infra-lab-services.tail494f6d.ts.net/litellm/v1'
 export MODEL_NAME='luna'
-export MODEL_API_KEY="$(cat ~/.config/agent-worker/luna-worker-api-key)"
+export MODEL_API_KEY="$(tr -d '\r\n' < "$HOME/.config/litellm/worker-api-key")"
 ```
 
 Do not use `LITELLM_MASTER_KEY` or the LiteLLM backend key as
 `MODEL_API_KEY`. The public model name is `luna`; `openai/luna` is a LiteLLM
 backend/provider configuration value, not a replacement worker credential.
+`worker.py` reads `MODEL_API_KEY` from the environment. It does not read a key
+file or `LITELLM_API_KEY`.
 
-For the internal Caddy CA, prefer a trusted CA bundle:
+The checked-in Caddyfile does not route `/litellm/`. A remote worker cannot use
+`https://infra-lab-services.tail494f6d.ts.net/litellm/v1`, `http://litellm:4000/v1`,
+or `http://127.0.0.1:4000/v1`. The first is not routed. The second is Docker DNS.
+The third is the VM loopback publish. Dynamic prompts need a route that does not
+exist in this repository yet. `metadata.script` does not need the model.
+
+The Ansible role, when its missing files are supplied, copies the virtual key
+to `~/.config/litellm/worker-api-key`. `create-luna-key.sh` writes one
+`.luna-worker-api-key` in the LiteLLM project. Inventory expects separate
+controller files such as `/home/infra-lab-user/litellm-service/.worker-01-api-key`.
+The script does not create those per-worker files.
+
+For TLS to a future Caddy route, prefer a trusted CA bundle:
 
 ```bash
 export SSL_CERT_FILE="$HOME/.pi/agent/certs/caddy-local-root.crt"
@@ -163,8 +181,9 @@ export MODEL_TLS_INSECURE=0
 ```
 
 `MODEL_TLS_INSECURE=1` is only a temporary diagnostic bypass and must not be
-used for a persistent deployment. The URL must use the Caddy hostname, not the
-Tailscale IP, because the certificate is issued for the hostname.
+used for a persistent deployment. A future HTTPS URL must use the Caddy
+hostname, not the Tailscale IP, because the certificate is issued for the
+hostname.
 
 ## Start the worker
 
@@ -204,7 +223,7 @@ Without a project name, direct API callers retain the UUID workspace path:
 
 If no script name is provided, the worker uses `generated_agent.py`. Existing
 scripts are not overwritten; duplicates get `_2`, `_3`, and so on. Scripts
-execute in the project directory, so their output artifacts are written there.
+execute in that workspace directory, so their output artifacts are written there.
 
 ## Generated-script contract
 
@@ -212,7 +231,7 @@ Generated code is executed directly by the worker user. The model prompt
 requires scripts to:
 
 - use only the Python standard library already available on the worker;
-- operate only in the current run directory;
+- operate only in the current workspace directory;
 - avoid network, shell, subprocess, and secret access;
 - avoid `input()`, stdin, follow-up questions, and GUI modules such as
   `tkinter`;
@@ -233,11 +252,14 @@ suitable dependency for the current headless worker.
 
 ## Submit a pooled run
 
-The Pipe or a test client should omit `worker_id` for pooled work:
+
+The Pipe or a test client must include `forgejo_repository`. Omit
+`worker_id`. Put the role and operation in `metadata`:
 
 ```json
 {
   "goal": "Create a dependency-free Python script that writes a report.json file.",
+  "forgejo_repository": "owner/project",
   "model": "luna",
   "project_name": "quarterly-audit",
   "script_name": "audit_report.py",
@@ -253,6 +275,7 @@ For a deterministic test, provide a script string:
 ```json
 {
   "goal": "Run the supplied test script",
+  "forgejo_repository": "owner/project",
   "metadata": {
     "worker_role": "coder",
     "operation": "create-python-script",
@@ -261,9 +284,9 @@ For a deterministic test, provide a script string:
 }
 ```
 
-The Manager stores the run, publishes `agent.runs.created`, and consumes the
-worker's `agent.runs.completed` event. The worker result is stored under
-`metadata.result`.
+The Manager stores the run and publishes `agent.runs.created`. It consumes
+`agent.runs.started` (status `running`, `metadata.worker`) and
+`agent.runs.completed` (`metadata.result`).
 
 ## Troubleshooting
 
@@ -288,8 +311,8 @@ It must be `nats://100.94.49.45:4222`, not the default local URL
 
 ### Empty queue timeout
 
-A `nats.errors.TimeoutError` from `subscription.fetch()` after the configured
-wait is normal when no job is available. The worker catches it and continues.
+A `nats.errors.TimeoutError` from `subscription.fetch()` after the hardcoded
+120-second wait is normal when no job is available. The worker catches it and continues.
 It should not be printed as a failure.
 
 ### Empty response while expecting NATS INFO

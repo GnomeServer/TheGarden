@@ -5,11 +5,15 @@ LiteLLM gateway over the Tailscale network.
 
 ## Current gateway
 
+The checked-in Caddyfile does not route `/litellm/`. This URL is not served by the repository configuration:
+
 ```text
 Base URL:     https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 Model ID:     luna
 Display name: GPT-5.6 Luna
 ```
+
+Do not treat that base URL as working until `Docker-Documents/caddy_service/Caddyfile` has a `/litellm` handle. VM-local checks use `http://127.0.0.1:4000/v1`. Containers on `caddy_proxy` use `http://litellm:4000/v1`. Pi on a worker laptop cannot use either of those. The model id, when a route exists, is `luna`, not `gpt-5.6-luna`.
 
 The gateway currently exposes the model as `luna`. Do not use
 `gpt-5.6-luna` in API requests unless it is added as a LiteLLM model alias.
@@ -23,15 +27,15 @@ The root certificate is public; never copy the corresponding `root.key`.
 Copy `caddy-local-root.crt` to the worker, then run:
 
 ```bash
-install -Dm644 caddy-local-root.crt \\
+install -Dm644 caddy-local-root.crt \
   "$HOME/.pi/agent/certs/caddy-local-root.crt"
 ```
 
 Verify the certificate:
 
 ```bash
-openssl x509 \\
-  -in "$HOME/.pi/agent/certs/caddy-local-root.crt" \\
+openssl x509 \
+  -in "$HOME/.pi/agent/certs/caddy-local-root.crt" \
   -noout -subject -issuer -dates -fingerprint -sha256
 ```
 
@@ -56,8 +60,8 @@ update the fingerprint in this guide.
 For programs that use the operating system CA store:
 
 ```bash
-sudo install -m0644 \\
-  "$HOME/.pi/agent/certs/caddy-local-root.crt" \\
+sudo install -m0644 \
+  "$HOME/.pi/agent/certs/caddy-local-root.crt" \
   /usr/local/share/ca-certificates/infra-lab-caddy-root.crt
 sudo update-ca-certificates
 ```
@@ -167,14 +171,14 @@ Check the gateway certificate and model list without exposing the key:
 
 ```bash
 CA="$HOME/.pi/agent/certs/caddy-local-root.crt"
-KEY="$(tr -d '\\r\\n' < "$HOME/.config/litellm/worker-api-key")"
+KEY="$(tr -d '\r\n' < "$HOME/.config/litellm/worker-api-key")"
 
-curl --fail --silent --show-error --cacert "$CA" \\
-  -H "Authorization: Bearer $KEY" \\
+curl --fail --silent --show-error --cacert "$CA" \
+  -H "Authorization: Bearer $KEY" \
   https://infra-lab-services.tail494f6d.ts.net/litellm/v1/models
 ```
 
-Expected model list contains `luna`.
+That request fails until the Caddyfile routes `/litellm/`. A connection failure is a missing route, not a bad key. When the route exists, the model list should contain `luna`.
 
 Check Pi's registration:
 

@@ -1,7 +1,7 @@
 # TheGarden Software Factory Roadmap
 
 **Project:** TheGarden / Dark Factory  
-**Last updated:** 2026-09-29  
+**Last updated:** 2026-10-15
 **Purpose:** Give the team one simple place to record what exists, what is missing, who is doing what, and what must happen next.
 
 > This document is a roadmap and checklist. A checked box means the team has verified that the item works. It does not merely mean that the item has been discussed or documented.
@@ -82,24 +82,26 @@ Suggested task format:
 - [x] A Proxmox server laptop exists.
 - [x] An infrastructure VM exists for Docker services.
 - [x] Tailscale is being used for private network connectivity.
-- [x] Docker Compose services exist for Caddy, Forgejo, model services, Grafana, and Prometheus.
-- [x] Agent Manager has an API for creating and viewing runs.
+- [x] Docker Compose projects exist for Caddy, Forgejo, Open WebUI, llama.cpp, LiteLLM, Grafana, and Prometheus. Ansible deploys every one of those except LiteLLM.
+- [x] Agent Manager has an API for creating, listing, reading, and requesting cancellation of runs.
 - [x] Agent Manager stores run state in PostgreSQL.
-- [x] Agent Manager publishes a `run.created` event to NATS JetStream.
+- [x] Agent Manager publishes subject `agent.runs.created`. The payload field is `event: run.created`.
 - [x] Forgejo is the intended home for source code, branches, pull requests, and reviews.
 - [x] The project has architecture and security documentation.
-- [x] Ansible can audit the controller and deploy existing Docker Compose stacks.
+- [x] Ansible can audit the controller and deploy the Compose projects listed in `inventory/group_vars/docker_hosts.yml`. That playbook does not apply `compose.worker-test.yml`.
 
 ### Important things that are only partly complete
 
-- [ ] A worker can consume a run from NATS and report its result.
-- [ ] Agent Manager consumes worker status events and updates PostgreSQL.
-- [ ] The run state machine rejects invalid status changes.
+Unchecked means not verified in the lab. It does not mean the repository has no code.
+
+- [ ] A worker can consume a run from NATS and report its result. — `agent-worker/worker.py` consumes `agent.runs.created` and publishes `agent.runs.started` and `agent.runs.completed`. Not verified as a lab run.
+- [ ] Agent Manager consumes worker status events and updates PostgreSQL. — the service consumes `agent.runs.started` and `agent.runs.completed` and updates status. It publishes `agent.runs.cancelled` and never consumes it, so status stays `cancel_requested`. Not verified as a lab run.
+- [ ] The run state machine rejects invalid status changes. — a completion overwrites status, including an earlier terminal status.
 - [ ] A deterministic validator independently checks a worker result.
 - [ ] Evidence is stored and linked to a run.
 - [ ] A worker laptop can join through a documented, secure connection process.
 - [ ] The tracked Agent Manager source and the live deployment checkout are kept in sync.
-- [ ] Ansible can configure a standard worker laptop.
+- [ ] Ansible can configure a standard worker laptop. — `playbooks/agent-workers.yml` does not install `worker.py`, and the role is missing `caddy-local-root.crt`, `models.json.j2`, and `settings.json.j2`.
 - [ ] Machine secrets are deployed reproducibly without putting plaintext secrets in Git.
 
 ### Not built yet
@@ -652,7 +654,7 @@ Use this section for the current sprint. Move completed items into the phase che
 | 1 | Define the first harmless mission |  | [ ] |  |  |
 | 2 | Document event fields and transitions |  | [ ] |  |  |
 | 3 | Build or test the mock worker |  | [ ] |  |  |
-| 4 | Add Agent Manager status-event handling |  | [ ] |  |  |
+| 4 | Add Agent Manager status-event handling |  | [ ] | `agent_manager/main.py` consumes started and completed events | Still unverified in the lab. Cancellation is published and not applied to `cancelled`. |
 | 5 | Add the deterministic validator |  | [ ] |  |  |
 | 6 | Decide the first approved worker laptop |  | [ ] |  |  |
 | 7 | Document the secure worker connection |  | [ ] |  |  |

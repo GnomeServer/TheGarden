@@ -18,15 +18,29 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## Inventory
 
-The default inventory is `inventory/hosts.yml`:
+The default inventory is `inventory/hosts.yml`. `ansible.cfg` loads only that file.
 
 ```text
-server-debian       Proxmox host used by the audit playbooks
-infra-lab-services  Docker VM used by docker-services.yml
+lab_local
+└── server-debian          local Proxmox audit target
+
+proxmox_hosts
+└── lab_local              child group, not a direct host list
+
+proxmox_guests
+└── (empty)
+
+docker_hosts
+└── infra-lab-services     local connection; docker-services.yml does not SSH to 10.1.10.2
+
+agent_workers
+├── inkii                  100.98.125.127  user inkii     worker-02
+├── naruto                 100.88.92.78    user naruto    worker-04
+├── raphael                100.116.35.103  user raphael   worker-01
+└── donatello              100.94.145.104  user bgurrol4  worker-03
 ```
 
-`infra-lab-services` is currently a local Ansible target. It is in the `docker_hosts` group and uses `/usr/bin/python3`.
-
+Every host above pins `ansible_python_interpreter` to `/usr/bin/python3`. Worker hosts are reached by SSH. `infra-lab-services` is `ansible_connection: local`.
 Inspect the inventory with:
 
 ```bash
@@ -44,19 +58,18 @@ ansible-galaxy collection install -r requirements.yml
 
 ## Docker Compose deployment
 
-`playbooks/docker-services.yml` deploys the existing Compose projects in dependency order:
+`playbooks/docker-services.yml` deploys the projects named in `inventory/group_vars/docker_hosts.yml`, in this order:
 
-1. `caddy-service`, which creates the external `caddy_proxy` network;
-2. `forgejo-service`, `open-webui-service`, `llama-service`, and `grafana-service`;
-3. `agent-manager-service`, which needs both `caddy_proxy` and `open-webui_internal`.
+1. `caddy` at `/home/infra-lab-user/caddy-service` (`build: never`), which creates `caddy_proxy`
+2. `forgejo` at `/home/infra-lab-user/forgejo-service`
+3. `open-webui` at `/home/infra-lab-user/open-webui-service`
+4. `llama` at `/home/infra-lab-user/llama-service`
+5. `grafana` at `/home/infra-lab-user/grafana-service`
+6. `agent-manager` at `/home/infra-lab-user/agent-manager-service` (`build: always`)
 
-The project paths are defined in:
+Those are VM checkout paths, not `Docker-Documents/` paths. The playbook does not copy the repository tree, does not deploy `litellm-service`, and does not add `compose.worker-test.yml`. Because `infra-lab-services` is a local connection, the playbook runs on the controller. It does not SSH to `10.1.10.2`.
 
-```text
-inventory/group_vars/docker_hosts.yml
-```
-
-The Compose source directories are stored in the repository under:
+Repository source directories:
 
 ```text
 TheGarden/Docker-Documents/caddy_service
@@ -64,6 +77,7 @@ TheGarden/Docker-Documents/forgejo
 TheGarden/Docker-Documents/open_webui_services
 TheGarden/Docker-Documents/llama_services
 TheGarden/Docker-Documents/grafana_services
+TheGarden/Docker-Documents/litellm-service
 TheGarden/Docker-Documents/agent-manager-service
 ```
 
@@ -109,8 +123,4 @@ Generated state is written under `state/` and is ignored by Git because it conta
 
 Do not add Compose `.env` files, API tokens, passwords, private keys, or vault passwords to TheGarden. The next step for a reproducible rebuild is to store secret values in Ansible Vault and template each Compose `.env` file with mode `0600`.
 
-Worker nodes are grouped under `agent_workers` in the default inventory. The
-worker role/playbook scaffold is available at
-`roles/agent_worker/` and `playbooks/agent-workers.yml`; use `--limit` for an
-initial rollout. Worker runtime configuration and the NATS/LiteLLM
-troubleshooting guide are in `../agent-worker/README.md`.
+`roles/agent_worker` and `playbooks/agent-workers.yml` are not a working worker rollout. The role copies a LiteLLM key to `~/.config/litellm/worker-api-key` and tries to install Pi files. The role directory has no `files/caddy-local-root.crt`, `templates/models.json.j2`, or `templates/settings.json.j2`, so the playbook cannot finish as checked in. It does not install `worker.py`, create a virtualenv, or export `WORKER_*` or `ALLOW_GENERATED_CODE`. Use `../agent-worker/README.md` for the Python worker. `inventory/worker-1.yml` is not loaded and does not define `litellm_key_source`, so it is not enough to run the role.

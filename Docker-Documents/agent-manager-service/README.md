@@ -6,7 +6,7 @@ This Compose project deploys the first control-plane slice for agentic coding ru
 - `postgres`: private PostgreSQL database for manager state
 - `nats`: private NATS server with JetStream enabled and persistent storage
 
-The manager does not execute repository code. Long-running workers consume durable NATS events and publish completion events. The manager consumes `agent.runs.completed` through a durable JetStream consumer and updates the run status and result metadata. The pooled worker protocol is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md).
+The manager does not execute repository code and does not call Forgejo or a model. Workers consume `agent.runs.created`. The manager consumes `agent.runs.started` on durable consumer `agent-manager-started` and `agent.runs.completed` on durable consumer `agent-manager-completions`. A start event moves only `queued` to `running` and stores `metadata.worker`. A completion event writes `metadata.result` and sets status to the worker's `completed` or `failed`, even if the run was already terminal. Those consumers redeliver unacknowledged messages after a restart; already-acked messages are not replayed. The worker protocol is in [`../../agent-worker/README.md`](../../agent-worker/README.md).
 
 ## Networks
 
@@ -82,7 +82,7 @@ The multiline verification commands are also available as runnable text files:
 
 ```text
 verify-health.txt       liveness and readiness checks
-verify-auth.txt         confirms unauthenticated requests return 401
+verify-auth.txt         prints the status of an unauthenticated GET /v1/runs; it does not assert 401
 submit-test-run.txt     creates a test run and saves its ID
 get-test-run.txt        retrieves the saved test run
 verify-postgres.txt     checks the persisted run row
@@ -102,7 +102,7 @@ bash verify-nats.txt
 bash consume-test-event.txt
 ```
 
-`submit-test-run.txt` stores the most recent run ID in `.last-run-id`, which is ignored by Git. A run submitted without a matching worker remains `queued`. When a worker publishes `agent.runs.completed`, the manager updates the database status and stores the worker result under `metadata.result`.
+`submit-test-run.txt` stores the most recent run ID in `.last-run-id`, which is ignored by Git. A run with no worker remains `queued`. A start event sets `running`. A completion event sets `completed` or `failed` and stores the worker payload under `metadata.result`. A later completion overwrites an earlier terminal status.
 
 ## Submit a run
 
@@ -136,38 +136,56 @@ The request is stored in PostgreSQL and published to the JetStream subject:
 agent.runs.created
 ```
 
-The cancellation endpoint publishes to:
+The cancellation endpoint is `POST /v1/runs/{run_id}/cancel`. It sets `cancel_requested` and publishes:
 
 ```text
 agent.runs.cancelled
 ```
 
-For pooled worker work, omit `worker_id` and include the worker role:
+Already `completed`, `failed`, or `cancelled` is returned unchanged and is not published. Nothing consumes `agent.runs.cancelled`, so the status never becomes `cancelled`. The Open WebUI Pipe treats only `completed`, `failed`, and `cancelled` as finished, so `cancel_requested` keeps it polling.
+
+`worker_role` and `operation` are not request fields. Put them in `metadata`. A top-level object is accepted and ignored:
 
 ```json
 {
-  "worker_role": "coder",
-  "operation": "create-python-script"
+  "goal": "Create a dependency-free Python script that writes a report.json file.",
+  "forgejo_repository": "owner/project",
+  "project_name": "auth-repair",
+  "script_name": "verify_auth.py",
+  "metadata": {
+    "worker_role": "coder",
+    "operation": "create-python-script"
+  }
 }
 ```
 
-The stream is named `AGENT_RUNS` and is stored in the `nats_data` volume. Coder
-workers share a durable consumer such as `agent-workers-coder`; the first
-available worker pulls each event. The manager's durable completion consumer is
-named `agent-manager-completions` and replays retained completion events after
-a restart.
+Do not set `metadata.worker_id` on the shared consumer. A mismatch raises in the worker before ack and exits that process, leaving the delivery unacked.
 
-## Existing service endpoints
+The stream is `AGENT_RUNS` with subjects `agent.runs.>`. Coder workers share a durable consumer such as `agent-workers-coder`. Publish dedupe uses `Nats-Msg-Id: {subject}:{run_id}`.
 
-The defaults match the current Docker networks:
+## API
 
-```text
-Forgejo API:  http://forgejo:3000/api/v1
-llama.cpp:    http://llama:8080/v1
-Ollama:       http://ollama:11434
-```
+No bearer token:
 
-`MODEL_BASE_URL`, `MODEL_API_KEY`, `FORGEJO_API_URL`, and `FORGEJO_TOKEN` are included in the environment for the next planner/orchestrator implementation. The initial API does not call those services yet.
+| Method | Path | Behavior |
+|---|---|---|
+| GET | `/healthz` | Always `{"status":"ok","database":"not_checked","nats":"not_checked"}`. Compose healthcheck uses this path. |
+| GET | `/readyz` | Checks PostgreSQL and NATS. Returns 503 when either is down. |
+| GET | `/metrics` | Prometheus counters `agent_runs_created_total`, `agent_runs_started_total`, `agent_runs_completed_total`, and `agent_runs_failed_total`. |
+| GET | `/docs` | Default FastAPI docs, also `/redoc` and `/openapi.json`. |
+
+Bearer token required. A missing or wrong token is 401.
+
+| Method | Path | Behavior |
+|---|---|---|
+| POST | `/v1/runs` | 202. Stores `queued`, then publishes `agent.runs.created`. Publish failure sets `failed` and returns 503 `run could not be queued`. |
+| GET | `/v1/runs` | Newest first. Query `status` is an exact match. `limit` defaults to 50 and must be 1–200. |
+| GET | `/v1/runs/{run_id}` | 404 detail is `run not found`. |
+| POST | `/v1/runs/{run_id}/cancel` | See the cancellation rules above. |
+
+`project_name` and `script_name` are stored inside `metadata`, not as columns. The same keys in the JSON body replace copies inside client `metadata`.
+
+Compose and `.env.example` set `MODEL_BASE_URL` to `http://llama:8080/v1`. The Python fallback `http://litellm:4000/v1` is unused while Compose sets the variable. The API does not call Forgejo, llama.cpp, LiteLLM, or Ollama. Ollama is on `open-webui_internal` at `http://ollama:11434`.
 
 ## Optional Caddy route
 
@@ -236,18 +254,23 @@ unit that starts it:
 
 ```text
 NATS_URL=nats://100.94.49.45:4222
-WORKER_ID=<unique-worker-id>
+WORKER_ID=worker-01
 WORKER_ROLE=coder
 WORKER_CONSUMER=agent-workers-coder
-MODEL_BASE_URL=https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 MODEL_NAME=luna
 MODEL_API_KEY=<worker-scoped-LiteLLM-key>
 ALLOW_GENERATED_CODE=1
 ```
 
+Inventory IDs are `worker-01` through `worker-04`, not hostnames. Do not set
+`MODEL_BASE_URL` to `http://litellm:4000/v1` on a laptop; that name is Docker
+DNS. Do not use `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`
+either: the checked-in Caddyfile has no `/litellm/` route. VM-local checks use
+`http://127.0.0.1:4000/v1`. A remote dynamic prompt has no routed model URL in
+this repository. `metadata.script` does not need one.
+
 Do not use the LiteLLM master key as `MODEL_API_KEY`. Do not place any key in
-Git. The worker should use the existing Caddy root CA rather than
-`MODEL_TLS_INSECURE=1` for normal operation.
+Git. `MODEL_TLS_INSECURE=1` is not a substitute for a missing Caddy route.
 
 ### Duplicate completion events
 

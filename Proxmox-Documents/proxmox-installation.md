@@ -16,14 +16,14 @@ This document records the in-place Proxmox VE installation performed on the Debi
 - **Proxmox web interface:** <https://10.1.10.156:8006>
 - **Repository:** Proxmox VE 9 `pve-no-subscription`
 
-The installation was performed in two stages using [`install-pve-inplace.sh`](./install-pve-inplace.sh). The existing Debian kernel was retained as a fallback.
+The installation was performed in two stages by a host-local script that is not in this repository. The recorded path is `/home/df-server/install-pve-inplace.sh`. The existing Debian kernel was retained as a fallback.
 
 ## Stage 1: Prepare Debian and install the Proxmox kernel
 
 Run this stage from the local console or another session with recovery access. The network configuration is changed during the process.
 
 ```bash
-sudo bash ./install-pve-inplace.sh stage1
+sudo bash /home/df-server/install-pve-inplace.sh stage1
 ```
 
 Stage 1 performs the following actions:
@@ -51,7 +51,7 @@ The output should contain `pve`.
 After confirming that the Proxmox kernel is running, execute:
 
 ```bash
-sudo bash ./install-pve-inplace.sh stage2
+sudo bash /home/df-server/install-pve-inplace.sh stage2
 ```
 
 Stage 2:

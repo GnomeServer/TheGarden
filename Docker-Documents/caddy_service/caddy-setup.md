@@ -20,7 +20,7 @@ VM 100: infra-lab-services
 
 The VM is connected to the Proxmox bridge and has its own network identity. The VM can reach the Proxmox host over the LAN address after the host firewall path was allowed. Tailscale is now also installed on the VM.
 
-The address confirmed on the running VM is `10.1.10.2`. The Ansible guest inventory template and related documentation use this address; the guest remains inactive as an Ansible target until SSH credentials are intentionally configured.
+The address confirmed on the running VM is `10.1.10.2`. `infra-lab-services` is already an active local `docker_hosts` target in `Ansible/inventory/hosts.yml`. `proxmox_guests` is empty. `proxmox-guests.example.yml` is not loaded and would duplicate the hostname if it were.
 
 ## Current validated status
 
@@ -255,7 +255,7 @@ If Caddy logs `lookup grafana ... no such host`, inspect the shared network:
 sudo docker network inspect caddy_proxy --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}'
 ```
 
-The output should contain `caddy` and the current `grafana-services-*` containers. Do not leave old `monitoring-*` or `grafana-service-*` containers attached to the network, because multiple Grafana containers can create ambiguous Docker DNS results.
+The output should contain `caddy` and the current `grafana_services-*` containers. The Compose project name is `grafana_services`. Do not leave old `monitoring-*` or `grafana-service-*` containers attached to the network, because multiple Grafana containers can create ambiguous Docker DNS results.
 
 ## Firewall findings
 
@@ -370,15 +370,18 @@ curl -k -i -L https://infra-lab-services.tail494f6d.ts.net/grafana/login
 
 Caddy's internal CA still needs to be trusted by browsers, or `curl -k` can be used for testing.
 
-## Next services
+## Services not routed by this Caddyfile
 
-Caddy, Grafana, Prometheus, Node Exporter, Forgejo, and PostgreSQL are deployed. The Grafana and Forgejo routes have been verified. Continue with the OCI registry and automation services:
+Caddy, Grafana, Prometheus, Node Exporter, and Forgejo are the services this Caddyfile actually fronts. The repository also contains Compose projects for Open WebUI, Ollama, llama.cpp, LiteLLM, Agent Manager, and NATS. None of those are routes in `Docker-Documents/caddy_service/Caddyfile`.
 
-1. Forgejo OCI registry validation
-2. NATS JetStream
-3. Open WebUI
+In particular:
 
-Caddy should then route application hostnames to internal Compose services, for example:
+- Open WebUI's Compose default `WEBUI_URL` uses port `8443`, but this project publishes only `80` and `443`.
+- LiteLLM listens on container port `4000` and on the VM loopback port `4000`. There is no `/litellm` handle.
+- llama.cpp is reachable by containers at `http://llama:8080`. There is no `/llama` handle.
+- Agent Manager is loopback-bound on `127.0.0.1:8090` and on `caddy_proxy` at `agent-manager:8000`.
+
+The example below is not deployed. It shows separate hostnames, which this lab does not use:
 
 ```caddyfile
 forgejo.example.internal {

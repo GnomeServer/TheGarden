@@ -73,13 +73,9 @@ sudo docker compose logs --tail=100 node-exporter
 sudo docker compose logs --tail=100 grafana
 ```
 
-The services use these internal Docker names on the shared Caddy network:
+Docker DNS names on the shared Caddy network are `prometheus:9090`, `node-exporter:9100`, and `grafana:3000`. Compose does not publish those ports. Node Exporter uses `pid: host` and `--path.rootfs=/host`. It does not set `network_mode: host` or `extra_hosts`.
 
-```text
-prometheus:9090
-node-exporter:9100
-grafana:3000
-```
+`prometheus/prometheus.yml` does not scrape `node-exporter:9100`. It scrapes `host.docker.internal:9100` for this VM, `100.98.125.127:9100` for `inkii`, and `agent-manager:8000` at `/metrics/`. The host-gateway target is not defined by this Compose file.
 
 Grafana is provisioned automatically with Prometheus as its default data source.
 
@@ -122,19 +118,7 @@ sudo docker ps -a --format '{{.Names}}' | grep -E '^(monitoring-|grafana-service
 
 Do not combine `docker ps -q` with `docker ps --format`; Docker ignores the custom format when `-q` is present.
 
-If either current container is missing, make the Caddy Compose project join the external network explicitly:
-
-```yaml
-services:
-  caddy:
-    networks:
-      - caddy_proxy
-
-networks:
-  caddy_proxy:
-    external: true
-    name: caddy_proxy
-```
+Caddy's Compose project creates `caddy_proxy`. Do not mark that network `external: true` in the Caddy project. This project already joins it as an external network. If Caddy is missing from the network, start the Caddy project instead of rewriting it to join a network it is supposed to create.
 
 Use the same network name in both Compose projects, then recreate the containers:
 

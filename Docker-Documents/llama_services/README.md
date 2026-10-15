@@ -12,32 +12,24 @@ This Compose project runs the CPU-based `llama.cpp` server for the local VM.
 - GPU offload: disabled (`-ngl 0`)
 - Current VM allocation: 6 virtual CPUs and approximately 15 GiB RAM
 
-The current model is stored under this repository project:
+The GGUF is not committed. `models/` contains only `touch.md`. Place the model file there before start and set `LLAMA_MODEL` to that filename. The example used on the VM is `gemma-3-4b-it-Q4_K_M.gguf`.
 
-```text
-TheGarden/Docker-Documents/llama_services/models/gemma-3-4b-it-Q4_K_M.gguf
-```
-
-The Compose file mounts `./models` read-only into the container at `/models`. The Compose project does not download models automatically.
+The Compose file mounts `./models` read-only at `/models`. It does not download models.
 
 ## Files
 
 ```text
 compose.yml       Compose service definition
 .env              Local secrets and runtime settings; do not commit
-.env.example      Non-secret configuration template
-models/           GGUF model files
+models/           local GGUF files; not committed except touch.md
 ```
 
-## Setup
-
-Create the environment file if this is a new deployment:
+There is no `.env.example`. Create a private `.env` before start:
 
 ```bash
 export REPO_ROOT=/path/to/TheGarden
 cd "$REPO_ROOT/Docker-Documents/llama_services"
-cp .env.example .env
-chmod 600 .env
+install -m 600 /dev/null .env
 ```
 
 Edit `.env` and set a strong API key and the name of a model that exists in `models/`:
@@ -77,43 +69,12 @@ The service is available to other containers on `caddy_proxy` at:
 http://llama:8080/v1
 ```
 
-Caddy also exposes the API through the Tailscale-only HTTPS host under `/llama/`:
+Compose only `expose`s port `8080`. It does not publish a host port, and the Caddyfile has no `/llama/` route. `https://infra-lab-services.tail494f6d.ts.net/llama/v1/...` is not served.
 
-```text
-https://infra-lab-services.tail494f6d.ts.net/llama/v1/models
-```
-
-The external endpoint requires the API key from `.env`:
-
-```bash
-cd "$REPO_ROOT/Docker-Documents/llama_services"
-set -a
-. ./.env
-set +a
-
-curl -k -H "Authorization: Bearer $LLAMA_API_KEY" \
-  https://infra-lab-services.tail494f6d.ts.net/llama/v1/models
-```
-
-The model ID returned by `/v1/models` should be used when making chat-completion requests. With the current model it is typically:
+From another container on `caddy_proxy`, send `Authorization: Bearer` with `LLAMA_API_KEY`. The model ID returned by `/v1/models` is the ID for chat completions. With the example filename it is typically:
 
 ```text
 /models/gemma-3-4b-it-Q4_K_M.gguf
-```
-
-Example generation request:
-
-```bash
-curl -k \
-  -H "Authorization: Bearer $LLAMA_API_KEY" \
-  -H 'Content-Type: application/json' \
-  https://infra-lab-services.tail494f6d.ts.net/llama/v1/chat/completions \
-  -d '{
-    "model": "/models/gemma-3-4b-it-Q4_K_M.gguf",
-    "messages": [{"role": "user", "content": "Reply with exactly OK"}],
-    "max_tokens": 16,
-    "temperature": 0
-  }'
 ```
 
 ## Open WebUI integration

@@ -90,20 +90,11 @@ per-machine entries:
 | naruto-dell-pro-max-14-mc14250 | 100.88.92.78 |
 | raphael | 100.116.35.103 |
 
-This matches the lab's internal-trust model for a fast conceptual demo: all five
-laptops need to reach `server-debian` (SSH now; Forgejo, Postgres, Garage S3, Open
-WebUI, and llama.cpp once the compose stack is up). Any future laptop added to the
-same tailnet inherits access automatically — no rule changes needed.
+This matches the lab's internal-trust model for a fast conceptual demo: the listed machines need to reach `server-debian` for SSH. The table above is the Proxmox host and four worker laptops. `infra-lab-services` (`100.94.49.45`) is the infrastructure VM and is not in that table. Any future laptop added to the same tailnet inherits access automatically — no rule changes needed.
 
 ## Deferred / to revisit
 
-- **Per-service scoping** — right now the CIDR rule grants all five machines access
-  to all ports on `server-debian`. If this moves past demo stage, consider narrowing
-  so only Laptop 1's admin reaches Postgres/Garage S3 directly, while worker laptops
-  only reach the RPC server port.
-- **Bind services to tailnet IP, not `0.0.0.0`** — when Forgejo, Postgres, Garage S3,
-  Conduit+Element, Open WebUI, and llama.cpp are installed, each must be explicitly
-  bound to `100.102.154.23` (or `tailscale0`) rather than the default `0.0.0.0`, so
-  UFW is a backstop rather than the only control.
+- **Per-service scoping** — the CIDR rule grants those machines access to all ports on `server-debian`. If this moves past demo stage, narrow it.
+- **Service placement** — Forgejo, Open WebUI, llama.cpp, LiteLLM, Grafana, and Agent Manager are Compose projects for the `infra-lab-services` VM, not binds on `server-debian`'s `100.102.154.23`. Garage S3 and Conduit/Element are not in this repository.
 - **`avahi-daemon` (mDNS, 5353/UDP)** — currently open on `0.0.0.0`/`::`. Low risk,
   but worth deciding whether it's needed on this box or can be disabled.

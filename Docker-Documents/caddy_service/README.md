@@ -11,7 +11,7 @@ The expected VM layout is:
 └── site/
 ```
 
-The repository Caddyfile is kept at `../Caddyfile` so it can also be referenced by the broader Docker documentation. Copy it beside `compose.yml` when deploying this project to the VM.
+The repository Caddyfile is `Caddyfile` in this directory, mounted by `compose.yml` at `/etc/caddy/Caddyfile`. Copy this directory to `~/caddy-service` on the VM; do not look for a Caddyfile in the parent `Docker-Documents/` directory.
 
 ## Current configuration
 
@@ -22,10 +22,12 @@ The repository Caddyfile is kept at `../Caddyfile` so it can also be referenced 
 - Persistent volumes: `caddy_data` and `caddy_config`
 - TLS: Caddy's internal CA
 - Grafana: `grafana:3000` under `/grafana/`
-- Forgejo: `forgejo:3000` under `/forgejo/`
-- Proxmox fallback: `https://10.1.10.156:8006`
+- Forgejo: `forgejo:3000` under `/forgejo/`, with the `/forgejo` prefix stripped
+- Proxmox fallback: `https://10.1.10.156:8006` for every other path on this site
+- Not routed: `/litellm/`, `/llama/`, Open WebUI, Agent Manager, NATS, and PostgreSQL
+- Not published: port `8443` or any listener other than `80` and `443`
 
-The `caddy_proxy` network is intentionally named so the Grafana and Forgejo Compose projects can join it as an external network. Caddy creates the network when this project starts.
+This project creates the `caddy_proxy` network. Grafana, Forgejo, and the other Compose projects join it as an external network. Do not mark this project's network `external: true`.
 
 ## Deploy
 
