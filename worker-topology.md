@@ -1,267 +1,243 @@
-# Worker Topology and Role Delegation
+# Worker Topology and Ephemeral Agent Delegation
 
-Companion to `small-lab-open-source-architecture.md` and
-`worker-ai-runtime-requirements.md`.
+Companion to `small-lab-open-source-architecture.md`.
 
-This document defines the detailed topology of the five Ubuntu worker laptops and
-the **coder / reviewer** role-delegation plan for the agentic coding loop
-(architecture section 6). It answers:
+This document is the node-level view of the five Ubuntu workers. The end-to-end Dark Factory flow lives in architecture §3. Here:
 
-- Which worker does what, and why.
-- How the five nodes are wired into the tailnet, NATS, Forgejo, and the model
-  endpoints.
-- How a coder and a reviewer stay independent (no shared context, no self-review).
-- Storage, ports, services, and failure behavior per node.
+- Every worker runs the same software.
+- A plan occupies one worker.
+- That worker's Oh My Pi harness runs a planner, which spawns ephemeral agents.
+- The planner chooses the tasker and reviewer types.
+- Storage, ports, sandbox, and failure behavior per node.
 
-> **Change from the architecture document:** Garage S3 is **not implemented** in
-> this prototype. It does not justify the operational cost for a five-laptop lab.
-> Artifacts and evidence therefore live on worker local disk, referenced by
-> PostgreSQL, and are synced to the server's backup staging. S3 (Garage or MinIO)
-> can be reintroduced later without changing the role topology — see §13.
+Garage S3 is not in this lab. Evidence lives on the worker that produced it, is referenced from the run index, and is rsynced to the server. S3 can return later as a thin evidence layer without changing delegation.
 
 ---
 
 # 1. Inventory and naming
 
-All five workers are identical hardware **and identical software**:
+All five workers are the same hardware and the same software:
 
 ```text
 CPU:  Intel Core Ultra 5 125H (Meteor Lake)
 RAM:  32 GB shared (UMA)
 GPU:  Intel Arc integrated graphics (Xe-LPG, ~112 EU)
 Disk: ~512 GB NVMe
-OS:   Ubuntu 24.04 LTS (bare metal)
-Net:  Tailscale (MagicDNS names below)
+OS:   Ubuntu 24.04 LTS, bare metal
+Net:  Tailscale
 ```
 
-| Node | Tailscale / MagicDNS name | Agent role (default) | Notes |
-|---|---|---|---|
-| Worker 01 | `lab-gpu-01` | **Coder** (primary) | strongest dedicated coder slot |
-| Worker 02 | `lab-gpu-02` | **Coder** (secondary) | parallel coder tasks / spill |
-| Worker 03 | `lab-gpu-03` | **Reviewer** (primary) | fresh-checkout reviews |
-| Worker 04 | `lab-gpu-04` | **Reviewer** (secondary) | more review capacity |
-| Worker 05 | `lab-gpu-05` | **Overflow** (role flips) | joins coder or reviewer queue group; hosts Forgejo runner |
-
-Stable identities used everywhere (Ansible inventory, NATS `worker_id`, Prometheus
-labels, service units):
+| Node | MagicDNS name | Role |
+|---|---|---|
+| Worker 01 | `lab-gpu-01` | Same as the others. First node used to prove the path. |
+| Worker 02 | `lab-gpu-02` | Same image. |
+| Worker 03 | `lab-gpu-03` | Same image. |
+| Worker 04 | `lab-gpu-04` | Same image. |
+| Worker 05 | `lab-gpu-05` | Same image. Also the first Forgejo Actions runner. |
 
 ```text
 lab-gpu-01  lab-gpu-02  lab-gpu-03  lab-gpu-04  lab-gpu-05
 ```
 
-Role is a per-node variable set in Ansible (`agent_role`), not a code change. The
-base image is identical on all five; only the NATS consumer enabled differs.
+There is no `agent_role`. A worker is either free or holding one plan. Ansible does not configure a coder queue or a reviewer queue.
 
 ---
 
-# 2. Logical topology (one picture)
+# 2. Logical topology
 
 ```text
-                             Tailscale tailnet
-                                  |
-              +-------------------+------------------+
-              |                                      |
-        infra-01 VM                          lab-gpu-01..05
-   [control plane]                         [compute plane, all five equal]
-    Caddy, Forgejo                          llama-server (Vulkan) x5
-    Postgres, NATS                          coder agents   (01, 02)
-    OpenWebUI, Prometheus                   reviewer agents (03, 04)
-    Gitea/runner control                    overflow agent (05)
-              |                                      |
-              +------------------+-------------------+
-                                 |
-                Forgejo (code) / NATS (jobs) / Prometheus (metrics)
-                PostgreSQL (run state) / server staging (evidence backup)
+                         Tailscale tailnet
+                                |
+            +-------------------+------------------+
+            |                                      |
+      infra-01 VM                           lab-gpu-01..05
+      Caddy, Open WebUI                     identical compute
+      server Oh My Pi                       worker Oh My Pi
+      orchestrator agent                    planner + ephemeral agents
+      dispatch helper                       llama-server (Vulkan)
+      Forgejo, PostgreSQL                   local model cache
+      Prometheus, Grafana                   evidence on local disk
+            |                                      |
+            +------------------+-------------------+
+                               |
+              plan goes server -> one worker
+              planner reply goes worker -> server
+              code goes worker -> Forgejo
+              users never open :8080
 ```
 
-Workers never expose PostgreSQL, NATS, or the Forgejo database to anything. There
-is **no storage plane** in this prototype: code lives in Forgejo (server),
-durable state in PostgreSQL (server), and bulky evidence on the worker that
-produced it (synced to the server periodically).
+Workers do not expose PostgreSQL, Forgejo's database, or each other. Work does not hop from worker to worker. The orchestrator picks one free node and that node finishes the plan.
 
 ---
 
-# 3. Service topology per worker
+# 3. Services on a worker
 
-### 3.1 Every worker (base, identical)
+## 3.1 Base, every node
 
-| Service | Unit/container | Listens on | Purpose |
+| Service | Unit | Listens | Purpose |
 |---|---|---|---|
-| Time sync | `systemd-timesyncd` | UDP 123 out | TLS, logs, metrics |
-| Host firewall | UFW (rules in §8) | — | Tailscale + server traffic only |
-| Node Exporter | container | `:9100` | Prometheus metrics (CPU/RAM/disk/temp) |
-| Docker | `docker.service` | unix socket (internal) | runs grader/sandbox containers |
-| llama-server (Vulkan) | systemd or container | `0.0.0.0:8080` | OpenAI-compatible model API |
-| NATS agent | container | outbound only | coder, reviewer, or overflow consumer |
-| Models | `/srv/models` (ro) | — | local GGUF cache (+ sha256 manifests) |
-| Evidence staging | `/srv/agent/evidence` | — | per-run/task artifact store |
+| Time sync | `systemd-timesyncd` | outbound UDP 123 | TLS, logs, run timestamps |
+| Host firewall | UFW, §8 | — | Tailscale sources only |
+| Node Exporter | container | `:9100` | CPU, RAM, disk, temperature |
+| Docker | `docker.service` | unix socket, local | sandboxes and CI jobs |
+| llama-server | systemd or container | `0.0.0.0:8080` | OpenAI-compatible inference, Vulkan |
+| Oh My Pi | started per plan by forced command | stdio, not a public port | planner session and ephemeral children |
+| Models | `/srv/models` | — | GGUF cache and checksum manifest |
+| Agent data | `/srv/agent` | — | sessions, workspaces, checkouts, evidence |
 
-### 3.2 Role-specific activation (variable, not code)
+Oh My Pi is not a standing multi-tenant daemon on `:some-port`. The dispatch helper SSHes in and starts `omp --mode rpc` in `/srv/agent/sessions/<run_id>/`. When the planner replies, that process exits. A second SSH into a busy worker is refused by the forced command.
 
-| Node | `agent_role` | NATS subject consumed | Primary model served |
-|---|---|---|---|
-| 01 | `coder` | `lab.command.task.assign.coder` | `qwen3-8b` + `qwen2.5-coder-7b` |
-| 02 | `coder` | `lab.command.task.assign.coder` | `qwen3-8b` |
-| 03 | `reviewer` | `lab.command.task.assign.reviewer` | `qwen3-4b` (+ `qwen3-8b` fallback) |
-| 04 | `reviewer` | `lab.command.task.assign.reviewer` | `qwen3-4b` (+ `qwen3-8b` fallback) |
-| 05 | `overflow` | joins coder **or** reviewer group | `qwen3-8b` |
+## 3.2 Capacity
 
-### 3.3 Optional: Forgejo Actions runner
+| State | Meaning |
+|---|---|
+| `free` | No planner session. Eligible for a plan. Eligible to serve orchestrator inference. |
+| `busy` | One planner session. llama-server on this node serves that plan's agents only. |
+| `draining` | Finish the current plan, accept no new one. Used for updates. |
 
-`lab-gpu-05` also runs a `forgejo-runner` (separate from the NATS agent) so CI jobs
-execute off-server. Runners can be added to any worker later with the same pattern;
-do not mount `/var/run/docker.sock` into untrusted jobs (architecture §5.3).
+One plan per worker. Five workers means five plans, not five roles.
+
+## 3.3 Forgejo Actions runner
+
+`lab-gpu-05` runs `forgejo-runner` first, separate from any planner session. Add runners to other workers with the same unit. Do not place a CI job on a worker whose state is `busy`. Do not mount `/var/run/docker.sock` into untrusted jobs (architecture §5.3).
 
 ---
 
-# 4. Role delegation plan: coder and reviewer
+# 4. Delegation
 
-The architecture mandates coder and reviewer be **separate worker roles, separate
-tasks, independent context, fresh checkout**, with all communication through
-supervisor + NATS + Forgejo. Concrete delegation:
+The architecture rule: the orchestrator sends a plan; the planner on the chosen worker creates the task list and spawns ephemeral agents; the usual loop is tasker then reviewer; the planner picks the types.
 
-### 4.1 Role-to-node assignment
+## 4.1 Who runs where
 
-| Role | Node(s) | Why assigned here |
+| Agent | Node | Why |
 |---|---|---|
-| **Coder** | `lab-gpu-01` primary, `lab-gpu-02` secondary, `lab-gpu-05` overflow | coder always lands **on a different physical node than the reviewer of the same run** |
-| **Reviewer/tester** | `lab-gpu-03` primary, `lab-gpu-04` secondary | fresh-checkout reviewers never share a node with the coder that produced the code |
-| **Planner/supervisor** | `infra-01` VM | control plane; never collocates with coder/reviewer |
-| **Model endpoints** | coder nodes serve coder models; reviewer nodes serve reviewer models | a different model reviews the coder's output → independent error surfaces |
+| Orchestrator | `infra-01` only | Writes the plan. Never shares a filesystem with the coder. |
+| Planner | The one worker that received the plan | Owns the task list and the verdict for that plan. |
+| Ephemeral tasker / coder | Child session on that same worker | Isolated workspace. Dies with the task. |
+| Ephemeral reviewer, tester, security reviewer | Child sessions on that same worker | Fresh checkout, blank conversation. Dies with the review. |
 
-### 4.2 Fan-out rule (the core guarantee)
+Specialists are not laptop roles. The planner of a software-engineering plan spawns a coder, a reviewer, a tester, and a security reviewer. The planner of another plan spawns whatever that plan needs. Adding a type is an agent definition under `.omp/agents/`, not an Ansible variable.
 
-A run's coder task and its review task are scheduled so that:
-
-```text
-coder   -> lab-gpu-01 | lab-gpu-02 | lab-gpu-05
-reviewer-> lab-gpu-03 | lab-gpu-04 | (other pool)
-
-Constraint: worker_id(coder) != worker_id(reviewer) for the same task.
-```
-
-The supervisor records `worker_id` per task in PostgreSQL and refuses to assign a
-review to the node that produced the code. This is a hard check, not a habit.
-
-### 4.3 Design rules enforced by this split
-
-1. **No worker runs both coder and reviewer consumers** — a node is in exactly one
-   queue group at a time (`coder` / `reviewer` / `overflow`-currently-one), so a
-   coder cannot review its own work, and worker-scoped NATS credentials bind each
-   task.
-2. **Different models on each side.** Coder calls `lab-gpu-01/02`'s `qwen3-8b`;
-   reviewer calls `lab-gpu-03/04`'s `qwen3-4b`. Shared-model blind spots are
-   avoided.
-3. **Fresh checkout, fresh sandbox.** Reviewer never reuses the coder workspace;
-   it re-clones from Forgejo (`refs/heads/agent/<run>/<task>`) and executes in a
-   new container.
-4. **NATS subjects separate jobs** so a coder cannot consume review requests and
-   vice versa; queue groups `coder-q` and `reviewer-q` let us add/remove members by
-   changing `agent_role` on a node.
-5. **Supervisor owns the verdict.** Workers only report `task.completed` /
-   `task.failed` / `review.passed|failed|changes_requested`; they cannot flip their
-   own status in PostgreSQL — the supervisor writes every state transition.
-
-### 4.4 NATS subjects (mirror of architecture §6.1, minus storage-side subjects)
+## 4.2 Loop the planner actually runs
 
 ```text
-lab.command.task.assign.coder        ->  coder queue group (01, 02, overflow)
-lab.command.task.assign.reviewer     ->  reviewer queue group (03, 04, overflow)
-lab.event.task.started
-lab.event.task.progress
-lab.event.task.completed
-lab.event.task.failed
-lab.event.review.requested
-lab.event.review.completed
-lab.event.worker.heartbeat           ->  all workers (every 10-15 s)
-lab.event.approval.required          ->  supervisor only
+for task in task_list:
+    spawn tasker          blank session, assignment + acceptance criteria only
+    wait for yield
+    spawn reviewer        blank session, Forgejo ref + criteria, not the tasker transcript
+    wait for yield
+    if reviewer failed and attempts < 3:
+        spawn a new tasker attempt
+    else if reviewer failed:
+        stop and reply blocked
+planner checks every required task
+reply to orchestrator
 ```
 
-Durable JetStream consumers; workers ACK after a successful claim. Supervisor
-requeues unfinished tasks after the missed-heartbeat window (architecture §6.1).
-
-### 4.5 One-run walkthrough (who touches what, Garage-free)
+Software-engineering task list the planner should produce when the plan changes code:
 
 ```text
-1.  Human -> Open WebUI -> AgentAPI (planner)              [infra-01]
-2.  Planner writes task graph -> PostgreSQL                 [infra-01]
-3.  Supervisor publishes coder task                         [NATS]
-4.  lab-gpu-01 coder claims, clones team/project            [Forgejo]
-5.  coder calls its own llama endpoint (Vulkan)             [node :8080]
-6.  coder branches, commits, pushes agent/<run>/<task>      [Forgejo]
-7.  coder stages reports/logs under /srv/agent/evidence/... [node 01]
-8.  coder publishes task.completed (+ artifact_refs)        [NATS]
-9.  Supervisor creates reviewer task                         [infra-01]
-10. lab-gpu-03 reviewer claims, FRESH checkout              [Forgejo]
-11. reviewer runs build/test/lint/typecheck/security        [fresh sandbox node 03]
-12. reviewer stages its evidence                             [node 03]
-13. reviewer publishes review.{passed,failed,changes}        [NATS]
-14. Supervisor decides accept / retry / escalate             [infra-01]
-15. Human paged only if approval gate or failure             [Matrix later]
+scout              optional, read-only, only if the repo is unfamiliar
+coder              implements on agent/<run>/<task>
+reviewer           correctness against acceptance criteria
+tester             build, unit tests, lint, typecheck
+security-reviewer  diff and dependency findings
 ```
 
-### 4.6 Retry and spill cadence
+A documentation or research plan skips the code specialists. The planner is wrong if it always emits the software-engineering list.
+
+## 4.3 Independence
+
+1. Ephemeral sessions start blank. The reviewer prompt contains the ref and the criteria. It does not contain the coder transcript.
+2. Reviewer and tester clone Forgejo into `/srv/agent/checkouts/`. They do not open `/srv/agent/workspaces/`.
+3. The coder uses a harness isolated workspace and may push only `agent/<run>/<task>`.
+4. The planner writes the verdict. A tasker cannot set its own task to passed.
+5. Same physical node is required, not forbidden. The plan was sent to one worker so its agents share that worker's model endpoint and disk. Independence is the session boundary.
+
+## 4.4 What the planner must not do
+
+- Message Open WebUI or the orchestrator except through its final reply.
+- Spawn a reviewer that shares the coder session.
+- Merge to a protected branch.
+- Start work on a second plan.
+- Call another worker's llama-server. Local endpoint only: `http://127.0.0.1:8080/v1`.
+
+## 4.5 Attempts
 
 ```text
-coder attempt 1 -> lab-gpu-01
-coder attempt 2 -> lab-gpu-02            (different node, different attempt worker_id)
-coder attempt 3 -> lab-gpu-05 (overflow) (if enabled)
-max_attempts = 3, then escalate to human (architecture §6.1)
-
-reviewer runs once per coder attempt, always on a node != coder node.
+attempt 1  coder, then the checker that applies
+attempt 2  new coder session, same worker, then the failed checker again
+attempt 3  same
+then       planner reply status=blocked
+           orchestrator escalates in Open WebUI
 ```
 
-### 4.7 Anti-patterns this design rejects
-
-- Coder and reviewer on the same host (kills independence + unfair resource share).
-- Reviewer using the coder's working tree (no self-blinding).
-- Agent writing to PostgreSQL state or reading NATS admin credentials.
-- Coder merging to a protected branch (merge = human gate).
+A retry stays on the same worker unless that worker has died. A dead worker is the orchestrator's problem: new planner session on a free node, same plan, plus any Forgejo refs that already exist.
 
 ---
 
-# 5. Model endpoint topology
+# 5. One-run walkthrough
 
-Open WebUI and agent workers reach each worker's inference API the same way:
-`http://<magicdns-name>:8080/v1` (OpenAI-compatible).
+```text
+1.  User prompt in Open WebUI                              [infra-01]
+2.  DF front door prompts server omp --mode rpc            [infra-01]
+3.  Orchestrator writes the plan                           [server session]
+4.  Run index row: queued                                 [PostgreSQL]
+5.  Dispatch helper picks a free worker, state=busy        [lab-gpu-02 example]
+6.  Forced command starts omp --mode rpc                   [worker]
+7.  Planner writes the task list                           [worker session]
+8.  Coder child: clone, local llama-server, push branch    [Forgejo]
+9.  Coder stages logs under evidence/<run>/<task>/1/       [worker disk]
+10. Reviewer child: fresh checkout, no coder transcript    [worker]
+11. Tester child: fresh checkout, test/lint/typecheck      [worker]
+12. Security reviewer child: fresh checkout                [worker]
+13. Planner verifies all required tasks                    [worker]
+14. Planner reply returns over the dispatch channel        [tailnet]
+15. Orchestrator accepts or names one gap                  [infra-01]
+16. Finished response posted to the same Open WebUI thread
+17. Worker state returns to free when the session exits
+```
 
-| Endpoint | Node | Default model | Consumers |
-|---|---|---|---|
-| `http://lab-gpu-01:8080/v1` | coder (primary) | `qwen3-8b` Q4_K_M (+ `qwen2.5-coder-7b` on demand) | coder agent 01 + OpenWebUI direct test |
-| `http://lab-gpu-02:8080/v1` | coder (secondary) | `qwen3-8b` Q4_K_M | coder agent 02 |
-| `http://lab-gpu-03:8080/v1` | reviewer (primary) | `qwen3-4b` (+ `qwen3-8b` fallback) | reviewer agent 03 |
-| `http://lab-gpu-04:8080/v1` | reviewer (secondary) | `qwen3-4b` (+ `qwen3-8b` fallback) | reviewer agent 04 |
-| `http://lab-gpu-05:8080/v1` | overflow | `qwen3-8b` Q4_K_M | whichever role is active |
-
-Phase 1: Open WebUI talks directly to `lab-gpu-01` only (the architecture's "Direct
-model API initially"). Phase 2: add LiteLLM in front of all five so routing,
-fallback, and per-model queues are centralized. LiteLLM key stays on infra-01;
-workers never receive it.
+Step 15 is not a second implementation pass. One gap may be sent back once. A second miss is an escalation.
 
 ---
 
-# 6. Storage topology (no Garage)
+# 6. Model endpoints
 
-### 6.1 Single uniform SSD layout for all five workers (512 GB)
+Agents on a worker call loopback. The server orchestrator and admin diagnostic chat call MagicDNS.
+
+| Endpoint | Who may call it | Model |
+|---|---|---|
+| `http://127.0.0.1:8080/v1` | Planner and ephemeral agents on that node | Local GGUF |
+| `http://lab-gpu-NN:8080/v1` | `infra-01` and admins, and only when that node is `free` | Same file |
+
+Default file on every worker: `qwen3-8b` Q4_K_M under `/srv/models`. Optional second file, also on every worker so placement does not matter: `qwen2.5-coder-7b`. Do not pin a model to a former "reviewer node". If a reviewer should use a different model, the planner sets that in the child spawn. The file still has to exist on every worker.
+
+Phase 1 is direct URLs. LiteLLM waits until routing or fallback is actually painful. Its key would stay on `infra-01`.
+
+The DF front door sets the server session model URL to a `free` worker before each orchestrator turn. It must not select a worker whose state is `busy`. If none are free, the turn waits.
+
+---
+
+# 7. Storage
+
+## 7.1 Layout, all five
 
 ```text
-/                   50-70 GB          OS + packages
-/var/lib/docker     50-80 GB          images, sandbox layers, runner cache
-/srv/models        220-280 GB         GGUF cache (the big consumer)
-/srv/agent/        ~60-80 GB          agent runtime data:
-    workspaces/     (coder)            isolated per-task code dirs
-    checkouts/      (reviewer)         fresh-per-review checkouts
-    evidence/<run>/<task>/             durable reports, test logs, diffs
-free               80-100 GB          15-20% headroom + automated cleanup
+/                   50-70 GB       OS + packages
+/var/lib/docker     50-80 GB       images, sandbox layers, runner cache
+/srv/models        220-280 GB      GGUF cache
+/srv/agent          60-80 GB
+    sessions/<run_id>/             planner session, ephemeral artifacts
+    workspaces/<run>/<task>/       coder isolated worktrees
+    checkouts/<run>/<task>/        reviewer and tester clones
+    evidence/<run>/<task>/<attempt>/
+free                80-100 GB
 ```
 
-Disk alerts at 75% / 85% usage; a systemd timer purges: old sandbox layers, stale
-`workspaces|checkouts` older than N runs, old evidence older than retention
-policy, and build caches.
+Disk alerts at 75% and 85%. A timer purges sandbox layers, workspaces and checkouts for finished runs, evidence past retention, and build caches.
 
-### 6.2 Evidence (replaces the S3/`agent-results` bucket)
-
-Without Garage, each worker keeps its own evidence directory:
+## 7.2 Evidence
 
 ```text
 /srv/agent/evidence/<run_id>/<task_id>/<attempt>/
@@ -272,217 +248,171 @@ Without Garage, each worker keeps its own evidence directory:
     build.log
 ```
 
-The worker returns `artifact_refs` in its NATS result like
-`lab-gpu-03://srv/agent/evidence/run-123/task-456/1/...`. PostgreSQL holds the
-references (architecture §6.5). A nightly `rsync` pushes `evidence/` to
-`infra-01:/srv/backup-staging/agent/` so evidence outlives a worker disk failure
-(see §9). Restic on infra-01 then backs up staging to the external disk without any
-S3 dependency.
+The planner reply names these paths. PostgreSQL stores the paths, not the files. Nightly `rsync` to `infra-01:/srv/backup-staging/agent/`, then Restic to the external disk. No S3.
 
-> When the lab outgrows this, reintroduce S3 as a thin layer: workers `rsync` or
-> `s5cmd` evidence into a Garage/MinIO bucket, `artifact_refs` become
-> `s3://agent-results/...`, and nothing else in the topology changes.
+A worker disk that dies before rsync loses that attempt's logs. The branch in Forgejo is the code. The next attempt rebuilds the logs.
 
-### 6.3 Model cache strategy
+## 7.3 Model cache
 
-- One canonical model on every worker: `qwen3-8b-q4_k_m.gguf` under `/srv/models`,
-  because inference must never depend on another machine (architecture §4 guidance:
-  store one or two standard models per worker, don't hoard variants).
-- Reviewer nodes add `qwen3-4b`; coder node 01 adds `qwen2.5-coder-7b`.
-- Seed by `rsync` from `lab-gpu-01` or USB; verify `sha256` + `gguf` metadata with
-  `llama-gguf`. Manifest file `/srv/models/MANIFEST` tracked in the Ansible repo.
+- Same canonical GGUF on every worker. Inference for a plan must not depend on another machine.
+- Seed with `rsync` from `lab-gpu-01` or from USB.
+- Verify checksum and GGUF metadata before the unit starts.
+- `/srv/models/MANIFEST` lives in the Ansible repo.
 
 ---
 
-# 7. Network and connectivity topology
+# 8. Network and firewall
 
-### 7.1 Tailscale (already present)
+## 8.1 Tailscale
 
 ```text
-MagicDNS:
-  lab-gpu-01..05.<tailnet>            e.g. lab-gpu-01.lab.ts.net
+MagicDNS: lab-gpu-01..05.<tailnet>
 Tags:
-  tag:workstation   (plain human laptops)
-  tag:worker        (lab-gpu-01..05)  restricted outbound
-  tag:server        (infra-01, ansible host)
-ACL highlights:
-  admin          -> workers ssh:22, node-exporter:9100
-  infra-01       -> workers :8080 (model API, from approved actors), :9100
-  workers        -> infra-01 :4222 (NATS), :3000 (Forgejo git), :443 (apps)
-  users          -> infra-01 :443 only (Caddy fronts everything)
-  worker <-> worker: none by default (work flows through server, never direct)
+  tag:workstation   human laptops
+  tag:worker        lab-gpu-01..05
+  tag:server        infra-01
+ACLs:
+  users        -> infra-01 :443 only
+  admin        -> workers :22, :9100, :8080
+  infra-01     -> workers :22 (dispatch key + admin), :8080, :9100
+  workers      -> infra-01 :443 (Forgejo via Caddy) and Git SSH if used
+  worker <-> worker: none
 ```
 
-Workers are **not** directly reachable from user laptops except the approved
-SSH/metrics/admin paths — users talk to Open WebUI, not to `lab-gpu-*:8080`.
-After bring-up, cut worker outbound to only the DNS/ports the sandbox needs;
-sandbox containers themselves get egress disabled except Forgejo + model API.
+Users do not open `lab-gpu-*:8080`. After bring-up, sandbox egress is Forgejo plus loopback llama-server, nothing else.
 
----
+The dispatch key is not the admin key. Authorized key on the worker:
 
-# 8. Port and firewall matrix
+```text
+command="/usr/local/bin/df-planner-session",restrict ssh-ed25519 AAAA... df-dispatch
+```
 
-| Port | Service | Side | Who may connect |
-|---|---|---|---|
-| 22 | SSH | all workers | admins only (Tailscale ACL) |
-| 9100 | node-exporter | all workers | Prometheus (infra-01), admins |
-| 8080 | llama-server | all workers | infra-01 + admin (UFW/ACL restricted) |
-| 4222 | NATS | infra-01 (listen) | workers outbound, server listens |
-| 3000 | Forgejo | infra-01 | via Caddy :443 only |
-| 443 | Caddy (all apps) | infra-01 | users HTTPS |
+`df-planner-session` checks the node is `free`, marks it `busy`, starts `omp --mode rpc` in the run directory, and clears `busy` on exit. No shell, no port forward, no second plan.
 
-There is **no 3902/3903** anymore (Garage removed).
+## 8.2 Ports
 
-UFW per worker:
+| Port | Service | Who |
+|---|---|---|
+| 22 | SSH | Admins. Dispatch key via forced command only. |
+| 9100 | node-exporter | Prometheus on `infra-01`, admins |
+| 8080 | llama-server | `infra-01` and admins. Bound on the tailnet interface if the host has a second NIC. |
+| 443 | Caddy on `infra-01` | Users |
+
+No NATS port. No Garage ports. No Matrix ports.
 
 ```bash
 sudo ufw default deny incoming
-# tailnet prefix — confirm via: ip addr show tailscale0  (commonly 100.64.0.0/10)
+# confirm the tailnet prefix: ip addr show tailscale0
 sudo ufw allow from 100.64.0.0/10 to any port 22   proto tcp
 sudo ufw allow from 100.64.0.0/10 to any port 8080 proto tcp
 sudo ufw allow from 100.64.0.0/10 to any port 9100 proto tcp
-sudo ufw allow from 100.64.0.0/10 to any port 3000 proto tcp   # only for forgejo runners
 sudo ufw enable
 ```
 
 ---
 
-# 9. Agent executables and sandboxing per worker
+# 9. Sandbox
 
-### 9.1 Coder agent (nodes 01/02, overflow 05)
-
-```text
-/runtime/agent-coder
-  - subscribes: lab.command.task.assign.coder (queue group coder-q)
-  - claims task; builds /srv/agent/workspaces/<run>-<task>-<attempt>/
-  - git clone <repository> (scoped SSH key/token; it may only push agent branches)
-  - calls its own llama endpoint http://lab-gpu-01:8080/v1 for code-gen/tool turns
-  - runs quick local tests in constrained container (NO docker.sock mount)
-  - commits, pushes agent/<run>-<task>, stages evidence to /srv/agent/evidence
-  - publishes task.completed/{failed} with commit_sha + artifact_refs
-```
-
-### 9.2 Reviewer/tester agent (nodes 03/04, overflow 05)
+Ephemeral agents are Oh My Pi child sessions, not long-running NATS consumers.
 
 ```text
-/runtime/agent-reviewer
-  - subscribes: lab.command.task.assign.reviewer (queue group reviewer-q)
-  - FRESH checkout to /srv/agent/checkouts/<run>-<task>-<attempt>/
-  - pipeline: build -> unit tests -> lint -> typecheck -> security scan (bandit/trivy)
-  - calls its own llama endpoint (lab-gpu-03/04) for review + acceptance checks
-  - posts review comment to Forgejo PR/commit
-  - stages evidence under /srv/agent/evidence/<run>/<task>/
-  - publishes review.passed | failed | changes_requested
+coder
+  workspace: harness isolation under /srv/agent/workspaces/<run>/<task>/
+  git:       scoped credential, push agent/<run>/<task> only
+  model:     http://127.0.0.1:8080/v1
+  tests:     constrained container, no docker.sock
+  evidence:  /srv/agent/evidence/<run>/<task>/<attempt>/
+
+reviewer | tester | security-reviewer
+  workspace: fresh clone under /srv/agent/checkouts/<run>/<task>/
+  git:       read credential, or a credential that cannot push protected branches
+  model:     http://127.0.0.1:8080/v1
+  checks:    the planner named the command; the agent does not invent a merge
 ```
 
-### 9.3 Sandbox policy (both roles)
+Policy for every ephemeral session:
 
-- Per-task container; `--network none` except proxy to approved hosts.
-- `readonly` rootfs where possible; only the task workspace and evidence dir
-  writable.
-- `pids_limit`, `memory`, `cpu` cgroup limits; hard `timeout(1)` wrappers.
-- No `/var/run/docker.sock`, no host GPU pass-through into test containers (the
-  generator uses GPU only via llama-server's API).
-- Agent credentials: NATS user per role (`coder`/`reviewer`), Forgejo token per
-  role — least privilege, rotated by Ansible.
+- No Docker socket.
+- No host GPU device in the sandbox. The GPU is llama-server's.
+- No dispatch key, no admin SSH key, no PostgreSQL password.
+- CPU, RAM, and PID limits. A wall-clock timeout kills the session.
+- Network from a sandbox: Forgejo on `infra-01`, and loopback `:8080`. Default deny elsewhere.
 
 ---
 
-# 10. Observability topology
+# 10. Observability
 
 ```text
-all workers ---- metrics:9100 ----> Prometheus (infra-01)
-all workers ---- heartbeats ------> NATS        -> supervisor (infra-01)
-test/ci/build ---- runs ----------> Forgejo Actions logs
-run state (system of record) ------> PostgreSQL (infra-01)
-evidence ----------------------------> worker /srv/agent/evidence
-        └ rsync nightly ------------> infra-01 /srv/backup-staging -> Restic -> ext disk
+workers -- :9100 --> Prometheus (infra-01) --> Grafana
+llama-server metrics --> Prometheus
+run index --> PostgreSQL
+planner session + ephemeral yields --> /srv/agent/sessions/<run_id>/
+evidence --> /srv/agent/evidence/...  -- rsync --> infra-01 staging --> Restic
+user-visible completion and escalation --> Open WebUI
 ```
 
-Prometheus label scheme:
+Labels: `instance="lab-gpu-02"`, `run_id`, `state=free|busy|draining`. Do not label nodes `coder` or `reviewer`.
 
-```text
-job="worker", instance="lab-gpu-01", role="coder", task_id="...", run_id="..."
-```
-
-Worker dashboards: GPU busy/clock/temp (later `intel_gpu_top` exporter; until then
-llama-server metrics + node_exporter), tokens/s, queue-drain rate, fresh-checkout
-failure rate, sandbox failures, evidence staging size.
+Dashboards: GPU temperature and memory, tokens/second, disk percent, sandbox failures, evidence bytes, count of busy workers.
 
 ---
 
-# 11. Failure and scaling behavior
+# 11. Failure and growth
 
-### 11.1 Worker failure
+## 11.1 Worker dies mid-plan
 
 ```text
-supervisor misses heartbeat for N intervals
-  -> mark worker `unavailable` in PostgreSQL
-  -> verify task completion via Forgejo commit / evidence presence
-  -> requeue unfinished task with attempt++ to another node in the same queue group
-  -> escalate when max_attempts exceeded
+dispatch helper sees the RPC session drop
+  -> run index status=failed, unless a complete planner reply was already stored
+  -> evidence not yet rsynced may be gone
+  -> Forgejo keeps any pushed branch
+  -> orchestrator retries on a different free worker, or escalates
+  -> the retry is a new planner session, not a revived coder
 ```
 
-If the failed worker produced evidence that was not yet rsynced, the run's
-evidence may be lost for that attempt — the code is always safe in Forgejo, and the
-next attempt regenerates evidence. Keep rsync nightly for inventory-level
-durability, not for per-attempt guarantees.
+Do not mark the Open WebUI conversation complete.
 
-### 11.2 Adding a sixth laptop (or repurposing a node)
+## 11.2 Adding a laptop
 
-1. Install the Ansible worker role (identical base: Vulkan stack, node-exporter,
-   llama-server, models, agent runtime).
-2. Give it a MagicDNS name; add to inventory.
-3. Set `agent_role: coder|reviewer|overflow` — that's the entire role switch.
-4. Point LiteLLM at its `:8080` if it carries a model.
+1. Ansible worker role: Vulkan, llama-server, models, Node Exporter, Oh My Pi, `df-planner-session`, UFW.
+2. MagicDNS name and `tag:worker`.
+3. Install the dispatch forced command.
+4. It is eligible when state is `free`. No role flag.
 
-### 11.3 Backpressure
+## 11.3 Backpressure
 
-If both coder nodes are busy, NATS holds the task in the coder durable
-(JetStream); the run-view shows `blocked`, never a false "queued-but-running".
-Surface queue depth on the run dashboard (architecture §6.6).
+If all five workers are `busy`, the dispatch helper does not start a sixth plan on a busy node. The run index stays `queued`. Open WebUI can show that. It must not show the plan as running.
 
 ---
 
-# 12. Bring-up order (maps onto architecture Stage 6/7, Garage-free)
+# 12. Bring-up
+
+Maps to architecture stages 5–7.
 
 ```text
-Stage A  all workers: base image + Vulkan stack + node exporter       (Section 3-4)
-Stage B  lab-gpu-01: llama-server + qwen3-8b + Open WebUI direct chat test
-Stage C  lab-gpu-03: llama-server + reviewer model; verify a manual fresh
-         checkout + test pipeline runs
-Stage D  NATS consumers: coder role on 01, reviewer role on 03
-Stage E  scale roles: coder-q += 02, reviewer-q += 04, overflow 05 enabled
-Stage F  one full controlled coding run visible end-to-end in PostgreSQL/
-         Forgejo/evidence + Grafana
-Stage G  evidence rsync to infra-01 + Restic to external disk enable; LiteLLM
-         added for routing/fallback
+A  all workers: OS, Vulkan, Node Exporter, UFW, /srv layout
+B  lab-gpu-01: llama-server + qwen3-8b + admin diagnostic chat
+C  same inference role on 02-05; same model file and checksum
+D  Oh My Pi + planner agents on 01; df-planner-session forced command
+E  one non-code plan: tasker, reviewer, reply in Open WebUI
+F  one code plan: coder, reviewer, tester, security reviewer,
+   branch in Forgejo, evidence on disk
+G  harness role on 02-05; two plans at once land on two nodes;
+   a third waits
+H  rsync + Restic; kill a worker mid-plan and confirm status=failed
 ```
 
-First goal (architecture §8, adjusted): one worker serving an Intel-GPU inference
-endpoint; Open WebUI chatting to it directly; one coder task and one independent
-reviewer task completing in Forgejo; run state in PostgreSQL; evidence on disk,
-synced to the server.
+First useful worker milestone: one Intel GPU endpoint, one planner session, one ephemeral tasker/reviewer loop, reply visible in Open WebUI.
 
 ---
 
-# 13. Decision log (why things are shaped this way)
+# 13. Decision log
 
-- **Vulkan over SYCL/OpenVINO** — see `worker-ai-runtime-requirements.md` §1:
-  longest model support, best concurrency, easiest ops; OpenVINO's GGUF backend is
-  not viable for servers yet (dynamic-shape crashes, no MoE/SSM).
-- **Garage dropped.** A three-node S3 replica, zones, layouts, and key management
-  add real operational load with no benefit at prototype scale. Evidence-on-disk +
-  PostgreSQL refs + nightly rsync + Restic covers the lab's only real need (the
-  server's own backups). Reintroduce S3 later as a thin evidence layer if needed —
-  nothing in the role topology depends on it.
-- **Coder on 01/02, reviewer on 03/04, overflow on 05** — physically independent,
-  different models, separate NATS subjects/credentials → the architecture's
-  "reviewer independent from coder context" rule holds with no extra machinery, and
-  every node stays part of a same kind compute pool.
-- **All five workers identical** — no storage vs compute split anymore, so the
-  Ansible `worker` role is one playbook with one variable, and any node can take
-  any role. This is simpler to reason about and to recover from.
-- **Inference only through the API** (no GPU pass-through into agent sandboxes) —
-  keeps sandboxes small, makes llama-server the single GPU consumer, and leaves the
-  door open to cont-batching/LiteLLM without rework.
+- **Oh My Pi on the worker, not a NATS consumer.** The server orchestrator sends a plan. The worker planner spawns ephemeral agents with the harness task tool. A queue service would duplicate that.
+- **No fixed coder/reviewer nodes.** The old split (01/02 coder, 03/04 reviewer, 05 overflow) fought the new rule that one worker owns a plan's task loop. Independence is a blank child session plus a fresh checkout.
+- **Planner chooses types.** Software engineering gets coder, reviewer, tester, and security reviewer. Other plans do not inherit that list.
+- **One plan per worker.** 32 GB UMA, one llama-server, serial tasker-then-reviewer. Parallel large contexts are a later measurement, not the default.
+- **Vulkan llama-server is the only GPU user.** Sandboxes call the HTTP API. No GPU passthrough into agent containers.
+- **Garage stays out.** Evidence on disk, run index for paths, nightly rsync, Restic on the external disk. S3 later does not change delegation.
+- **Element and Conduit stay out.** Completion and escalation return to the Open WebUI conversation that started the run.
+- **Dispatch key is a forced command.** The orchestrator never receives a worker shell.
