@@ -115,7 +115,7 @@ variables, CA trust, and troubleshooting steps are documented in:
 TheGarden/agent-worker/README.md
 ```
 
-The playbook is not a working NATS-worker rollout. It attempts a user-level Pi/LiteLLM file install and requires `litellm_key_source`. It does not set `WORKER_ID`, `WORKER_ROLE`, `WORKER_CONSUMER`, or `ALLOW_GENERATED_CODE`, and it does not copy `worker.py`. The role is missing `files/caddy-local-root.crt`, `templates/models.json.j2`, and `templates/settings.json.j2`. Use `agent-worker/README.md` for the Python worker.
+`playbooks/agent-workers.yml` installs `worker.py`, a virtualenv, `worker.env`, and a reboot cron job. Limit it to one new host, for example `michelangelo`, after that host is uncommented in `inventory/hosts.yml`. Use `--ask-become-pass` so the laptop can install `python3-venv`.
 
 ## Proxmox validation
 

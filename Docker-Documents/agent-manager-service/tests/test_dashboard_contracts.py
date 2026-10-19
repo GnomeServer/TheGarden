@@ -59,7 +59,15 @@ class DashboardSanitizationTests(unittest.IsolatedAsyncioTestCase):
 
         record = SimpleNamespace(
             id="run-1",
-            run_metadata={"worker_role": "coder", "project_name": "Quarterly report"},
+            run_metadata={
+                "worker_role": "coder",
+                "project_name": "Quarterly report",
+                "operation": "create-python-script",
+                "source": "open-webui",
+                "script_name": "audit_report.py",
+                "goal": "private prompt",
+                "result": {"source": "model", "stdout": "secret command output", "returncode": 1},
+            },
             status="failed",
             worker_id="worker-01",
             error="secret command output",
@@ -74,11 +82,16 @@ class DashboardSanitizationTests(unittest.IsolatedAsyncioTestCase):
         output = await dashboard_runs(100, SimpleNamespace(), session)
         self.assertEqual(
             set(output[0]),
-            {"id", "request_summary", "worker_role", "status", "worker_id",
-             "result_code", "error_summary", "created_at", "updated_at"},
+            {"id", "request_summary", "worker_role", "operation", "source", "script_name",
+             "ledger", "bounce", "result_summary", "chatter", "phase", "status", "worker_id",
+             "result_code", "error_summary", "created_at", "started_at", "updated_at"},
         )
         self.assertNotIn("private prompt", repr(output))
         self.assertEqual(output[0]["request_summary"], "Project: Quarterly report")
+        self.assertEqual(output[0]["source"], "open-webui")
+        self.assertEqual(output[0]["operation"], "create-python-script")
+        self.assertEqual(output[0]["script_name"], "audit_report.py")
+        self.assertEqual(output[0]["phase"], "Stopped after a worker failure. Raw output is withheld.")
         self.assertNotIn("secret command output", repr(output))
 
     async def test_worker_admission_status_uses_core_health_not_heartbeat_presence(self) -> None:

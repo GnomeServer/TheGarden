@@ -22,7 +22,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import SESSION_COOKIE, api_token_user, bearer, require_session_csrf, session_user
+from .auth import (
+    GRANTED_ROLES,
+    SESSION_COOKIE,
+    api_token_user,
+    bearer,
+    has_dashboard_access,
+    require_session_csrf,
+    session_user,
+)
 from .dashboard import (
     activity_out,
     ensure_task_permission,
@@ -273,14 +281,13 @@ async def estimate_totals(
     """Calculate capped observational estimates from SSH sessions and dashboard pulses."""
     member_rows = (
         await session.execute(
-            select(UserRecord.id, UserRecord.forgejo_login).where(
-                UserRecord.active.is_(True), UserRecord.role != "service"
+            select(UserRecord.id).where(
+                UserRecord.active.is_(True),
+                UserRecord.role.in_(GRANTED_ROLES),
             )
         )
     ).all()
-    member_ids = {
-        row.id for row in member_rows if row.forgejo_login.lower() in settings.dashboard_members
-    }
+    member_ids = {row[0] for row in member_rows}
     if not member_ids:
         return {}
 
@@ -457,9 +464,7 @@ async def create_identity_mapping(
     user = await session.get(UserRecord, body.user_id)
     if (
         user is None
-        or not user.active
-        or user.role == "service"
-        or user.forgejo_login.lower() not in settings.dashboard_members
+        or not has_dashboard_access(user)
     ):
         raise HTTPException(status_code=422, detail="Identity mapping requires an active dashboard member")
     source = body.source.lower()
@@ -711,7 +716,7 @@ async def list_activity_estimates(
             select(UserRecord).where(UserRecord.active.is_(True), UserRecord.role != "service")
         )
     ).scalars().all()
-    members = [user for user in users if user.forgejo_login.lower() in settings.dashboard_members]
+    members = [user for user in users if has_dashboard_access(user)]
     member_ids = [user.id for user in members]
     totals = await estimate_totals(session, from_day, to_day)
     reviews = (
@@ -760,9 +765,7 @@ async def review_activity_estimate(
     target = await session.get(UserRecord, user_id)
     if (
         target is None
-        or not target.active
-        or target.role == "service"
-        or target.forgejo_login.lower() not in settings.dashboard_members
+        or not has_dashboard_access(target)
     ):
         raise HTTPException(status_code=404, detail="Dashboard member not found")
     query = select(ActivityEstimateReviewRecord).where(
@@ -987,8 +990,8 @@ async def discard_work_session(
     record = await load_owned_session(session, session_id, actor, manager_allowed=False)
     if record.status == "deleted":
         return Response(status_code=204)
-    if record.source != "timer" or record.status not in {"running", "stopped"}:
-        raise HTTPException(status_code=409, detail="Only your running or stopped timer can be discarded")
+    if record.source != "timer" or record.status not in {"running", "stopped", "rejected"}:
+        raise HTTPException(status_code=409, detail="Only your running, stopped, or rejected timer can be discarded")
 
     before = work_session_snapshot(record)
     event_time = utcnow()

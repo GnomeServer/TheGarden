@@ -53,6 +53,31 @@ class WorkerNamingTests(unittest.IsolatedAsyncioTestCase):
             if subject == "agent.runs.completed"
         )
 
+    async def test_running_status_is_published_on_the_manager_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            event = {
+                "run_id": "run-42",
+                "goal": "Run a deterministic test script",
+                "metadata": {
+                    "operation": "create-python-script",
+                    "worker_role": "coder",
+                    "script": "print('named script ran')",
+                },
+            }
+            message = SimpleNamespace(data=json.dumps(event).encode("utf-8"), ack=AsyncMock())
+            js = CapturingJetStream()
+            with (
+                patch.object(worker, "WORKSPACE", Path(directory)),
+                patch.object(worker, "ALLOW_GENERATED_CODE", True),
+            ):
+                await worker.process_message(js, message)
+        subjects = [subject for subject, _payload in js.events]
+        self.assertIn("agent.runs.status", subjects)
+        status = next(payload for subject, payload in js.events if subject == "agent.runs.status")
+        self.assertEqual(status["status"], "running")
+        self.assertEqual(status["run_id"], "run-42")
+        self.assertEqual(worker._presence["status"], "idle")
+
     async def test_project_and_script_names_define_saved_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

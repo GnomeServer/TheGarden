@@ -117,10 +117,25 @@ ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/site.yml --check --diff
 ```
 
-Generated state is written under `state/` and is ignored by Git because it contains host-specific information.
+## Worker laptops
 
-## Secrets and future layout
+`playbooks/agent-workers.yml` installs the Python worker from `../agent-worker`,
+creates a virtualenv, writes `~/agent-worker/worker.env`, and starts
+`start-worker.sh` now and on reboot. It does not install Pi. A missing LiteLLM
+key is a warning, not a failure. Generated scripts run as the laptop user.
 
-Do not add Compose `.env` files, API tokens, passwords, private keys, or vault passwords to TheGarden. The next step for a reproducible rebuild is to store secret values in Ansible Vault and template each Compose `.env` file with mode `0600`.
+Add a laptop by copying the commented `michelangelo` block in
+`inventory/hosts.yml`, filling the Tailscale address, SSH user, and worker id,
+then:
 
-`roles/agent_worker` and `playbooks/agent-workers.yml` are not a working worker rollout. The role copies a LiteLLM key to `~/.config/litellm/worker-api-key` and tries to install Pi files. The role directory has no `files/caddy-local-root.crt`, `templates/models.json.j2`, or `templates/settings.json.j2`, so the playbook cannot finish as checked in. It does not install `worker.py`, create a virtualenv, or export `WORKER_*` or `ALLOW_GENERATED_CODE`. Use `../agent-worker/README.md` for the Python worker. `inventory/worker-1.yml` is not loaded and does not define `litellm_key_source`, so it is not enough to run the role.
+```bash
+cd Ansible
+ansible agent_workers --limit michelangelo -m ansible.builtin.ping
+ansible-playbook playbooks/agent-workers.yml --limit michelangelo --ask-become-pass
+```
+
+`--ask-become-pass` is only needed for `python3-venv` and `cron`. Place the
+virtual key on the controller at the host's `litellm_key_source` before the
+run if dynamic Open WebUI prompts should work. Set `worker_model_base_url` in
+`inventory/group_vars/agent_workers.yml` when a Tailscale-reachable `/v1` route
+exists. Do not commit key files.

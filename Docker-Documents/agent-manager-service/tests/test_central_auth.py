@@ -55,12 +55,29 @@ class CredentialBoundaryTests(unittest.IsolatedAsyncioTestCase):
         request.headers["X-CSRF-Token"] = csrf
         self.assertIs(await auth.require_session_csrf(request, user), user)
 
-    async def test_unallowlisted_forgejo_user_cannot_start_dashboard_session(self):
-        session = SimpleNamespace(scalar=AsyncMock())
+    async def test_forgejo_sign_in_starts_as_admin(self):
+        added = []
+        session = SimpleNamespace(scalar=AsyncMock(side_effect=[None, None]), add=added.append)
+        user = await upsert_forgejo_user(session, {"id": 9, "login": "michelangelo"})
+        self.assertEqual(user.role, "admin")
+        self.assertIs(user.active, True)
+        self.assertEqual(added, [user])
+
+    async def test_granted_account_keeps_a_session_without_the_env_name_list(self):
+        token, _csrf = auth.create_session("outsider-id")
+        user = SimpleNamespace(
+            id="outsider-id", forgejo_login="gnomeserver", role="member", active=True,
+        )
+        request = SimpleNamespace(cookies={auth.SESSION_COOKIE: token}, state=SimpleNamespace())
+        session = SimpleNamespace(get=AsyncMock(return_value=user))
+        self.assertIs(await auth.session_user(request, session), user)
+        inactive = SimpleNamespace(
+            id="outsider-id", forgejo_login="gnomeserver", role="pending", active=False,
+        )
+        session.get = AsyncMock(return_value=inactive)
         with self.assertRaises(HTTPException) as caught:
-            await upsert_forgejo_user(session, {"id": 9, "login": "not-a-team-member"})
-        self.assertEqual(caught.exception.status_code, 403)
-        session.scalar.assert_not_awaited()
+            await auth.session_user(request, session)
+        self.assertEqual(caught.exception.status_code, 401)
 
     async def test_viewer_cannot_dispatch_execution(self):
         request = SimpleNamespace(state=SimpleNamespace(auth_method="bearer"))

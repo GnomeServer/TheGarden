@@ -8,6 +8,7 @@ model_list:
       model: os.environ/LUNA_MODEL
       api_base: os.environ/LUNA_API_BASE
       api_key: os.environ/LUNA_BACKEND_API_KEY
+      reasoning_effort: medium
 
 # The master key is used only for administration. Workers must use a virtual
 # key generated through /key/generate, never this key.

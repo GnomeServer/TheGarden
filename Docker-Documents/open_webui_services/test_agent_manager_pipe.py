@@ -38,6 +38,7 @@ class FakeResponse:
 
 class FakeAgentManagerClient:
     def __init__(self) -> None:
+        self.url: str | None = None
         self.request_body: dict | None = None
 
     async def __aenter__(self) -> FakeAgentManagerClient:
@@ -47,31 +48,29 @@ class FakeAgentManagerClient:
         return None
 
     async def post(self, url: str, *, headers: dict, json: dict) -> FakeResponse:
+        self.url = url
         self.request_body = json
+        if not json.get("project_name"):
+            return FakeResponse({"type": "question", "text": "What project name should this mission use?"})
         return FakeResponse(
             {
-                "id": "manager-uuid",
-                "status": "queued",
-                "metadata": {"project_name": json["project_name"]},
+                "type": "mission",
+                "mission_id": "mission-1",
+                "status": "accepted",
+                "summary": "Accepted by the orchestrator. A crew has not started.",
             }
         )
 
     async def get(self, url: str, *, headers: dict) -> FakeResponse:
-        project = self.request_body["project_name"]
+        self.get_url = url
         return FakeResponse(
             {
-                "id": "manager-uuid",
+                "type": "mission",
+                "mission_id": "mission-1",
                 "status": "completed",
-                "metadata": {
-                    "project_name": project,
-                    "result": {
-                        "stdout": "report generated\n",
-                        "script": (
-                            "/workspace/quarterly-reports/"
-                            "dependency_free_report_json.py"
-                        ),
-                    },
-                },
+                "summary": "Reviewer accepted the script. The crew has been removed.",
+                "question": None,
+                "script": "print('ok')\n",
             }
         )
 
@@ -83,31 +82,25 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         pipe.valves.FORGEJO_REPOSITORY = "owner/repository"
         return pipe
 
-    async def test_asks_project_and_submits_a_derived_filename(self) -> None:
+    async def test_missing_project_is_a_question_not_a_run(self) -> None:
         pipe = self.configured_pipe()
-        event_call = AsyncMock(return_value="Quarterly Reports")
+        event_call = AsyncMock()
         client = FakeAgentManagerClient()
         prompt = "Create a dependency-free Python script that writes a report.json file."
 
-        with patch.object(
-            agent_manager_pipe.httpx, "AsyncClient", return_value=client
-        ):
+        with patch.object(agent_manager_pipe.httpx, "AsyncClient", return_value=client):
             result = await pipe.pipe(
                 {"messages": [{"role": "user", "content": prompt}]},
                 __event_call__=event_call,
             )
 
-        event_call.assert_awaited_once()
-        self.assertEqual(event_call.await_args.args[0]["type"], "input")
-        self.assertEqual(client.request_body["goal"], prompt)
-        self.assertEqual(client.request_body["project_name"], "Quarterly Reports")
-        self.assertEqual(
-            client.request_body["script_name"], "dependency_free_report_json.py"
-        )
-        self.assertIn("Project: Quarterly Reports", result)
-        self.assertNotIn("manager-uuid", result)
+        event_call.assert_not_awaited()
+        self.assertTrue(client.url.endswith("/v1/omp/turns"))
+        self.assertNotIn("/v1/runs", client.url)
+        self.assertEqual(result, "What project name should this mission use?")
+        self.assertNotIn("script_name", client.request_body)
 
-    async def test_explicit_names_skip_project_prompt(self) -> None:
+    async def test_explicit_names_go_to_omp_as_a_mission(self) -> None:
         pipe = self.configured_pipe()
         event_call = AsyncMock()
         client = FakeAgentManagerClient()
@@ -124,10 +117,29 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
             )
 
         event_call.assert_not_awaited()
+        self.assertTrue(client.url.endswith("/v1/omp/turns"))
         self.assertEqual(client.request_body["goal"], "Build a report.")
         self.assertEqual(client.request_body["project_name"], "Quarterly Reports")
-        self.assertEqual(client.request_body["script_name"], "audit_report.py")
+        self.assertNotIn("script_name", client.request_body)
 
+    async def test_project_reply_keeps_the_previous_goal(self) -> None:
+        pipe = self.configured_pipe()
+        client = FakeAgentManagerClient()
+        messages = [
+            {"role": "user", "content": "Write a short status note for the lab."},
+            {"role": "assistant", "content": "What project name should this mission use?"},
+            {
+                "role": "user",
+                "content": "The Garden is the project name and I want you to write a short status note for the lab.",
+            },
+        ]
+
+        with patch.object(agent_manager_pipe.httpx, "AsyncClient", return_value=client):
+            result = await pipe.pipe({"messages": messages})
+
+        self.assertEqual(client.request_body["project_name"], "The Garden")
+        self.assertEqual(client.request_body["goal"], "write a short status note for the lab")
+        self.assertIn("Reviewer accepted the script", result)
 
 if __name__ == "__main__":
     unittest.main()

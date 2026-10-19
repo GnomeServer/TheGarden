@@ -13,7 +13,7 @@ const state = {
   nodeHealth: null,
   accessEvents: null,
   identityMappings: null,
-  lastPulse: 0,
+  people: null,
   lastInteraction: 0,
   undoId: null,
 };
@@ -53,10 +53,17 @@ function formatDuration(seconds) {
   return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
+function personLabel(user) {
+  const login = String(user?.login || "");
+  const name = String(user?.display_name || login);
+  if (login.toLowerCase() === "api-admin" || /^api admin/i.test(name)) return "Service account";
+  return name || login || "Unassigned";
+}
+
 function memberName(id) {
   if (id == null || id === "") return "Unassigned";
   const user = state.users.find((item) => String(item.id) === String(id));
-  return user ? user.display_name || user.login : "Unknown member";
+  return user ? personLabel(user) : "Unknown member";
 }
 
 function utcDateValue(date) {
@@ -74,7 +81,7 @@ function setTheme(theme, persist = true) {
     button.setAttribute("aria-label", dark ? "Switch to light mode" : "Switch to dark mode");
     button.setAttribute("aria-pressed", String(dark));
   });
-  document.querySelector("#theme-color")?.setAttribute("content", selected === "dark" ? "#101713" : "#f4f5f1");
+  document.querySelector("#theme-color")?.setAttribute("content", selected === "dark" ? "#12151c" : "#e7eef6");
   if (persist) {
     try { localStorage.setItem(THEME_STORAGE_KEY, selected); } catch {}
   }
@@ -83,9 +90,7 @@ function setTheme(theme, persist = true) {
 function initTheme() {
   let selected = "";
   try { selected = localStorage.getItem(THEME_STORAGE_KEY) || ""; } catch {}
-  if (!["light", "dark"].includes(selected)) {
-    selected = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
-  }
+  if (!["light", "dark"].includes(selected)) selected = "dark";
   setTheme(selected, false);
   document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
     button.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
@@ -236,6 +241,7 @@ async function refreshAll() {
     api("/v1/nodes/health"),
     api("/v1/access-events?limit=100"),
     api("/v1/work-sessions?limit=100"),
+    api("/v1/people/summary"),
   ]);
 
   const unauthorized = results.find(
@@ -257,6 +263,7 @@ async function refreshAll() {
     "nodeHealth",
     "accessEvents",
     "workSessions",
+    "people",
   ];
   results.forEach((result, index) => {
     const key = keys[index];
@@ -302,7 +309,138 @@ function render() {
   renderNodes();
   renderAccess();
   renderIdentityMappings();
+  renderAccessGrants();
   renderWorkSessions();
+  renderPresence();
+}
+
+function accessChoice(user) {
+  if (user.active === false || user.role === "pending") return "none";
+  if (user.role === "admin") return "admin";
+  if (user.role === "manager") return "manager";
+  if (user.role === "viewer") return "viewer";
+  return "member";
+}
+
+function renderAccessGrants() {
+  const panel = $("access-admin");
+  const target = $("access-requests");
+  if (!panel || !target) return;
+  const canChange = ["admin", "manager", "member"].includes(state.session?.user?.role);
+  panel.classList.toggle("hidden", !canChange);
+  if (!canChange) return;
+  if (state.usersError) {
+    setError(target, "People could not be loaded.");
+    return;
+  }
+  if (!state.users) {
+    target.innerHTML = '<p class="loading">Loading people…</p>';
+    return;
+  }
+  const people = state.users.filter((user) => String(user.login).toLowerCase() !== "api-admin" && user.role !== "service");
+  if (!people.length) {
+    setEmpty(target, "No Forgejo sign-ins yet.");
+    return;
+  }
+  const options = [
+    ["admin", "Admin"],
+    ["manager", "Manager"],
+    ["member", "See and edit"],
+    ["viewer", "See only"],
+    ["none", "No access"],
+  ];
+  target.innerHTML = people.map((user) => {
+    const selected = accessChoice(user);
+    const self = String(user.id) === String(state.session.user.id);
+    return `
+      <article class="identity-card">
+        <div>
+          <strong class="identity-name">${esc(personLabel(user))}</strong>
+          <small>${esc(user.login)}</small>
+        </div>
+        <label>Status
+          <select data-access-user="${esc(user.id)}" ${self ? "disabled" : ""}>
+            ${options.map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+      </article>
+    `;
+  }).join("");
+}
+
+async function savePerson(userId, fields) {
+  const user = (state.users || []).find((item) => String(item.id) === String(userId));
+  const choice = fields.choice || accessChoice(user || {});
+  const granted = choice !== "none";
+  await api(`/v1/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      role: granted ? choice : "viewer",
+      active: granted,
+      display_name: fields.display_name,
+    }),
+  });
+  showToast(fields.display_name ? "Name saved" : "Status updated");
+  await refreshAll();
+}
+
+function recentPresence(value, windowMs = 180000) {
+  const time = value ? new Date(value).getTime() : NaN;
+  return Number.isFinite(time) && Date.now() - time <= windowMs;
+}
+
+function renderPresence() {
+  const people = $("people-channels");
+  const workers = $("worker-channels");
+  if (!people && !workers) return;
+  const timers = new Map((state.people || [])
+    .filter((item) => item.active_session)
+    .map((item) => [String(item.user?.id), item.active_session]));
+  if (people) {
+  if (state.usersError) {
+    setError(people, "People could not be loaded.");
+  } else if (!state.users) {
+    people.innerHTML = '<p class="loading">Loading people…</p>';
+  } else if (!state.users.length) {
+    setEmpty(people, "No people yet.");
+  } else {
+    const canEdit = ["admin", "manager", "member"].includes(state.session?.user?.role);
+    const options = [["admin", "Admin"], ["manager", "Manager"], ["member", "See and edit"], ["viewer", "See only"], ["none", "No access"]];
+    const roster = state.users.filter((user) => user.role !== "service" && String(user.login).toLowerCase() !== "api-admin");
+    people.innerHTML = roster.map((user) => {
+      const online = user.active !== false && recentPresence(user.last_activity_at);
+      const self = String(user.id) === String(state.session?.user?.id);
+      const selected = accessChoice(user);
+      const timer = timers.get(String(user.id));
+      return `
+        <article class="person-widget ${online ? "active" : "away"}">
+          <span class="channel-dot" aria-hidden="true"></span>
+          <input data-person-name="${esc(user.id)}" value="${esc(personLabel(user))}" maxlength="255" aria-label="Name for ${esc(user.login)}" ${canEdit ? "" : "disabled"}>
+          <select data-access-user="${esc(user.id)}" aria-label="Role for ${esc(personLabel(user))}" ${canEdit && !self ? "" : "disabled"}>
+            ${options.map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+          <button class="button secondary" type="button" data-save-name="${esc(user.id)}" ${canEdit ? "" : "disabled"}>Save</button>
+          <button class="button danger" type="button" data-delete-user="${esc(user.id)}" ${canEdit && !self ? "" : "disabled"}>Delete</button>
+        </article>
+      `;
+    }).join("");
+  }
+  }
+  if (!workers) return;
+  if (state.workersError) {
+    setError(workers, "Agents could not be loaded.");
+  } else if (!state.workers) {
+    workers.innerHTML = '<p class="loading">Loading agents…</p>';
+  } else if (!state.workers.length) {
+    setEmpty(workers, "No agent heartbeats yet.");
+  } else {
+    workers.innerHTML = state.workers.map((worker) => {
+      const offline = worker.presence_status === "offline" || worker.status === "offline";
+      const run = (state.runs || []).find((item) => item.id === worker.current_run_id);
+      const detail = run?.phase || (worker.current_run_id ? "On a run" : offline ? "Offline" : "Idle");
+      return `<article class="channel ${offline ? "away" : "active"}"><span class="channel-dot" aria-hidden="true"></span><strong>${esc(worker.id)}</strong><small>${esc(detail)}</small></article>`;
+    }).join("");
+  }
 }
 
 function metric(label, value, detail) {
@@ -403,7 +541,9 @@ function renderAgentTasks() {
   ];
   target.innerHTML = columns.map(([status, label]) => {
     const tasks = visible.filter((task) => task.status === status);
-    const cards = tasks.map((task) => `
+    const cards = tasks.map((task) => {
+      const run = (state.runs || []).find((item) => item.id === task.run_id);
+      return `
       <article class="task-card">
         <button class="task-open" type="button" data-task-id="${esc(task.id)}" aria-label="Edit agent task: ${esc(task.title)}">
           <span class="task-title">${esc(task.title)}</span>
@@ -411,10 +551,12 @@ function renderAgentTasks() {
             <span class="badge priority-${esc(task.priority)}">${esc(task.priority || "normal")}</span>
             <span>Worker ${esc(task.assignee_worker_id)}</span>
             <span>${esc(memberName(task.assignee_user_id))}</span>
+            ${run ? `<span>${esc(run.phase || run.status)}</span>` : ""}
           </span>
         </button>
       </article>
-    `).join("");
+    `;
+    }).join("");
     return `
       <section class="task-column" aria-label="${esc(label)} agent tasks">
         <h3>${esc(label)}<span class="count">${tasks.length}</span></h3>
@@ -553,7 +695,6 @@ async function archiveTask() {
     $("task-error").textContent = error.message;
   }
 }
-
 function admissionInfo(worker) {
   const value = worker.admission_status;
   if (value == null || value === "") {
@@ -640,10 +781,13 @@ function renderRuns() {
   }
   const rows = state.runs.map((run) => {
     const status = runStatus(run);
+    const source = run.source === "open-webui" ? "Open WebUI" : run.source === "api" ? "API" : "Unknown";
     return `
       <tr>
         <td><time datetime="${esc(run.created_at)}">${esc(formatDate(run.created_at))}</time></td>
-        <td>${esc(run.request_summary || "No summary provided")}</td>
+        <td>${esc(run.request_summary || "No summary provided")}${run.script_name ? `<small class="subline">${esc(run.script_name)}</small>` : ""}</td>
+        <td>${esc(source)}${run.operation ? `<small class="subline">${esc(run.operation)}</small>` : ""}</td>
+        <td>${esc(run.phase || "—")}${Array.isArray(run.chatter) && run.chatter.length ? `<ol class="chatter">${run.chatter.map((line) => `<li>${esc(line)}</li>`).join("")}</ol>` : ""}${run.bounce ? `<small class="subline">Bounce: ${esc(run.bounce)}</small>` : ""}${run.result_summary ? `<small class="subline">${esc(run.result_summary)}</small>` : ""}</td>
         <td>${esc(run.worker_role || "—")}${run.worker_id ? `<small class="subline">${esc(run.worker_id)}</small>` : ""}</td>
         <td><span class="badge run-${esc(status.kind)}">${esc(status.label)}</span></td>
         <td>${esc(run.error_summary || "—")}</td>
@@ -652,7 +796,7 @@ function renderRuns() {
   }).join("");
   target.innerHTML = `
     <table>
-      <thead><tr><th scope="col">Created</th><th scope="col">Request summary</th><th scope="col">Worker</th><th scope="col">State</th><th scope="col">Result summary</th></tr></thead>
+      <thead><tr><th scope="col">Created</th><th scope="col">Request</th><th scope="col">From</th><th scope="col">Step</th><th scope="col">Worker</th><th scope="col">State</th><th scope="col">Result</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   `;
@@ -788,15 +932,11 @@ function renderWorkSessions() {
         if (isOwner && entry.status === "running") {
           actions.push(`<button class="button secondary" type="button" data-time-action="stop" data-session-id="${esc(entry.id)}">Stop</button>`);
         }
-        if (isOwner && entry.status === "stopped") {
-          actions.push(`<button class="button secondary" type="button" data-time-action="submit" data-session-id="${esc(entry.id)}">Submit</button>`);
+        if (isOwner && ["stopped", "rejected"].includes(entry.status)) {
+          actions.push(`<button class="button secondary" type="button" data-time-action="submit" data-session-id="${esc(entry.id)}">${entry.status === "rejected" ? "Resubmit" : "Submit"}</button>`);
         }
-        if (isOwner && entry.source === "timer" && ["running", "stopped"].includes(entry.status)) {
-          actions.push(`<button class="button danger" type="button" data-time-action="discard" data-session-id="${esc(entry.id)}">Discard</button>`);
-        }
-        if (!isOwner && entry.status === "submitted") {
-          actions.push(`<button class="button primary" type="button" data-time-action="approve" data-session-id="${esc(entry.id)}">Approve</button>`);
-          actions.push(`<button class="button danger" type="button" data-time-action="reject" data-session-id="${esc(entry.id)}">Reject</button>`);
+        if (isOwner && entry.source === "timer" && ["running", "stopped", "rejected"].includes(entry.status)) {
+          actions.push(`<button class="button danger" type="button" data-time-action="discard" data-session-id="${esc(entry.id)}">${entry.status === "rejected" ? "Delete" : "Discard"}</button>`);
         }
         return `
           <tr>
@@ -860,11 +1000,12 @@ async function handleWorkSessionAction(button) {
   if (!entry) return;
   const isOwner = String(entry.user_id) === String(state.session.user.id);
   if (action === "discard") {
-    if (!isOwner || entry.source !== "timer" || !["running", "stopped"].includes(entry.status)) return;
-    if (!window.confirm("Discard this reported-time entry? It will no longer count as reported time.")) return;
+    if (!isOwner || entry.source !== "timer" || !["running", "stopped", "rejected"].includes(entry.status)) return;
+    const verb = entry.status === "rejected" ? "Delete" : "Discard";
+    if (!window.confirm(`${verb} this reported-time entry? It will no longer count as reported time.`)) return;
   } else if (action === "stop" && (!isOwner || entry.status !== "running")) {
     return;
-  } else if (action === "submit" && (!isOwner || entry.status !== "stopped")) {
+  } else if (action === "submit" && (!isOwner || !["stopped", "rejected"].includes(entry.status))) {
     return;
   } else if (["approve", "reject"].includes(action) && (isOwner || entry.status !== "submitted")) {
     return;
@@ -875,7 +1016,7 @@ async function handleWorkSessionAction(button) {
     let result = null;
     if (action === "discard") {
       result = await api(`/v1/work-sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-      showToast("Reported-time entry discarded", result?.undo_id);
+      showToast(entry.status === "rejected" ? "Rejected time entry deleted" : "Reported-time entry discarded", result?.undo_id);
     } else if (action === "stop") {
       result = await api(`/v1/work-sessions/${encodeURIComponent(sessionId)}/stop`, {
         method: "POST",
@@ -1190,6 +1331,33 @@ $("identity-admin").addEventListener("click", (event) => {
   const deleteButton = event.target.closest("[data-delete-mapping]");
   if (deleteButton) deleteIdentityMapping(deleteButton);
 });
+$("people-channels").addEventListener("change", (event) => {
+  const select = event.target.closest("[data-access-user]");
+  if (!select) return;
+  savePerson(select.dataset.accessUser, { choice: select.value }).catch((error) => {
+    if (!handleAuthError(error)) showToast(error.message);
+  });
+});
+$("people-channels").addEventListener("click", (event) => {
+  const save = event.target.closest("[data-save-name]");
+  const remove = event.target.closest("[data-delete-user]");
+  if (save) {
+    const input = document.querySelector(`[data-person-name="${CSS.escape(save.dataset.saveName)}"]`);
+    savePerson(save.dataset.saveName, { display_name: input?.value || "" }).catch((error) => {
+      if (!handleAuthError(error)) showToast(error.message);
+    });
+    return;
+  }
+  if (!remove) return;
+  const person = (state.users || []).find((item) => String(item.id) === String(remove.dataset.deleteUser));
+  if (!window.confirm(`Delete ${personLabel(person)} from the board?`)) return;
+  api(`/v1/users/${encodeURIComponent(remove.dataset.deleteUser)}`, { method: "DELETE" })
+    .then(() => refreshAll())
+    .then(() => showToast("Person deleted"))
+    .catch((error) => {
+      if (!handleAuthError(error)) showToast(error.message);
+    });
+});
 document.querySelectorAll(".area-tab").forEach((button) => {
   button.addEventListener("click", () => switchView(button.dataset.view));
 });
@@ -1204,7 +1372,7 @@ $("logout").addEventListener("click", async () => {
 });
 
 $("estimate-to").value = utcDateValue(new Date());
-$("estimate-from").value = utcDateValue(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
+$("estimate-from").value = $("estimate-to").value;
 for (const eventName of ["pointerdown", "touchstart", "click", "keydown"]) {
   document.addEventListener(eventName, noteInteraction, { passive: true });
 }
@@ -1230,9 +1398,11 @@ async function boot() {
     await refreshAll();
   } catch (error) {
     state.session = null;
-    showLogin(error.status === 401
-      ? "Sign in with your Forgejo account to continue."
-      : "Dashboard unavailable. Try reloading in a moment.");
+    showLogin(new URLSearchParams(location.search).get("access") === "pending"
+      ? "Forgejo sign-in worked, but this account is waiting for access. An admin can grant it from the board."
+      : error.status === 401
+        ? "Sign in with your Forgejo account to continue."
+        : "Dashboard unavailable. Try reloading in a moment.");
   }
 }
 

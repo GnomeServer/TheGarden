@@ -29,6 +29,7 @@ from .live import live_broker
 from .models import ActivityRecord, RunRecord, UserRecord, WorkerRecord
 from .settings import settings
 from .tracking import router as tracking_router, scan_deadline_notifications
+from .omp import router as omp_router
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -354,6 +355,18 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
         completion = dict(payload)
         completion.pop("run_id", None)
         metadata["result"] = completion
+        ledger = dict(metadata.get("ledger") or {})
+        worker_summary = payload.get("summary")
+        if isinstance(worker_summary, str) and worker_summary.strip():
+            ledger["result_summary"] = worker_summary.strip()[:200]
+            ledger["kind"] = "mission"
+            metadata["ledger"] = ledger
+        steps = payload.get("steps")
+        if isinstance(steps, list):
+            chatter = [line for line in (metadata.get("chatter") or []) if isinstance(line, str)]
+            chatter.append("Worker OMP: image started.")
+            chatter.extend(step for step in steps if isinstance(step, str))
+            metadata["chatter"] = chatter[-12:]
         record.run_metadata = metadata
         record.status = worker_status
         record.error = (
@@ -638,6 +651,7 @@ app = FastAPI(
 )
 app.include_router(dashboard_router)
 app.include_router(tracking_router)
+app.include_router(omp_router)
 app.mount("/metrics", make_asgi_app())
 static_dir = Path(__file__).with_name("static")
 app.mount("/dashboard/static", StaticFiles(directory=static_dir), name="dashboard-static")

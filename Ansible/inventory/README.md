@@ -95,7 +95,7 @@ The existing `inventory/worker-1.yml` is an optional single-worker inventory
 for isolated testing. Do not load it together with `hosts.yml` unless you
 intentionally want to maintain duplicate definitions for `inkii`.
 
-The worker runtime is documented in [`../../agent-worker/README.md`](../../agent-worker/README.md). `playbooks/agent-workers.yml` is not a working rollout: the role is missing `caddy-local-root.crt`, `models.json.j2`, and `settings.json.j2`, and it does not install `worker.py`. `proxmox-guests.example.yml` also defines `infra-lab-services`; do not load it beside `hosts.yml`.
+The worker runtime is installed by `playbooks/agent-workers.yml`. Add a laptop by uncommenting a host like `michelangelo` in `hosts.yml`, then run `ansible-playbook playbooks/agent-workers.yml --limit michelangelo --ask-become-pass`. Do not load `proxmox-guests.example.yml` beside `hosts.yml`.
 
 ## Proxmox guest template
 

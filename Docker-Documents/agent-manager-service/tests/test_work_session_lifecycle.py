@@ -130,8 +130,23 @@ class WorkSessionDiscardTests(unittest.IsolatedAsyncioTestCase):
         [event] = activity_events(session)
         self.assertEqual(event.payload["previous_status"], "stopped")
 
-    async def test_discard_rejects_reviewed_or_submitted_time(self) -> None:
-        for status in ("submitted", "rejected", "approved"):
+    async def test_owner_can_discard_rejected_timer(self) -> None:
+        record = make_record(status="rejected")
+        record.ended_at = record.started_at + timedelta(seconds=30)
+        record.duration_seconds = 30
+        session = FakeSession(record)
+
+        with patch("agent_manager.tracking.live_broker.publish", new_callable=AsyncMock):
+            result = await discard_work_session("timer-1", actor=make_actor(), session=session)
+
+        self.assertEqual(result.status_code, 204)
+        self.assertEqual(record.status, "deleted")
+        self.assertEqual(record.duration_seconds, 30)
+        [event] = activity_events(session)
+        self.assertEqual(event.payload["previous_status"], "rejected")
+
+    async def test_discard_rejects_submitted_or_approved_time(self) -> None:
+        for status in ("submitted", "approved"):
             with self.subTest(status=status):
                 record = make_record(status=status)
                 session = FakeSession(record)

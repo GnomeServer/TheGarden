@@ -14,7 +14,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import and_, desc, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,7 @@ from .auth import (
     SESSION_COOKIE,
     create_oauth_state,
     create_session,
+    has_dashboard_access,
     require_session_csrf,
     session_payload,
     session_user,
@@ -98,6 +99,7 @@ class TaskUpdate(BaseModel):
 class UserRoleUpdate(BaseModel):
     role: Literal["viewer", "member", "manager", "admin"]
     active: bool
+    display_name: str | None = Field(default=None, max_length=255)
 
 
 def utcnow() -> datetime:
@@ -107,13 +109,28 @@ def utcnow() -> datetime:
 def iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
+MACHINE_TITLES = {"api administrator", "api admin"}
+
+
+def stored_person_name(login: str, raw: str) -> str:
+    cleaned = raw.strip()
+    if login.lower() in {"api-admin"} or login.lower().startswith("service:"):
+        return "API administrator"
+    if not cleaned or cleaned.lower() in MACHINE_TITLES:
+        return login[:1].upper() + login[1:] if login else "Unassigned"
+    return cleaned[:255]
+
+
+def person_name(user: UserRecord) -> str:
+    return stored_person_name(user.forgejo_login or "", user.display_name or "")
+
 
 def user_out(user: UserRecord) -> dict[str, Any]:
     return {
         "id": user.id,
         "forgejo_user_id": user.forgejo_user_id,
         "login": user.forgejo_login,
-        "display_name": user.display_name or user.forgejo_login,
+        "display_name": person_name(user),
         "email": user.email,
         "avatar_url": user.avatar_url,
         "role": user.role,
@@ -126,9 +143,10 @@ def dashboard_user_out(user: UserRecord) -> dict[str, Any]:
     return {
         "id": user.id,
         "login": user.forgejo_login,
-        "display_name": user.display_name or user.forgejo_login,
+        "display_name": person_name(user),
         "role": user.role,
         "active": user.active,
+        "last_activity_at": iso(user.last_activity_at),
     }
 
 
@@ -375,10 +393,7 @@ async def upsert_forgejo_user(
     normalized_login = login.strip().lower()
     if normalized_login == "api-admin" or normalized_login.startswith("service:"):
         raise HTTPException(status_code=409, detail="Reserved dashboard identity")
-    if normalized_login not in settings.dashboard_members:
-        if allow_unlisted:
-            return None
-        raise HTTPException(status_code=403, detail="Forgejo account is not allowlisted for the dashboard")
+    listed = normalized_login in settings.dashboard_members
     forgejo_id = data.get("id")
     if type(forgejo_id) is not int or forgejo_id <= 0:
         return None
@@ -393,14 +408,20 @@ async def upsert_forgejo_user(
             id=str(uuid.uuid4()),
             forgejo_user_id=forgejo_id,
             forgejo_login=login,
-            role="admin" if normalized_login in settings.admin_logins else "member",
+            role="admin",
             active=True,
         )
         session.add(user)
-    elif user.role not in {"admin", "manager"}:
-        user.role = "member"
+    elif user.active and user.role != "service":
+        user.role = "admin"
+    elif user.role == "pending":
+        user.role = "admin"
+        user.active = True
     user.forgejo_login = login
-    user.display_name = str(data.get("full_name") or data.get("display_name") or login)[:255]
+    raw_name = str(data.get("full_name") or data.get("display_name") or "").strip()
+    stored = (user.display_name or "").strip()
+    if not stored or stored.lower() in MACHINE_TITLES:
+        user.display_name = stored_person_name(login, raw_name)
     user.email = str(data["email"])[:320] if data.get("email") else None
     user.avatar_url = str(data["avatar_url"])[:2048] if data.get("avatar_url") else None
     user.last_activity_at = utcnow()
@@ -424,11 +445,7 @@ async def validate_task_links(session: AsyncSession, values: dict[str, Any]) -> 
             linked = await session.get(model, value)
             if linked is None or (
                 field == "assignee_user_id"
-                and (
-                    not linked.active
-                    or linked.role == "service"
-                    or linked.forgejo_login.lower() not in settings.dashboard_members
-                )
+                and not has_dashboard_access(linked)
             ):
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown {label}")
 
@@ -497,9 +514,12 @@ async def forgejo_callback(
     user = await upsert_forgejo_user(session, user_response.json())
     if user is None:
         raise HTTPException(status_code=502, detail="Forgejo returned an invalid user")
-    if not user.active:
-        raise HTTPException(status_code=403, detail="Dashboard account is disabled")
-    user.last_login_at = utcnow()
+    if not user.active or user.role == "pending":
+        await session.commit()
+        response = RedirectResponse("/dashboard/?access=pending", status_code=303)
+        response.delete_cookie(OAUTH_STATE_COOKIE)
+        response.delete_cookie(SESSION_COOKIE)
+        return response
     await session.flush()
     await record_activity(
         session,
@@ -612,18 +632,20 @@ async def dashboard_summary(
 @router.get("/v1/users")
 async def list_users(
     active: bool | None = None,
-    user: UserRecord = Depends(session_user),
+    actor: UserRecord = Depends(session_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
-    del user
     query = select(UserRecord).order_by(UserRecord.forgejo_login)
     if active is not None:
         query = query.where(UserRecord.active == active)
     users = (await session.execute(query)).scalars().all()
-    return [
-        dashboard_user_out(item) for item in users
-        if item.forgejo_login.lower() in settings.dashboard_members and item.role != "service"
-    ]
+    visible = []
+    for item in users:
+        login = (item.forgejo_login or "").lower()
+        if item.role == "service" or login == "api-admin" or login.startswith("service:"):
+            continue
+        visible.append(dashboard_user_out(item))
+    return visible
 
 
 @router.patch("/v1/users/{user_id}")
@@ -633,8 +655,8 @@ async def update_user_role(
     actor: UserRecord = Depends(require_session_csrf),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    if actor.role != "admin":
-        raise HTTPException(status_code=403, detail="Only administrators can manage users")
+    if actor.role not in {"admin", "manager", "member"}:
+        raise HTTPException(status_code=403, detail="Board access is required to change status")
     target = await session.get(UserRecord, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -644,11 +666,40 @@ async def update_user_role(
         raise HTTPException(status_code=409, detail="Administrators cannot remove their own access")
     target.role = body.role
     target.active = body.active
+    if body.display_name is not None:
+        target.display_name = stored_person_name(target.forgejo_login, body.display_name)
     await session.commit()
     await live_broker.publish("user", user_out(target))
     return user_out(target)
 
 
+@router.delete("/v1/users/{user_id}", status_code=204)
+async def delete_dashboard_user(
+    user_id: str,
+    actor: UserRecord = Depends(require_session_csrf),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    if actor.role not in {"admin", "manager", "member"}:
+        raise HTTPException(status_code=403, detail="Board access is required to delete a person")
+    target = await session.get(UserRecord, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.role == "service" or target.forgejo_login.lower().startswith("service:"):
+        raise HTTPException(status_code=409, detail="Service accounts cannot be deleted here")
+    if target.id == actor.id:
+        raise HTTPException(status_code=409, detail="You cannot delete your own account")
+    keeper = {"keeper": actor.id, "uid": target.id}
+    await session.execute(update(TaskRecord).where(TaskRecord.created_by == target.id).values(created_by=actor.id))
+    await session.execute(update(TaskAuditRecord).where(TaskAuditRecord.actor_user_id == target.id).values(actor_user_id=actor.id))
+    for statement in (
+        "UPDATE node_credentials SET created_by = :keeper WHERE created_by = :uid",
+        "UPDATE activity_estimate_reviews SET reviewed_by = :keeper WHERE reviewed_by = :uid",
+    ):
+        await session.execute(text(statement), keeper)
+    await session.delete(target)
+    await session.commit()
+    await live_broker.publish("user", {"id": target.id, "deleted": True})
+    return Response(status_code=204)
 @router.get("/v1/workers")
 async def list_workers(
     request: Request,
@@ -678,6 +729,86 @@ async def list_workers(
     return output
 
 
+def safe_run_label(value: Any, allowed: set[str]) -> str | None:
+    if not isinstance(value, str) or value not in allowed:
+        return None
+    return value
+
+
+def safe_script_name(value: Any) -> str | None:
+    if (
+        not isinstance(value, str)
+        or len(value) > 128
+        or not value.endswith(".py")
+        or "/" in value
+        or "\\" in value
+        or not value[:-3].replace("-", "").replace("_", "").isalnum()
+    ):
+        return None
+    return value
+
+
+def ledger_state(metadata: dict[str, Any]) -> dict[str, str | None]:
+    ledger = metadata.get("ledger") if isinstance(metadata.get("ledger"), dict) else {}
+    kind = ledger.get("kind")
+    bounce = ledger.get("bounce")
+    bounce_to = ledger.get("bounce_to")
+    result_summary = ledger.get("result_summary")
+    return {
+        "ledger": kind if kind in {"mission", "run"} else "run",
+        "bounce": bounce if isinstance(bounce, str) and len(bounce) <= 200 and bounce.isprintable() else None,
+        "bounce_to": bounce_to if bounce_to in {"omp", "none"} else None,
+        "result_summary": (
+            result_summary
+            if isinstance(result_summary, str) and len(result_summary) <= 200 and result_summary.isprintable()
+            else None
+        ),
+    }
+
+
+def run_phase(status: str, metadata: dict[str, Any]) -> str:
+    if metadata.get("operation") == "chat" and status == "completed":
+        return "Luna answered through OMP"
+    ledger = ledger_state(metadata)
+    if ledger["bounce_to"] == "omp" or status == "bounced":
+        return "Bounced to OMP"
+    if metadata.get("operation") == "mission" and status == "queued":
+        return "Orchestrator handed the sized crew to the worker computers"
+    if metadata.get("operation") == "mission" and status == "running":
+        return "Worker OMP is running the ephemeral image"
+    if metadata.get("operation") == "mission" and status == "completed":
+        return "Worker returned the revised result. No second review."
+    if status == "planning":
+        return "Planner is checking the request"
+    if status == "coding":
+        return "Coder is writing the script"
+    if status == "review":
+        return "Reviewer is checking the script"
+    if status == "accepted":
+        return "Accepted by the orchestrator. The crew is starting."
+    result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
+    origin = result.get("source") if isinstance(result, dict) else None
+    if status == "queued":
+        return "Waiting for a worker"
+    if status == "running":
+        return "Worker is writing and running the script"
+    if status == "completed" and origin == "model":
+        return "Finished: model wrote the script, then the worker ran it"
+    if status == "completed" and origin == "crew":
+        return "Reviewer accepted the script. The crew has been removed."
+    if status == "completed" and origin == "provided":
+        return "Finished: worker ran the supplied script"
+    if status == "completed":
+        return "Finished"
+    if status == "failed":
+        return "Stopped after a worker failure. Raw output is withheld."
+    if status == "cancel_requested":
+        return "Cancellation requested"
+    if status == "cancelled":
+        return "Cancelled"
+    return "Unknown"
+
+
 @router.get("/v1/dashboard/runs")
 async def dashboard_runs(
     limit: int = Query(default=100, ge=1, le=200),
@@ -688,7 +819,7 @@ async def dashboard_runs(
     records = (
         await session.execute(select(RunRecord).order_by(desc(RunRecord.created_at)).limit(limit))
     ).scalars().all()
-    statuses = {"queued", "running", "completed", "failed", "cancel_requested", "cancelled"}
+    statuses = {"queued", "running", "completed", "failed", "cancel_requested", "cancelled", "accepted", "bounced", "planning", "coding", "review"}
     output: list[dict[str, Any]] = []
     for record in records:
         metadata = record.run_metadata or {}
@@ -726,19 +857,36 @@ async def dashboard_runs(
         if run_status == "failed":
             suffix = f" (result code {result_code})" if result_code is not None else ""
             error_summary = f"Worker reported a failure{suffix}; raw diagnostics are withheld."
+        chatter = metadata.get("chatter") if isinstance(metadata.get("chatter"), list) else []
+        safe_chatter = [
+            line.strip()[:180]
+            for line in chatter
+            if isinstance(line, str) and line.strip() and "sk-" not in line and "api_key" not in line.casefold()
+        ][:12]
         output.append({
             "id": record.id,
             "request_summary": (
-                f"Project: {project_name}"
+                f"Chat: {project_name}"
+                if metadata.get("operation") == "chat" and project_name
+                else f"Project: {project_name}"
                 if project_name
                 else "Automated repository work request"
             ),
             "worker_role": role,
+            "operation": safe_run_label(metadata.get("operation"), {"create-python-script", "mission", "chat"}),
+            "source": safe_run_label(metadata.get("source"), {"open-webui", "api"}) or "unknown",
+            "script_name": safe_script_name(metadata.get("script_name")),
+            "ledger": ledger_state(metadata)["ledger"],
+            "bounce": ledger_state(metadata)["bounce"],
+            "result_summary": ledger_state(metadata)["result_summary"],
+            "chatter": safe_chatter,
+            "phase": run_phase(run_status, metadata),
             "status": run_status,
             "worker_id": worker_id,
             "result_code": result_code,
             "error_summary": error_summary,
             "created_at": iso(record.created_at),
+            "started_at": iso(getattr(record, "started_at", None)),
             "updated_at": iso(record.updated_at),
         })
     return output

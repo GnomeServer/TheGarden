@@ -24,6 +24,11 @@ SESSION_COOKIE = "dark_factory_session"
 OAUTH_STATE_COOKIE = "dark_factory_oauth_state"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 bearer = HTTPBearer(auto_error=False)
+GRANTED_ROLES = frozenset({"viewer", "member", "manager", "admin"})
+
+
+def has_dashboard_access(user: UserRecord | None) -> bool:
+    return bool(user and user.active and user.role in GRANTED_ROLES)
 
 
 def _encode(payload: dict[str, Any]) -> str:
@@ -75,13 +80,18 @@ async def _api_admin(session: AsyncSession) -> UserRecord:
             id=str(uuid.uuid4()),
             forgejo_login="api-admin",
             display_name="API administrator",
-            role="admin",
+            role="service",
             active=True,
             last_login_at=datetime.now(timezone.utc),
         )
         session.add(user)
         await session.commit()
         await session.refresh(user)
+        return user
+    if user.role != "service" or user.display_name != "API administrator":
+        user.role = "service"
+        user.display_name = "API administrator"
+        await session.commit()
     return user
 
 
@@ -117,12 +127,7 @@ async def session_user(
             detail="Forgejo dashboard session required",
         )
     user = await session.get(UserRecord, payload["uid"])
-    if (
-        user is None
-        or not user.active
-        or user.role == "service"
-        or user.forgejo_login.lower() not in settings.dashboard_members
-    ):
+    if not has_dashboard_access(user):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session is no longer valid")
     request.state.auth_method = "session"
     request.state.csrf = payload.get("csrf")
@@ -190,8 +195,11 @@ async def require_run_submission(
 ) -> UserRecord:
     if getattr(request.state, "auth_method", "") not in {"open-webui", "bearer"}:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Machine API token required")
-    if getattr(request.state, "auth_method", "") != "open-webui" and actor.role != "admin":
-        raise HTTPException(status_code=403, detail="Run submission is not permitted")
+    if getattr(request.state, "auth_method", "") == "open-webui":
+        return actor
+    if actor.role in {"admin", "service"}:
+        return actor
+    raise HTTPException(status_code=403, detail="Run submission is not permitted")
     return actor
 
 

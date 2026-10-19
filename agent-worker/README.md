@@ -1,8 +1,10 @@
 # Agent worker
 
 `worker.py` is a long-running Agent Manager worker. It consumes
-`agent.runs.created` from NATS JetStream, publishes `agent.runs.started`,
-then publishes one `agent.runs.completed` event. It calls the configured
+`agent.runs.created` from NATS JetStream, publishes `agent.runs.status` (and the
+same payload on `agent.runs.started`), then publishes one `agent.runs.completed`
+event. It also publishes `agent.workers.heartbeat` and answers
+`agent.workers.health.<role>`. It calls the configured
 OpenAI-compatible gateway only when `metadata.script` is absent. The workspace
 is `AGENT_WORKSPACE/<project-slug>/` when `metadata.project_name` is set, and
 `AGENT_WORKSPACE/<run-id>/` otherwise.
@@ -285,8 +287,8 @@ For a deterministic test, provide a script string:
 ```
 
 The Manager stores the run and publishes `agent.runs.created`. It consumes
-`agent.runs.started` (status `running`, `metadata.worker`) and
-`agent.runs.completed` (`metadata.result`).
+`agent.runs.status` (`status: running`) and `agent.runs.completed`
+(`metadata.result`).
 
 ## Troubleshooting
 

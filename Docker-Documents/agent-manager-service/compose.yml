@@ -90,7 +90,7 @@ services:
       DASHBOARD_PUBLIC_URL: ${DASHBOARD_PUBLIC_URL:-https://infra-lab-services.tail494f6d.ts.net}
       DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
       DASHBOARD_SESSION_SECURE: ${DASHBOARD_SESSION_SECURE:-true}
-      DASHBOARD_MEMBERS: ${DASHBOARD_MEMBERS:-donatello,raphael,naruto,inkii,bgurrol4}
+      DASHBOARD_MEMBERS: ${DASHBOARD_MEMBERS:-donatello,raphael,naruto,inkii,gnomeserver,michelangelo,bgurrol4}
       DASHBOARD_ADMINS: ${DASHBOARD_ADMINS:-}
       DASHBOARD_IDLE_WINDOW_SECONDS: ${DASHBOARD_IDLE_WINDOW_SECONDS:-120}
       SSH_UNCLOSED_SESSION_CAP_SECONDS: ${SSH_UNCLOSED_SESSION_CAP_SECONDS:-1800}
@@ -104,7 +104,14 @@ services:
       NOTIFICATION_SCAN_SECONDS: ${NOTIFICATION_SCAN_SECONDS:-60}
       MODEL_BASE_URL: ${MODEL_BASE_URL:-http://litellm:4000/v1}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-gpt-5.6-luna}
+      REASONING_EFFORT: ${REASONING_EFFORT:-medium}
+      CREW_RUNTIME: ${CREW_RUNTIME:-auto}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    group_add:
+      - "986"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${AGENT_MANAGER_BIND_ADDRESS:-127.0.0.1}:${AGENT_MANAGER_PORT:-8090}:8000"
     expose:

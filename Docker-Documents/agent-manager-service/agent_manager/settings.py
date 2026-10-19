@@ -41,7 +41,7 @@ class Settings(BaseSettings):
         default="", validation_alias="FORGEJO_OAUTH_CLIENT_SECRET"
     )
     dashboard_members_csv: str = Field(
-        default="donatello,raphael,naruto,inkii,bgurrol4",
+        default="donatello,raphael,naruto,inkii,gnomeserver,michelangelo,bgurrol4",
         validation_alias="DASHBOARD_MEMBERS",
     )
     bootstrap_admins: str = Field(default="", validation_alias="DASHBOARD_ADMINS")
@@ -81,8 +81,11 @@ class Settings(BaseSettings):
         default="http://litellm:4000/v1", validation_alias="MODEL_BASE_URL"
     )
     model_api_key: str = Field(default="", validation_alias="MODEL_API_KEY")
+    model_name: str = Field(default="gpt-5.6-luna", validation_alias="MODEL_NAME")
+    reasoning_effort: str = Field(default="medium", validation_alias="REASONING_EFFORT")
+    crew_runtime: str = Field(default="auto", validation_alias="CREW_RUNTIME")
+    crew_image: str = Field(default="python:3.12-slim", validation_alias="CREW_IMAGE")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
-
     @model_validator(mode="after")
     def separate_service_credentials(self) -> "Settings":
         if self.openwebui_token and self.openwebui_token == self.api_token:

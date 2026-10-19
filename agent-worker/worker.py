@@ -5,13 +5,15 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import socket
-import ssl
 import subprocess
 import sys
 import unicodedata
 import urllib.error
 import urllib.request
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +51,39 @@ MODEL_TLS_INSECURE = os.getenv("MODEL_TLS_INSECURE", "0").lower() in {
     "true",
     "yes",
 }
+WORKER_VERSION = "0.3.0"
+HEARTBEAT_SECONDS = 15
+_presence = {"status": "idle", "run_id": None}
+
+
+def heartbeat_payload() -> dict[str, Any]:
+    status = _presence["status"] if _presence["status"] in {"idle", "busy", "degraded"} else "idle"
+    return {
+        "event": "worker.heartbeat",
+        "event_id": f"heartbeat:{WORKER_ID}:{uuid.uuid4()}",
+        "worker_id": WORKER_ID,
+        "worker_role": WORKER_ROLE,
+        "hostname": socket.gethostname(),
+        "status": status,
+        "current_run_id": _presence["run_id"],
+        "version": WORKER_VERSION,
+        "capabilities": ["create-python-script"] if ALLOW_GENERATED_CODE else [],
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def running_status_event(run_id: str) -> dict[str, Any]:
+    return {
+        "event": "run.started",
+        "run_id": run_id,
+        "worker_id": WORKER_ID,
+        "worker_role": WORKER_ROLE,
+        "hostname": socket.gethostname(),
+        "status": "running",
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "event_id": f"run-status:{run_id}:running",
+    }
+
 
 SYSTEM_PROMPT = """You generate one complete Python 3 source file from a user request.
 Return only the source code, without Markdown fences or commentary.
@@ -222,6 +257,60 @@ def write_script_without_overwrite(
             suffix += 1
 
 
+async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    """Worker OMP starts one ephemeral image, then that image exits. No second review."""
+    goal = event.get("goal") if isinstance(event.get("goal"), str) else ""
+    crew = metadata.get("crew") if isinstance(metadata.get("crew"), dict) else {}
+    nodes = crew.get("size") if isinstance(crew.get("size"), dict) else {}
+    node_text = (
+        f"{nodes.get('size', 'small')}: {nodes.get('planners', 1)} planner, "
+        f"{nodes.get('coders', 1)} coder(s), {nodes.get('reviewers', 1)} reviewer(s)"
+    )
+    script_path = Path(__file__).resolve().parents[1] / "Docker-Documents/agent-manager-service/agent_manager/worker_omp.py"
+    if not script_path.exists():
+        return {
+            "status": "failed",
+            "summary": "Worker OMP could not find the ephemeral image program.",
+        }
+    env = os.environ.copy()
+    env["GOAL"] = goal
+    env["CREW_NODES"] = node_text
+    command = [sys.executable, str(script_path)]
+    host = "process"
+    if shutil.which("docker"):
+        command = [
+            "docker", "run", "--rm",
+            "-e", f"GOAL={goal}",
+            "-e", f"CREW_NODES={node_text}",
+            "-e", f"MODEL_BASE_URL={env.get('MODEL_BASE_URL', '')}",
+            "-e", f"MODEL_API_KEY={env.get('MODEL_API_KEY', '')}",
+            "-e", f"MODEL_NAME={env.get('MODEL_NAME', 'gpt-5.6-luna')}",
+            "-e", f"REASONING_EFFORT={env.get('REASONING_EFFORT', 'medium')}",
+            "-v", f"{script_path}:/worker_omp.py:ro",
+            "python:3.12-slim", "python", "/worker_omp.py",
+        ]
+        host = "docker"
+    completed = await asyncio.to_thread(
+        subprocess.run,
+        command,
+        env=None if host == "docker" else env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("{")), "")
+    if not line:
+        return {
+            "status": "failed",
+            "summary": f"Worker image on {host} exited without a result.",
+            "error": completed.stderr[:500],
+        }
+    payload = json.loads(line)
+    payload["summary"] = f"{payload.get('summary', 'Worker finished.')} Image host: {host}. Nodes: {node_text}."
+    return payload
+
+
 async def process_message(js: Any, message: Any) -> None:
     event = json.loads(message.data.decode("utf-8"))
     metadata = event.get("metadata") or {}
@@ -255,88 +344,87 @@ async def process_message(js: Any, message: Any) -> None:
     }
 
     try:
-        await js.publish(
-            "agent.runs.started",
-            json.dumps(
-                {
-                    "event": "run.started",
-                    "run_id": run_id,
-                    "worker_id": WORKER_ID,
-                    "worker_role": WORKER_ROLE,
-                    "hostname": socket.gethostname(),
-                }
-            ).encode("utf-8"),
-        )
+        _presence["status"] = "busy"
+        _presence["run_id"] = run_id
+        status_payload = running_status_event(run_id)
+        encoded_status = json.dumps(status_payload).encode("utf-8")
+        await js.publish("agent.runs.status", encoded_status)
+        await js.publish("agent.runs.started", encoded_status)
 
-        if metadata.get("operation") != "create-python-script":
+        if metadata.get("operation") == "mission":
+            result.update(await run_mission_image(event, metadata))
+        elif metadata.get("operation") != "create-python-script":
             raise RuntimeError("unsupported worker operation")
-
-        goal = event.get("goal")
-        if not isinstance(goal, str) or not goal.strip():
-            raise RuntimeError("event is missing a non-empty goal")
-        if not ALLOW_GENERATED_CODE:
-            raise RuntimeError(
-                "refusing to execute generated code; set ALLOW_GENERATED_CODE=1 "
-                "only on a disposable/test worker"
+        else:
+            goal = event.get("goal")
+        if metadata.get("operation") != "mission":
+            goal = event.get("goal")
+            if not isinstance(goal, str) or not goal.strip():
+                raise RuntimeError("event is missing a non-empty goal")
+            if not ALLOW_GENERATED_CODE:
+                raise RuntimeError(
+                    "refusing to execute generated code; set ALLOW_GENERATED_CODE=1 "
+                    "only on a disposable/test worker"
+                )
+            project_component = project_directory_name(metadata.get("project_name"))
+            script_filename = python_script_filename(metadata.get("script_name"))
+            execution_dir = (
+                WORKSPACE / project_component
+                if project_component
+                else WORKSPACE / run_id
             )
-
-        project_component = project_directory_name(metadata.get("project_name"))
-        script_filename = python_script_filename(metadata.get("script_name"))
-        execution_dir = (
-            WORKSPACE / project_component
-            if project_component
-            else WORKSPACE / run_id
-        )
-        execution_dir.mkdir(
-            parents=True,
-            exist_ok=project_component is not None,
-        )
-        source, source_origin = await generate_source(goal, metadata)
-        compile(source, str(execution_dir / script_filename), "exec")
-        script_path = write_script_without_overwrite(
-            execution_dir, script_filename, source
-        )
-        result["script"] = str(script_path)
-
-        try:
-            completed = await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, str(script_path)],
-                cwd=execution_dir,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=SCRIPT_TIMEOUT,
-                check=False,
+            execution_dir.mkdir(
+                parents=True,
+                exist_ok=project_component is not None,
             )
-            result.update(
-                {
-                    "status": "completed" if completed.returncode == 0 else "failed",
-                    "returncode": completed.returncode,
-                    "stdout": completed.stdout[:MAX_OUTPUT_CHARS],
-                    "stderr": completed.stderr[:MAX_OUTPUT_CHARS],
-                }
+            source, source_origin = await generate_source(goal, metadata)
+            compile(source, str(execution_dir / script_filename), "exec")
+            script_path = write_script_without_overwrite(
+                execution_dir, script_filename, source
             )
-        except subprocess.TimeoutExpired as exc:
-            result.update(
-                {
-                    "status": "failed",
-                    "returncode": None,
-                    "error": f"script exceeded {SCRIPT_TIMEOUT:g} seconds",
-                    "stdout": str(exc.stdout or "")[:MAX_OUTPUT_CHARS],
-                    "stderr": str(exc.stderr or "")[:MAX_OUTPUT_CHARS],
-                }
-            )
-
-        result["source"] = source_origin
+            result["script"] = str(script_path)
+            try:
+                completed = await asyncio.to_thread(
+                    subprocess.run,
+                    [sys.executable, str(script_path)],
+                    cwd=execution_dir,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=SCRIPT_TIMEOUT,
+                    check=False,
+                )
+                result.update(
+                    {
+                        "status": "completed" if completed.returncode == 0 else "failed",
+                        "returncode": completed.returncode,
+                        "stdout": completed.stdout[:MAX_OUTPUT_CHARS],
+                        "stderr": completed.stderr[:MAX_OUTPUT_CHARS],
+                    }
+                )
+            except subprocess.TimeoutExpired as exc:
+                result.update(
+                    {
+                        "status": "failed",
+                        "returncode": None,
+                        "error": f"script exceeded {SCRIPT_TIMEOUT:g} seconds",
+                        "stdout": str(exc.stdout or "")[:MAX_OUTPUT_CHARS],
+                        "stderr": str(exc.stderr or "")[:MAX_OUTPUT_CHARS],
+                    }
+                )
+            result["source"] = source_origin
     except Exception as exc:
         # Even model, validation, workspace, and compile failures become a
         # completion event so the manager can mark the database run failed.
         result["error"] = str(exc)[:2000]
 
-    await js.publish("agent.runs.completed", json.dumps(result).encode("utf-8"))
-    print(json.dumps(result, indent=2), flush=True)
-    await message.ack()
+    try:
+        await js.publish("agent.runs.completed", json.dumps(result).encode("utf-8"))
+        print(json.dumps(result, indent=2), flush=True)
+        await message.ack()
+    finally:
+        _presence["status"] = "idle"
+        _presence["run_id"] = None
 
 
 async def main() -> None:
@@ -346,6 +434,33 @@ async def main() -> None:
     )
     js = nc.jetstream()
 
+    async def reply_health(message: Any) -> None:
+        try:
+            body = json.loads(message.data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            body = {}
+        target = body.get("worker_id") if isinstance(body, dict) else None
+        if target and target != WORKER_ID:
+            return
+        if getattr(message, "reply", None):
+            await nc.publish(
+                message.reply,
+                json.dumps({"worker_id": WORKER_ID, "worker_role": WORKER_ROLE}).encode("utf-8"),
+            )
+
+    async def heartbeat_loop() -> None:
+        while True:
+            try:
+                await js.publish(
+                    "agent.workers.heartbeat",
+                    json.dumps(heartbeat_payload()).encode("utf-8"),
+                )
+            except Exception as exc:
+                print(f"heartbeat failed: {type(exc).__name__}", flush=True)
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+
+    await nc.subscribe(f"agent.workers.health.{WORKER_ROLE}", cb=reply_health)
+    heartbeat = asyncio.create_task(heartbeat_loop())
     subscription = await js.pull_subscribe(
         "agent.runs.created",
         stream="AGENT_RUNS",
@@ -353,9 +468,6 @@ async def main() -> None:
         config=ConsumerConfig(
             ack_policy=AckPolicy.EXPLICIT,
             ack_wait=900,
-            # A newly-created durable consumer must replay tasks that were
-            # published before the worker connected. Existing consumer state
-            # is preserved by JetStream across worker restarts.
             deliver_policy=DeliverPolicy.ALL,
         ),
     )
@@ -368,6 +480,7 @@ async def main() -> None:
                 continue
             await process_message(js, messages[0])
     finally:
+        heartbeat.cancel()
         await subscription.unsubscribe()
         await nc.close()
 

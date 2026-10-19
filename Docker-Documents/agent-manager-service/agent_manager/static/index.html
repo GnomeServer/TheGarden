@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" id="theme-color" content="#f4f5f1">
+  <meta name="theme-color" id="theme-color" content="#12151c">
   <title>TheGarden — Team dashboard</title>
-  <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.3.0">
-  <script src="/dashboard/static/app.js?v=1.3.0" defer></script>
+  <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.5.5">
+  <script src="/dashboard/static/app.js?v=1.5.8" defer></script>
 </head>
 <body>
   <section id="login" class="login-shell hidden" aria-labelledby="login-title">
@@ -28,13 +28,15 @@
     </header>
 
     <nav class="area-nav" aria-label="Dashboard areas">
-      <button type="button" class="area-tab active" data-view="work" aria-current="page"><span class="nav-index">01</span>TODO board</button>
-      <button type="button" class="area-tab" data-view="operations"><span class="nav-index">02</span>Agent tasks</button>
+      <button type="button" class="area-tab active" data-view="work" aria-current="page"><span class="channel-glyph" aria-hidden="true">W</span><span>Work<small>Tasks and time</small></span></button>
+      <button type="button" class="area-tab" data-view="operations"><span class="channel-glyph" aria-hidden="true">A</span><span>Agents<small>Live requests</small></span></button>
     </nav>
+
 
     <main>
       <section id="view-work" class="view active" aria-labelledby="work-title">
         <header class="page-heading"><div><p class="eyebrow">HUMAN WORK</p><h1 id="work-title">TODO board</h1><p class="muted">Editable tasks and self-reported time for Donatello, Raphael, Naruto, Inkii, and the rest of the team.</p></div><button id="new-task" class="button primary" type="button">＋ New task</button></header>
+        <div id="people-channels" class="team-widget" aria-label="People" aria-live="polite"><p class="loading">Loading people…</p></div>
         <section class="work-summary" aria-label="Team work summary"><div id="summary" class="metric-grid" aria-live="polite"><p class="loading">Loading team summary…</p></div></section>
         <section class="content-section" aria-labelledby="tasks-title">
           <div class="section-heading"><div><p class="eyebrow">SHARED BOARD</p><h2 id="tasks-title">Problems and tasks</h2></div><div class="filters"><label class="visually-hidden" for="task-status-filter">Filter tasks by status</label><select id="task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select></div></div>
@@ -44,7 +46,7 @@
         </section>
         <section class="content-section" aria-labelledby="reported-time-title">
           <div class="section-heading"><div><p class="eyebrow">OPTIONAL SELF-REPORT</p><h2 id="reported-time-title">Reported time</h2></div></div>
-          <p class="notice"><strong>Manual time entries are separate from activity estimates.</strong> Start an optional timer and submit the reported duration for review. Event-derived estimates are not included in manual time totals.</p>
+          <p class="section-note">Optional timer, separate from activity estimates. Rejected entries can be resubmitted or deleted.</p>
           <article class="panel timer-panel">
             <div id="timer-current" class="timer-current" aria-live="polite"><p class="loading">Loading reported time…</p></div>
             <form id="timer-form" class="timer-form">
@@ -63,7 +65,8 @@
       </section>
 
       <section id="view-operations" class="view" aria-labelledby="operations-title">
-        <header class="page-heading"><div><p class="eyebrow">AGENT EXECUTION</p><h1 id="operations-title">Agent task board</h1><p class="muted">Worker assignments, runs, and links into Grafana, Forgejo, and NATS.</p></div></header>
+        <header class="page-heading"><div><p class="eyebrow">AGENT EXECUTION</p><h1 id="operations-title">Agent channels</h1><p class="muted">Open WebUI requests, the step each worker is on, and who is currently active.</p></div></header>
+        <div id="worker-channels" class="channel-row" aria-label="Agents" aria-live="polite"><p class="loading">Loading agents…</p></div>
         <section class="content-section" aria-labelledby="agent-assignments-title">
           <div class="section-heading"><div><p class="eyebrow">WORKER ASSIGNMENTS</p><h2 id="agent-assignments-title">Agent tasks</h2></div><div class="filters"><label class="visually-hidden" for="agent-task-status-filter">Filter agent tasks by status</label><select id="agent-task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select></div></div>
           <p class="section-note">Only tasks with a worker assignment appear here.</p>
@@ -79,8 +82,8 @@
           <div id="workers" class="worker-grid" aria-live="polite"><p class="loading">Loading workers…</p></div>
         </section>
         <section class="content-section" aria-labelledby="runs-title">
-          <div class="section-heading"><div><p class="eyebrow">RUN HISTORY</p><h2 id="runs-title">Agent runs</h2></div><span class="safe-label">Sanitized summaries only</span></div>
-          <p class="section-note">Request bodies and credentials are never shown here. A queued run was accepted; rejected or unavailable requests did not enter the queue.</p>
+          <div class="section-heading"><div><p class="eyebrow">REQUESTS</p><h2 id="runs-title">What agents are doing</h2></div><span class="safe-label">No prompts or raw output</span></div>
+          <p class="section-note">Each row is a request and its current step. Open WebUI jobs are labeled. Goals, scripts, and command output stay hidden.</p>
           <div id="runs" class="table-wrap" aria-live="polite"><p class="loading">Loading runs…</p></div>
         </section>
         <section class="content-section" aria-labelledby="activity-title">
@@ -92,6 +95,9 @@
           <div class="section-heading"><div><p class="eyebrow">ACCESS EVIDENCE</p><h2 id="access-title">Access timeline</h2></div></div>
           <p class="section-note">Normalized access events only. Arbitrary event metadata and raw log details are not displayed.</p>
           <div id="access-events" class="table-wrap" aria-live="polite"><p class="loading">Loading access events…</p></div>
+        </section>
+        <section id="access-admin" class="content-section hidden" aria-labelledby="access-grant-title">
+          <div id="access-requests" class="hidden"></div>
         </section>
         <section id="identity-admin" class="content-section hidden" aria-labelledby="identity-title">
           <div class="section-heading"><div><p class="eyebrow">ADMIN ONLY</p><h2 id="identity-title">Linux identity mappings</h2></div></div>
