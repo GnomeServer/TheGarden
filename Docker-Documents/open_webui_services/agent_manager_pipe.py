@@ -1,4 +1,4 @@
-"""Open WebUI Pipe that submits work to Agent Manager and waits for its result."""
+"""Open WebUI Pipe that sends a chat turn to OMP and returns its reply."""
 
 import asyncio
 import inspect
@@ -23,7 +23,7 @@ class Pipe:
         )
         FORGEJO_REPOSITORY: str = Field(
             default="",
-            description="Required repository identifier, for example owner/project.",
+            description="Repository identifier, for example owner/project. OMP asks if this is empty.",
         )
         BASE_REF: str = Field(default="main", description="Repository base ref.")
         WORKER_ROLE: str = Field(default="coder", description="Worker-pool role.")
@@ -38,7 +38,7 @@ class Pipe:
         self.name = "Agent Manager"
 
     def pipes(self) -> list[dict[str, str]]:
-        return [{"id": "worker", "name": "Worker (queued task)"}]
+        return [{"id": "worker", "name": "OMP"}]
 
     @staticmethod
     def _latest_user_message(body: dict[str, Any]) -> str:
@@ -66,7 +66,6 @@ class Pipe:
                 return text
 
         raise ValueError("Could not find a text prompt in the latest user message.")
-
 
     @staticmethod
     def _extract_run_directives(
@@ -123,45 +122,6 @@ class Pipe:
         return f"{stem[:125].rstrip('_')}.py"
 
     @staticmethod
-    def _validate_project_name(value: Any) -> str:
-        if not isinstance(value, str):
-            raise ValueError("Project name is required.")
-        project_name = value.strip()
-        if (
-            not project_name
-            or len(project_name) > 120
-            or any(not character.isprintable() for character in project_name)
-        ):
-            raise ValueError("Project name must be 1–120 printable characters.")
-        return project_name
-
-    @classmethod
-    async def _ask_project_name(cls, event_call: Any) -> str:
-        if not callable(event_call):
-            raise ValueError(
-                "Project name is required. Start the prompt with "
-                "`Project: <name>` when submitting through an API client."
-            )
-        try:
-            response = await event_call(
-                {
-                    "type": "input",
-                    "data": {
-                        "title": "Name this project",
-                        "message": "Choose a project name for the generated script.",
-                        "placeholder": "e.g. quarterly-audit",
-                    },
-                }
-            )
-        except Exception as exc:
-            raise ValueError("Open WebUI could not collect a project name.") from exc
-        if isinstance(response, dict):
-            if response.get("error"):
-                raise ValueError("Project name entry was cancelled or unavailable.")
-            response = response.get("value")
-        return cls._validate_project_name(response)
-
-    @staticmethod
     async def _emit_status(
         emitter: Any, description: str, *, done: bool = False
     ) -> None:
@@ -177,8 +137,94 @@ class Pipe:
             if inspect.isawaitable(result):
                 await result
         except Exception:
-            # Status rendering is optional; it must not prevent the run/result flow.
             pass
+
+    @staticmethod
+    def _message_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            return "\n".join(
+                block.get("text", "").strip()
+                for block in content
+                if isinstance(block, dict)
+                and isinstance(block.get("text"), str)
+                and block.get("text", "").strip()
+            ).strip()
+        return ""
+
+    @classmethod
+    def _history(cls, body: dict[str, Any]) -> list[tuple[str, str]]:
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            return []
+        history: list[tuple[str, str]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            text = cls._message_text(message.get("content"))
+            if text:
+                history.append((role, text))
+        return history
+
+    @staticmethod
+    def _project_answer(text: str) -> tuple[str | None, str | None]:
+        stripped = text.strip()
+        named = re.match(
+            r"(?is)^(.+?)\s+is the project(?:\s+name)?\b(?:\s+and\s+)?(.*)$",
+            stripped,
+        )
+        if named:
+            extra = re.sub(r"(?i)^i want you to\s+", "", named.group(2).strip()).strip(" .")
+            return named.group(1).strip(" .")[:120] or None, extra or None
+        named = re.match(
+            r"(?is)^(?:the\s+)?project(?:\s+name)?\s+is\s+(.+?)(?:\s+and\s+(.*))?$",
+            stripped,
+        )
+        if named:
+            extra = re.sub(r"(?i)^i want you to\s+", "", (named.group(2) or "").strip()).strip(" .")
+            return named.group(1).strip(" .")[:120] or None, extra or None
+        if len(stripped) <= 120 and "\n" not in stripped:
+            return stripped, None
+        return None, stripped
+
+    @classmethod
+    def _resolve_turn(
+        cls, body: dict[str, Any], repository: str
+    ) -> tuple[str, str | None, str]:
+        history = cls._history(body)
+        if not history or history[-1][0] != "user":
+            raise ValueError("Open WebUI request did not include a user message.")
+        latest = history[-1][1]
+        previous_assistant = next(
+            (text for role, text in reversed(history[:-1]) if role == "assistant"),
+            "",
+        )
+        previous_user = next(
+            (text for role, text in reversed(history[:-1]) if role == "user"),
+            "",
+        )
+        if "What project name should this mission use?" in previous_assistant:
+            project_name, extra_goal = cls._project_answer(latest)
+            prior_goal = previous_user
+            prior_project = None
+            if previous_user:
+                try:
+                    prior_goal, prior_project, _script = cls._extract_run_directives(previous_user)
+                except ValueError:
+                    prior_goal = previous_user
+            return extra_goal or prior_goal or latest, project_name or prior_project, repository
+        if "Which Forgejo repository should this mission use?" in previous_assistant:
+            try:
+                goal, project_name, _script = cls._extract_run_directives(previous_user or latest)
+            except ValueError:
+                goal, project_name = previous_user or latest, None
+            return goal, project_name, latest.strip()
+        goal, project_name, _script = cls._extract_run_directives(latest)
+        return goal, project_name, repository
 
     @staticmethod
     def _error_detail(response: httpx.Response) -> str:
@@ -191,61 +237,6 @@ class Pipe:
         except (ValueError, TypeError):
             return response.text[:1000] or f"HTTP {response.status_code}"
 
-    @staticmethod
-    def _render_result(run: dict[str, Any]) -> str:
-        metadata = run.get("metadata") or {}
-        result = metadata.get("result") or {}
-        worker = metadata.get("worker") or {}
-        worker_id = result.get("worker_id") or worker.get("worker_id")
-        worker_text = f" on worker `{worker_id}`" if worker_id else ""
-
-        project_name = metadata.get("project_name")
-        project_line = (
-            [f"Project: {project_name}"]
-            if isinstance(project_name, str) and project_name
-            else []
-        )
-
-        if run.get("status") == "completed":
-            lines = [
-                f"**Worker run completed{worker_text}.**",
-                *project_line,
-            ]
-            stdout = result.get("stdout")
-            stderr = result.get("stderr")
-            if stdout:
-                lines.extend(["", "### Worker output", str(stdout).rstrip()])
-            else:
-                lines.extend(
-                    ["", "The worker completed successfully with no stdout output."]
-                )
-            if stderr:
-                lines.extend(["", "### Worker stderr", str(stderr).rstrip()])
-            if result.get("script"):
-                lines.extend(["", f"Generated script on worker: `{result['script']}`"])
-            return "\n".join(lines)
-
-        if run.get("status") == "cancelled":
-            return "\n".join(["**Worker run cancelled.**", *project_line])
-
-        detail = (
-            result.get("error")
-            or run.get("error")
-            or result.get("stderr")
-            or "Worker failed without details."
-        )
-        lines = [
-            f"**Worker run failed{worker_text}.**",
-            *project_line,
-            "",
-            str(detail).rstrip(),
-        ]
-        if result.get("stdout"):
-            lines.extend(
-                ["", "### Partial worker output", str(result["stdout"]).rstrip()]
-            )
-        return "\n".join(lines)
-
     async def pipe(
         self,
         body: dict[str, Any],
@@ -253,166 +244,99 @@ class Pipe:
         __event_emitter__: Any = None,
         __event_call__: Any = None,
     ) -> str:
-        del __user__  # Authentication to Agent Manager uses the server-side valve.
+        del __user__, __event_call__
         try:
-            message_text = self._latest_user_message(body)
-            goal, project_name, script_name = self._extract_run_directives(
-                message_text
+            goal, project_name, repository = self._resolve_turn(
+                body, self.valves.FORGEJO_REPOSITORY.strip()
             )
         except ValueError as exc:
-            return f"Could not submit the worker request: {exc}"
+            return f"Could not send the chat turn to OMP: {exc}"
 
         if len(goal) > self.valves.MAX_GOAL_CHARACTERS:
             return (
-                "Could not submit the worker request: the latest user message is "
+                "Could not send the chat turn to OMP: the latest user message is "
                 f"longer than {self.valves.MAX_GOAL_CHARACTERS} characters."
-            )
-        if not self.valves.FORGEJO_REPOSITORY.strip():
-            return (
-                "Could not submit the worker request: configure FORGEJO_REPOSITORY "
-                "in this Pipe's valves."
             )
 
         token = self.valves.AGENT_MANAGER_API_TOKEN.strip()
         if not token:
-            return (
-                "Could not submit the worker request: configure the Agent Manager "
-                "API token in this Pipe's valves."
-            )
+            return "Could not reach OMP: configure the Agent Manager API token in this Pipe's valves."
 
-        try:
-            project_name = (
-                self._validate_project_name(project_name)
-                if project_name
-                else await self._ask_project_name(__event_call__)
-            )
-        except ValueError as exc:
-            return f"Could not submit the worker request: {exc}"
-        script_name = script_name or self._suggest_script_name(goal)
-        base_url = self.valves.AGENT_MANAGER_URL.rstrip("/")
-        headers = {"Authorization": f"Bearer {token}"}
         request_body = {
             "goal": goal,
-            "forgejo_repository": self.valves.FORGEJO_REPOSITORY.strip(),
-            "base_ref": self.valves.BASE_REF,
-            "model": body.get("model"),
+            "forgejo_repository": repository,
             "project_name": project_name,
-            "script_name": script_name,
-            "metadata": {
-                "worker_role": self.valves.WORKER_ROLE,
-                "operation": "create-python-script",
-            },
+            "model": body.get("model"),
         }
-        timeout = httpx.Timeout(30.0, connect=10.0)
-        await self._emit_status(__event_emitter__, "Submitting request to Agent Manager…")
-
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        await self._emit_status(__event_emitter__, "Asking OMP…")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             try:
                 response = await client.post(
-                    f"{base_url}/v1/runs", headers=headers, json=request_body
+                    f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/turns",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=request_body,
                 )
                 response.raise_for_status()
-                run = response.json()
+                reply = response.json()
             except httpx.HTTPStatusError as exc:
                 return (
-                    "Agent Manager rejected the request "
+                    "OMP rejected the chat turn "
                     f"(HTTP {exc.response.status_code}): {self._error_detail(exc.response)}"
                 )
             except (httpx.RequestError, ValueError) as exc:
-                return f"Could not reach Agent Manager to submit the request: {exc}"
+                return f"Could not reach OMP: {exc}"
 
-            run_id = run.get("id")
-            if not isinstance(run_id, str) or not run_id:
-                return "Agent Manager accepted an unexpected response without a run ID."
-            run_metadata = run.get("metadata")
-            project = (
-                run_metadata.get("project_name")
-                if isinstance(run_metadata, dict)
-                else None
-            )
-            run_reference = (
-                f"project `{project}`"
-                if isinstance(project, str) and project
-                else f"run `{run_id}`"
-            )
+            if not isinstance(reply, dict):
+                return "OMP returned an unexpected response."
+            if reply.get("type") == "question":
+                text = reply.get("text")
+                return text if isinstance(text, str) and text.strip() else "OMP needs more information."
+            if reply.get("type") == "mission":
+                summary = reply.get("summary") if isinstance(reply.get("summary"), str) else "Mission recorded."
+                mission_id = reply.get("mission_id")
+                if isinstance(mission_id, str) and mission_id:
+                    followed = await self._follow_mission(client, mission_id, token, summary, project_name)
+                    await self._emit_status(__event_emitter__, followed, done=True)
+                    return followed
+                project = f" for `{project_name}`" if project_name else ""
+                await self._emit_status(__event_emitter__, summary, done=True)
+                return f"{summary}{project}."
+            return "OMP returned an unexpected response."
 
-            start_time = time.monotonic()
-            deadline = start_time + self.valves.RUN_TIMEOUT_SECONDS
-            last_status: str | None = None
-            last_status_emit = 0.0
-            await self._emit_status(
-                __event_emitter__, f"{run_reference} queued; waiting for a worker…"
-            )
-
-            while time.monotonic() < deadline:
-                try:
-                    response = await client.get(
-                        f"{base_url}/v1/runs/{run_id}", headers=headers
-                    )
-                    response.raise_for_status()
-                    run = response.json()
-                except httpx.RequestError:
-                    now = time.monotonic()
-                    if now - last_status_emit >= 15:
-                        await self._emit_status(
-                            __event_emitter__,
-                            f"{run_reference} is still active; retrying the status check…",
-                        )
-                        last_status_emit = now
-                    await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
-                    continue
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code >= 500:
-                        await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
-                        continue
-                    return (
-                        f"{run_reference} was submitted, but its status could not be read "
-                        f"(HTTP {exc.response.status_code}): {self._error_detail(exc.response)}"
-                    )
-                except ValueError:
-                    await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
-                    continue
-
-                state = run.get("status", "unknown")
-                now = time.monotonic()
-                if state != last_status:
-                    if state == "queued":
-                        description = f"{run_reference} is queued; waiting for a worker…"
-                    elif state == "running":
-                        worker = (run.get("metadata") or {}).get("worker") or {}
-                        worker_id = worker.get("worker_id")
-                        who = f" `{worker_id}`" if worker_id else ""
-                        description = f"Worker{who} is processing {run_reference}…"
-                    else:
-                        description = f"{run_reference} status: {state}."
-                    await self._emit_status(__event_emitter__, description)
-                    last_status = state
-                    last_status_emit = now
-
-                if state in {"completed", "failed", "cancelled"}:
-                    elapsed = int(now - start_time)
-                    await self._emit_status(
-                        __event_emitter__,
-                        f"Worker run {state} after {elapsed}s.",
-                        done=True,
-                    )
-                    return self._render_result(run)
-
-                if now - last_status_emit >= 20:
-                    await self._emit_status(
-                        __event_emitter__,
-                        f"{run_reference} is still {state} ({int(now - start_time)}s elapsed)…",
-                    )
-                    last_status_emit = now
+    async def _follow_mission(
+        self,
+        client: httpx.AsyncClient,
+        mission_id: str,
+        token: str,
+        summary: str,
+        project_name: str | None,
+    ) -> str:
+        deadline = time.monotonic() + min(self.valves.RUN_TIMEOUT_SECONDS, 180)
+        project = f" for `{project_name}`" if project_name else ""
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/missions/{mission_id}"
+        while time.monotonic() < deadline:
+            try:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                state = response.json()
+            except (httpx.HTTPError, ValueError):
                 await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
+                continue
+            if not isinstance(state, dict):
+                break
+            status = state.get("status")
+            if status == "bounced":
+                question = state.get("question") or state.get("summary") or summary
+                return question if isinstance(question, str) else summary
+            if status == "completed":
+                done = state.get("summary") if isinstance(state.get("summary"), str) else summary
+                script = state.get("script") if isinstance(state.get("script"), str) else ""
+                body = f"{done}{project}. Mission `{mission_id}`."
+                return f"{body}\n\n```python\n{script.rstrip()}\n```" if script.strip() else body
+            if status == "failed":
+                failed = state.get("summary") if isinstance(state.get("summary"), str) else "The crew stopped before finishing."
+                return f"{failed}{project}. Mission `{mission_id}`."
+            await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
+        return f"{summary}{project}. Mission `{mission_id}`. The crew is still working."
 
-        await self._emit_status(
-            __event_emitter__,
-            f"{run_reference} is still processing. The worker continues in the background.",
-            done=True,
-        )
-        return (
-            f"{run_reference} is still processing after "
-            f"{self.valves.RUN_TIMEOUT_SECONDS}s. The worker continues in the background; "
-            f"internal run ID: `{run_id}`."
-        )
