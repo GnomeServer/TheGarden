@@ -22,7 +22,9 @@ worker-scoped LiteLLM virtual keys. Workers trust Caddy's internal CA.
 - `LITELLM_MASTER_KEY` is for LiteLLM administration only.
 - `LUNA_BACKEND_API_KEY` is used by LiteLLM to call the configured inference
   backend.
-- `.luna-worker-api-key` is the single virtual key written by `create-luna-key.sh`. Ansible inventory expects separate `.worker-0N-api-key` files, which that script does not create.
+`create-luna-key.sh` defaults to one generic worker key. Set `KEY_ALIAS`,
+`WORKER_ID`, and `KEY_FILE` to create one `luna`-restricted key for each worker;
+Ansible inventory points `litellm_key_source` at those private files.
 
 None of these secret values belong in Git. The local `.env` and generated key
 file remain deployment-only files.

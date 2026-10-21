@@ -4,6 +4,8 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 ENV_FILE="${ENV_FILE:-.env}"
 KEY_FILE="${KEY_FILE:-.luna-worker-api-key}"
+KEY_ALIAS="${KEY_ALIAS:-luna-worker}"
+WORKER_ID="${WORKER_ID:-}"
 
 if [[ ! -r "$ENV_FILE" ]]; then
   printf 'Missing %s. Copy .env.example to .env first.\n' "$ENV_FILE" >&2
@@ -21,6 +23,15 @@ BASE_URL="${BASE_URL%/}"
 CURL_ARGS=(--fail-with-body --silent --show-error)
 if [[ "${LITELLM_INSECURE_TLS:-0}" == "1" ]]; then
   CURL_ARGS+=(--insecure)
+fi
+
+if [[ ! "$KEY_ALIAS" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
+  printf 'KEY_ALIAS must use only letters, numbers, dot, underscore, or hyphen.\n' >&2
+  exit 1
+fi
+if [[ -n "$WORKER_ID" && ! "$WORKER_ID" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
+  printf 'WORKER_ID must use only letters, numbers, dot, underscore, or hyphen.\n' >&2
+  exit 1
 fi
 
 if [[ -s "$KEY_FILE" && "${ROTATE:-0}" != "1" ]]; then
@@ -45,20 +56,28 @@ if [[ "$ready" != "1" ]]; then
   exit 1
 fi
 
+request_body="$(python3 -c '
+import json
+import sys
+
+alias, worker_id = sys.argv[1:]
+metadata = {"service": "agent-workers", "model": "luna"}
+if worker_id:
+    metadata["worker_id"] = worker_id
+print(json.dumps({
+    "key_alias": alias,
+    "key_type": "llm_api",
+    "models": ["luna"],
+    "metadata": metadata,
+}))
+' "$KEY_ALIAS" "$WORKER_ID")"
+
 response="$({
   curl "${CURL_ARGS[@]}" \
     --request POST "${BASE_URL}/key/generate" \
     --header "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
     --header 'Content-Type: application/json' \
-    --data '{
-      "key_alias": "luna-worker",
-      "key_type": "llm_api",
-      "models": ["luna"],
-      "metadata": {
-        "service": "agent-workers",
-        "model": "luna"
-      }
-    }'
+    --data "$request_body"
 })"
 
 key="$(printf '%s' "$response" | python3 -c '
@@ -76,6 +95,5 @@ print(key)
 
 umask 077
 printf '%s\n' "$key" > "$KEY_FILE"
-printf 'Created the Luna virtual key and saved it to %s\n' "$KEY_FILE"
-printf 'Use this value as Authorization: Bearer <key> on the worker nodes.\n'
+printf 'Created LiteLLM virtual key alias %s and saved it to %s\n' "$KEY_ALIAS" "$KEY_FILE"
 printf 'The key is restricted to the LiteLLM model name: luna\n'

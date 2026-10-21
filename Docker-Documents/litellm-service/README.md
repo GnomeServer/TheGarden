@@ -54,15 +54,19 @@ LUNA_BACKEND_API_KEY=<key-accepted-by-the-inference-backend>
 `LUNA_MODEL` and `LUNA_API_BASE` describe the backend route. The public model
 name presented to clients remains `luna`.
 
-The worker reads `MODEL_API_KEY` from the environment, not from a file. The Ansible role destination, when the role can run, is `~/.config/litellm/worker-api-key`.
+The worker reads `MODEL_API_KEY` from the environment. Ansible loads each
+worker-specific virtual key from `litellm_key_source`, installs it at
+`~/.config/litellm/worker-api-key`, and exports it when the worker starts.
 
-`create-luna-key.sh` writes one `.luna-worker-api-key` in this directory. Inventory expects separate controller files such as `/home/infra-lab-user/litellm-service/.worker-01-api-key`. The script does not create those files.
+Create separate restricted keys rather than sharing one key across laptops:
 
-The model key is installed on a worker through a secure channel, for example:
-
-```text
-~/.config/agent-worker/luna-worker-api-key
+```bash
+cd "$REPO_ROOT/Docker-Documents/litellm-service"
+KEY_ALIAS=worker-02 WORKER_ID=worker-02 KEY_FILE=.worker-02-api-key ./create-luna-key.sh
 ```
+
+Repeat with each worker ID and its matching `.worker-0N-api-key` file. The key
+is restricted to the `luna` model; never commit the generated files.
 
 ## Start the stack
 

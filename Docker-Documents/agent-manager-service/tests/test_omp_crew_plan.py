@@ -67,6 +67,7 @@ class OmpMissionPlanTests(unittest.IsolatedAsyncioTestCase):
         record = SimpleNamespace(
             id="mission-1",
             worker_id="worker-03",
+            error=None,
             status="completed",
             run_metadata={
                 "operation": "mission",
