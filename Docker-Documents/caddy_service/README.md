@@ -37,7 +37,9 @@ project's network `external: true`.
 ## Deploy
 
 The Compose file fixes the project name so deploying from a worktree does not
-create new Caddy data volumes. From the checked-out repository:
+create new Caddy data volumes. The Caddyfile and site directory are bind-mounted,
+so deploy from a persistent checkout (not `/tmp`) to keep the configuration
+available after reboot. From the checked-out repository:
 
 ```bash
 cd Docker-Documents/caddy_service
