@@ -9,7 +9,7 @@ Repository facts that override the bullets below:
 - The server is already Proxmox VE 9 on Debian 13, hostname `server-debian`. It is not a general-purpose Debian laptop waiting for an ISO install.
 - Ansible inventory names four workers: `inkii`, `naruto`, `raphael`, and `donatello`. The hardware plan is still five Ubuntu laptops.
 - Compose projects exist for Caddy, Forgejo, Open WebUI, llama.cpp, LiteLLM, Grafana, and Agent Manager. Ansible deploys all of those except LiteLLM. See `Docker-Documents/README.md`.
-- The checked-in Caddyfile routes `/grafana/` and `/forgejo/` and falls back to Proxmox. It does not route `/litellm/`, `/llama/`, or Open WebUI.
+- The checked-in Caddyfile routes `/grafana/`, `/forgejo/`, and Tailnet-only `/litellm/`; it falls back to Proxmox for other paths. It does not route `/llama/` or Open WebUI.
 
 The goal is to build a useful multi-node AI and software-agent lab without introducing Kubernetes, high-availability storage, or a large number of complex services too early.
 

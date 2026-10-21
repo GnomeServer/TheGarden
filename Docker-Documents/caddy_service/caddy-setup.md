@@ -370,16 +370,24 @@ curl -k -i -L https://infra-lab-services.tail494f6d.ts.net/grafana/login
 
 Caddy's internal CA still needs to be trusted by browsers, or `curl -k` can be used for testing.
 
-## Services not routed by this Caddyfile
+## Services routed by this Caddyfile
 
-Caddy, Grafana, Prometheus, Node Exporter, and Forgejo are the services this Caddyfile actually fronts. The repository also contains Compose projects for Open WebUI, Ollama, llama.cpp, LiteLLM, Agent Manager, and NATS. None of those are routes in `Docker-Documents/caddy_service/Caddyfile`.
+Caddy fronts Grafana, Forgejo, and LiteLLM. The worker model route
+`/litellm/*` is restricted to Tailscale source addresses and proxies to
+`litellm:4000`; it also requires a worker-scoped virtual key. All other paths
+fall back to the Proxmox UI.
 
-In particular:
+Open WebUI, llama.cpp, Agent Manager, NATS, PostgreSQL, and Docker APIs are not
+proxied by this site. In particular:
 
-- Open WebUI's Compose default `WEBUI_URL` uses port `8443`, but this project publishes only `80` and `443`.
-- LiteLLM listens on container port `4000` and on the VM loopback port `4000`. There is no `/litellm` handle.
-- llama.cpp is reachable by containers at `http://llama:8080`. There is no `/llama` handle.
-- Agent Manager is loopback-bound on `127.0.0.1:8090` and on `caddy_proxy` at `agent-manager:8000`.
+- Open WebUI's Compose default `WEBUI_URL` uses port `8443`, but this project
+  publishes only `80` and `443`.
+- LiteLLM worker clients use
+  `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
+- llama.cpp is reachable to containers at `http://llama:8080`; there is no
+  `/llama` route.
+- Agent Manager is loopback-bound on `127.0.0.1:8090` and on `caddy_proxy` at
+  `agent-manager:8000`.
 
 The example below is not deployed. It shows separate hostnames, which this lab does not use:
 

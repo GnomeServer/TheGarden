@@ -18,6 +18,21 @@ infra-lab-services.tail494f6d.ts.net {
 		reverse_proxy forgejo:3000
 	}
 
+	@litellm_tailnet {
+		path /litellm/*
+		remote_ip 100.64.0.0/10
+	}
+
+	handle @litellm_tailnet {
+		uri strip_prefix /litellm
+		reverse_proxy litellm:4000
+	}
+
+	@litellm_path path /litellm/*
+	handle @litellm_path {
+		respond "Forbidden" 403
+	}
+
 	handle {
 		reverse_proxy https://10.1.10.156:8006 {
 			transport http {

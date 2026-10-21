@@ -4,32 +4,29 @@
 `agent.runs.created` from NATS JetStream, publishes `agent.runs.status` (and the
 same payload on `agent.runs.started`), then publishes one `agent.runs.completed`
 event. It also publishes `agent.workers.heartbeat` and answers
-`agent.workers.health.<role>`. It calls the configured
-OpenAI-compatible gateway only when `metadata.script` is absent. The workspace
-is `AGENT_WORKSPACE/<project-slug>/` when `metadata.project_name` is set, and
-`AGENT_WORKSPACE/<run-id>/` otherwise.
+`agent.workers.health.<role>`. The mission path calls the configured
+OpenAI-compatible gateway for planning, coding, and review. Mission artifacts
+are saved under
+`AGENT_WORKSPACE/missions/<project-slug>/<mission-id>/` and returned to the
+Agent Manager. The worker does not execute those generated files or modify the
+configured Forgejo repository.
 
-The worker supports two distinct operations:
+The worker supports two operations:
 
-- `mission` starts the worker-local `crew:slice` image. The worker validates
-  OMP's plan (one planner, 1–3 coders, 1–2 reviewers), mounts the mission
-  read-only, and returns the crew outcome and supervisor evidence. The current
-  crew image is a deterministic hello-text demo: it does not clone Forgejo or
-  modify a repository. Its bounded retry loop is controlled by the planner.
-  The Manager stamps each queued event with an expiry; an expired delivery is
-  reported failed and acknowledged without running the crew.
+- `mission` uses one model-backed planner, the requested coder count, and
+  independent model-backed reviewers with up to three revision attempts.
+  A mission requires a reachable `MODEL_BASE_URL` and a worker-scoped
+  `MODEL_API_KEY`. No hardcoded candidate artifacts or hello-only fallback.
 - `create-python-script` generates or accepts one Python script, then runs it
-  directly as the worker operating-system user. This operation is not sandboxed.
+  directly as the worker operating-system user. This operation is not sandboxed
+  and remains disabled unless explicitly enabled.
 
-The OMP mission endpoint chooses crew counts and places them in
-`metadata.mission`; callers should not select a worker laptop or override the
-plan. Mission evidence is stored with the run result, but the temporary
-container's candidate files are not retained as downloadable artifacts.
+The Manager stamps each queued event with an expiry. The worker rejects an
+expired delivery and acknowledges it without starting model calls.
 
-> **Test-worker safety:** keep `ALLOW_GENERATED_CODE=0`; set it to `1` only for
-> controlled tests on a disposable worker with no production credentials. This
-> setting controls the unsandboxed `create-python-script` operation; it does
-> not enable the separate `mission` crew image.
+> **Worker safety:** keep `ALLOW_GENERATED_CODE=0`. Mission output is written as
+> text artifacts and is not executed. The separate `create-python-script`
+> operation is unsandboxed and should only be enabled on a disposable worker.
 
 ## Repository layout
 
@@ -128,19 +125,18 @@ endpoint problem, not an empty JetStream queue.
 
 ## Install or update a worker
 
-The Ansible role is the preferred installer; it copies both the Python worker
-and crew image source, builds `crew:slice`, writes `worker.env`, and starts the
-worker now and at reboot. For a manual install, first ensure Python, Docker,
-and Docker-group access are configured on the worker:
+The Ansible role is the preferred installer; it copies `worker.py`,
+`mission.py`, and requirements; installs the worker-scoped LiteLLM key and
+Caddy root certificate; writes `worker.env` and `start-worker.sh`; and starts
+the worker now and at reboot. For a manual install, copy the worker source:
 
 ```bash
 WORKER='<worker-id>@<tailnet-user-IP>'
 ssh "$WORKER" 'mkdir -p ~/agent-worker'
 scp "$REPO_ROOT/agent-worker/worker.py" \
+    "$REPO_ROOT/agent-worker/mission.py" \
     "$REPO_ROOT/agent-worker/requirements.txt" \
     "$WORKER:~/agent-worker/"
-scp -r "$REPO_ROOT/crew" "$WORKER:~/agent-worker/crew"
-ssh "$WORKER" 'docker build -t crew:slice ~/agent-worker/crew'
 ```
 
 Create the Python environment on the worker:
@@ -164,46 +160,28 @@ export NATS_URL='nats://100.94.49.45:4222'
 export WORKER_ID='<worker-id>'
 export WORKER_ROLE='coder'
 export WORKER_CONSUMER='agent-workers-coder'
-export CREW_IMAGE='crew:slice'
 export ALLOW_GENERATED_CODE=0
-```
-
-The model gateway uses the worker-scoped LiteLLM virtual key:
-
-```bash
+export MODEL_BASE_URL='https://infra-lab-services.tail494f6d.ts.net/litellm/v1'
 export MODEL_NAME='luna'
 export MODEL_API_KEY="$(tr -d '\r\n' < "$HOME/.config/litellm/worker-api-key")"
 ```
 
-Do not use `LITELLM_MASTER_KEY` or the LiteLLM backend key as
-`MODEL_API_KEY`. The public model name is `luna`; `openai/luna` is a LiteLLM
-backend/provider configuration value, not a replacement worker credential.
-`worker.py` reads `MODEL_API_KEY` from the environment. It does not read a key
-file or `LITELLM_API_KEY`.
+Mission requests use the worker-scoped LiteLLM virtual key. Do not use
+`LITELLM_MASTER_KEY` or the LiteLLM backend key as `MODEL_API_KEY`. The model
+name is `luna`; `openai/luna` is a backend configuration value.
 
-The checked-in Caddyfile does not route `/litellm/`. A remote worker cannot use
-`https://infra-lab-services.tail494f6d.ts.net/litellm/v1`, `http://litellm:4000/v1`,
-or `http://127.0.0.1:4000/v1`. The first is not routed. The second is Docker DNS.
-The third is the VM loopback publish. Dynamic prompts need a route that does not
-exist in this repository yet. `metadata.script` does not need the model.
-
-The Ansible role, when its missing files are supplied, copies the virtual key
-to `~/.config/litellm/worker-api-key`. `create-luna-key.sh` writes one
-`.luna-worker-api-key` in the LiteLLM project. Inventory expects separate
-controller files such as `/home/infra-lab-user/litellm-service/.worker-01-api-key`.
-The script does not create those per-worker files.
-
-For TLS to a future Caddy route, prefer a trusted CA bundle:
+For manual installs, trust the Caddy internal root certificate:
 
 ```bash
-export SSL_CERT_FILE="$HOME/.pi/agent/certs/caddy-local-root.crt"
-export MODEL_TLS_INSECURE=0
+sudo install -m 0644 root.crt /usr/local/share/ca-certificates/thegarden-caddy-root.crt
+sudo update-ca-certificates
 ```
 
-`MODEL_TLS_INSECURE=1` is only a temporary diagnostic bypass and must not be
-used for a persistent deployment. A future HTTPS URL must use the Caddy
-hostname, not the Tailscale IP, because the certificate is issued for the
-hostname.
+Never copy Caddy's `root.key`. Keep `MODEL_TLS_INSECURE=0`.
+
+Mission artifacts are saved in the worker workspace and returned through
+Open WebUI. This implementation does not clone or push the configured
+Forgejo repository.
 
 ## Start the worker
 

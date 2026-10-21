@@ -109,12 +109,7 @@ services:
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       MODEL_NAME: ${MODEL_NAME:-gpt-5.6-luna}
       REASONING_EFFORT: ${REASONING_EFFORT:-medium}
-      CREW_RUNTIME: ${CREW_RUNTIME:-auto}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    group_add:
-      - "986"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${AGENT_MANAGER_BIND_ADDRESS:-127.0.0.1}:${AGENT_MANAGER_PORT:-8090}:8000"
     expose:

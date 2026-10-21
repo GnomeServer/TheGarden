@@ -94,23 +94,22 @@ Suggested task format:
 
 Unchecked means not verified in the lab. It does not mean the repository has no code.
 
-- [ ] A worker can consume a run from NATS and report its result. — checked-in `agent-worker/worker.py` handles `mission` and `create-python-script`; the mission path validates OMP's crew counts, starts `crew:slice`, and publishes completion evidence. Not verified as a lab run.
-- [ ] Agent Manager consumes worker status events and updates PostgreSQL. — the service consumes `agent.runs.started` and `agent.runs.completed`; a background reaper now finalizes stale queued/running runs after `WORKER_RUN_STALE_AFTER_SECONDS` when no worker heartbeat owns them. Not verified as a lab recovery.
+- [ ] A worker can consume a run from NATS and report its result. — `agent-worker/worker.py` consumes mission events, calls the worker-scoped LiteLLM endpoint for planner/coder/reviewer roles, and returns generated artifacts. Not verified as a live worker run.
+- [ ] Agent Manager consumes worker status events and updates PostgreSQL. — durable status and completion consumers are implemented; stale queued/running runs are reconciled when no fresh worker heartbeat owns them. Live recovery remains unverified.
 - [ ] The run state machine rejects every invalid transition. — late status/completion events are ignored for terminal runs; other transition rules remain incomplete.
-- [ ] A general deterministic validator independently checks a worker result. — `crew/supervisor.py` checks only the current hello-text demo contract.
-- [ ] Evidence is stored and linked to a run. — mission completion evidence is recorded in `metadata.result`; temporary candidate files are removed with the worker image. Not verified as a lab run.
+- [ ] A deterministic product validator independently checks generated artifacts. — model reviewers inspect acceptance criteria and files; generated code is not executed and no browser journey is run.
+- [ ] Evidence is stored and linked to a run. — planner criteria, reviewer findings, artifact paths, and bounded file contents are stored in `metadata.result`; artifact files remain in the worker workspace. Live retention is unverified.
 - [ ] A worker laptop can join through a documented, secure connection process.
 - [ ] The tracked Agent Manager source and the live deployment checkout are kept in sync.
-- [ ] Ansible can configure a standard worker laptop. — the role installs the worker process and demo crew image; end-to-end NATS reachability and live service operation are not verified on each host.
+- [ ] Ansible can configure a standard worker laptop. — the role installs the dynamic mission runner, worker-scoped LiteLLM key, and Caddy CA trust. End-to-end NATS/model reachability is not verified on each host.
 - [ ] Machine secrets are deployed reproducibly without putting plaintext secrets in Git.
 
 ### Not built yet
 
 - [ ] A formal mission contract and definition-of-done format.
 - [ ] A versioned skill format, skill selection, and capability registry.
-- [ ] A real coding worker using a disposable Forgejo repository.
-- [ ] Model-backed planner, coder, and reviewer agents in the worker-local crew.
-- [ ] An independent reviewer using a fresh checkout.
+- [ ] A real coding worker that checks out a disposable Forgejo repository, creates a branch, and submits a PR.
+- [ ] A fresh-checkout reviewer and deterministic execution of approved project checks.
 - [ ] A browser or user-journey validator.
 - [ ] Per-task model routing across multiple configured models; the current gateway exposes one public model alias (`luna`), and Jev routing is not integrated.
 - [ ] Preview, staging, release, and rollback workflows.
@@ -125,27 +124,29 @@ Unchecked means not verified in the lab. It does not mean the repository has no 
 User
   ↓
 Open WebUI + Agent Manager Pipe
+  ├── New mission → POST /v1/omp/turns
+  └── Status follow-up → GET /v1/omp/missions/{mission_id}
   ↓
-Central OMP: checks mission and estimates crew counts
+Central OMP: validates goal, repository label, and crew size
   ↓
-Agent Manager: records the run, publishes to NATS JetStream
+Agent Manager: stores run and publishes agent.runs.created to NATS JetStream
   ↓
-One available coder worker laptop
+Available coder worker laptop
   ↓
-Worker-local OMP (`crew:slice`)
-  ├── Planner
-  ├── 1–3 deterministic coder demo processes
-  ├── 1–2 deterministic reviewer demo processes
-  └── Supervisor; planner retries at most three times
+Worker-local OMP with worker-scoped LiteLLM access
+  ├── Planner: acceptance criteria and file tasks
+  ├── 1–3 model-backed coders: bounded text artifacts
+  ├── 1–2 independent model-backed reviewers: up to three attempts
+  └── Supervisor: validates plan, files, and review verdicts
   ↓
-Worker completion + bounded evidence → NATS → Agent Manager/PostgreSQL
+Worker result + artifact contents → NATS → Agent Manager/PostgreSQL
   ↓
-Open WebUI polls and presents the final status
+Open WebUI returns status and artifact code
 ```
 
-The current crew image only accepts hello-text demo goals. It does not clone
-Forgejo, run model-backed coding agents, or retain candidate files after the
-container exits.
+The current mission path generates artifact files from the request, stores them
+in the worker workspace, and returns their text to Open WebUI. It does not clone
+or modify Forgejo, execute generated code, or run browser tests.
 
 ### What the main services mean
 

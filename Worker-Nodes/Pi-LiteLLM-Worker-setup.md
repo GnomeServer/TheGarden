@@ -9,15 +9,18 @@ LiteLLM gateway over the Tailscale network.
 
 ## Current gateway
 
-The checked-in Caddyfile does not route `/litellm/`. This URL is not served by the repository configuration:
+The checked-in Caddyfile routes the worker gateway through a Tailnet-only
+endpoint:
 
 ```text
 Base URL:     https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 Model ID:     luna
-Display name: GPT-5.6 Luna
+Display name: Luna
 ```
 
-Do not treat that base URL as working until `Docker-Documents/caddy_service/Caddyfile` has a `/litellm` handle. VM-local checks use `http://127.0.0.1:4000/v1`. Containers on `caddy_proxy` use `http://litellm:4000/v1`. Pi on a worker laptop cannot use either of those. The model id, when a route exists, is `luna`, not `gpt-5.6-luna`.
+The route requires a worker-scoped LiteLLM virtual key and a trusted Caddy root
+certificate. The current factory worker is provisioned by Ansible; this guide
+is only for the legacy Pi harness.
 
 The gateway currently exposes the model as `luna`. Do not use
 `gpt-5.6-luna` in API requests unless it is added as a LiteLLM model alias.

@@ -3,19 +3,11 @@
 from __future__ import annotations
 
 import re
-import tempfile
-from pathlib import Path
-from typing import Any
 
-UNSAFE_SCRIPT = re.compile(
-    r"\b(subprocess|socket|urllib|requests|eval|exec|os\.system|__import__|docker|pty)\b"
-)
-SCRIPT_FENCE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-MAX_SCRIPT_CHARS = 20000
 
 
 def crew_size(goal: str) -> dict[str, int | str]:
-    """More containers for a larger job. Never a new VM."""
+    """Scale planner/coder/reviewer counts with mission size; never add VMs."""
     length = len(goal)
     if length > 2500:
         return {"size": "large", "planners": 1, "coders": 3, "reviewers": 2}
@@ -35,15 +27,15 @@ def missing_requirements(goal: str) -> str | None:
     """Planner gate. A gap here bounces to OMP before any coder starts."""
     text = goal.casefold()
     if any(word in text for word in ("calculator", "gui", "button")):
-        asks_for_code = any(word in text for word in ("tkinter", "code", "script", "python"))
-        missing: list[str] = []
-        has_ops = any(word in text for word in ("add", "subtract", "multiply", "divide", "all computation", "computation"))
-        if not has_ops and not asks_for_code:
-            missing.append("which operations the buttons should perform")
-        if "button" not in text and "gui" not in text and "calculator" not in text:
-            missing.append("whether input is buttons or a text field")
-        if missing:
-            return "The planner needs " + " and ".join(missing) + " before a coder starts."
+        operation_patterns = (
+            r"\b(?:add|addition|additions|adding|sum|plus)\b",
+            r"\b(?:subtract|subtraction|subtractions|subtracting|difference|differences|minus)\b",
+            r"\b(?:multiply|multiplies|multiplying|multiplication|multiplications|times|product)\b",
+            r"\b(?:divide|divides|dividing|division|divisions|quotient)\b",
+        )
+        has_ops = any(re.search(pattern, text) for pattern in operation_patterns)
+        if not has_ops:
+            return "The planner needs which operations the buttons should perform before a coder starts."
         return None
     if len(goal.strip()) < 40:
         return "The planner needs a concrete deliverable before a coder starts."
@@ -83,75 +75,3 @@ def attach_project_reply(goal: str, pending_goal: str | None) -> tuple[str, str 
         name = text.removeprefix("Project:").strip()
         return pending_goal, name or None
     return goal, None
-
-
-def extract_script(text: str) -> str:
-    match = SCRIPT_FENCE.search(text)
-    script = match.group(1) if match else text
-    return script.strip()[:MAX_SCRIPT_CHARS]
-
-
-def review_locally(goal: str, script: str) -> str | None:
-    """Reject an unsafe or incomplete script. None means the reviewer accepts it."""
-    if not script or "import " not in script:
-        return "The coder did not return a Python script."
-    if UNSAFE_SCRIPT.search(script):
-        return "The reviewer rejected the script because it tried to leave the crew."
-    text = goal.casefold()
-    if "calculator" not in text and "gui" not in text:
-        return None
-    missing: list[str] = []
-    folded = script.casefold()
-    if "tkinter" not in folded:
-        missing.append("tkinter buttons")
-    if not all(token in folded for token in ("add", "subtract", "multiply", "divide")) and not all(
-        token in script for token in ("+", "-", "*", "/")
-    ):
-        missing.append("add, subtract, multiply, and divide")
-    if "button" not in folded:
-        missing.append("clickable buttons")
-    if not any(color in folded for color in ("#d6eaf8", "#add8e6", "pale blue", "lightblue", "light blue")):
-        missing.append("a pale blue background")
-    if "white" not in folded or "black" not in folded:
-        missing.append("white buttons with black text")
-    if missing:
-        return "The reviewer still needs " + ", ".join(missing) + "."
-    return None
-
-
-def container_create_body(name: str, network: str, image: str, role: str) -> dict[str, Any]:
-    """One role container. No socket, no host network, no privileges, no lab env."""
-    del name
-    return {
-        "Image": image,
-        "User": "65534:65534",
-        "Env": [f"ROLE={role}"],
-        "Cmd": ["python", "-c", "import time; time.sleep(120)"],
-        "HostConfig": {
-            "NetworkMode": network,
-            "ReadonlyRootfs": True,
-            "Memory": 256 * 1024 * 1024,
-            "PidsLimit": 64,
-            "CapDrop": ["ALL"],
-            "SecurityOpt": ["no-new-privileges:true"],
-            "Tmpfs": {"/tmp": "rw,noexec,nosuid,size=16m"},
-            "Privileged": False,
-        },
-        "NetworkingConfig": {"EndpointsConfig": {network: {}}},
-    }
-
-
-def compile_script(script: str) -> str | None:
-    path: Path | None = None
-    try:
-        with tempfile.TemporaryDirectory(prefix="crew-") as directory:
-            path = Path(directory) / "crew_script.py"
-            path.write_text(script, encoding="utf-8")
-            compiled = compile(script, str(path), "exec")
-            del compiled
-        return None
-    except SyntaxError:
-        return "The reviewer rejected the script because it does not compile."
-    finally:
-        if path is not None:
-            path.unlink(missing_ok=True)

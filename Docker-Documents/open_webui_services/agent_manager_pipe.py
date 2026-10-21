@@ -227,6 +227,84 @@ class Pipe:
         return goal, project_name, repository
 
     @staticmethod
+    def _is_status_query(text: str) -> bool:
+        normalized = " ".join(text.casefold().split())
+        return bool(
+            re.fullmatch(
+                r"(?:what(?:'s|s| is)\s+(?:the\s+)?(?:current\s+)?status(?:\s+(?:of|for)\s+.+)?|status(?:\s+(?:of|for)\s+.+)?|how(?:'s| is)\s+(?:the\s+)?(?:mission|job|it)\s+going|any\s+updates?(?:\s+on\s+.+)?)\??",
+                normalized,
+            )
+        )
+
+    @classmethod
+    def _mission_id_from_history(
+        cls, history: list[tuple[str, str]]
+    ) -> str | None:
+        pattern = re.compile(
+            r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
+            re.IGNORECASE,
+        )
+        for role, text in reversed(history):
+            if role != "assistant":
+                continue
+            matches = pattern.findall(text)
+            if matches:
+                return matches[-1]
+        return None
+
+    @staticmethod
+    def _format_artifacts(artifacts: Any) -> str:
+        if not isinstance(artifacts, list):
+            return ""
+        chunks: list[str] = []
+        total = 0
+        languages = {
+            ".css": "css",
+            ".html": "html",
+            ".js": "javascript",
+            ".json": "json",
+            ".py": "python",
+            ".ts": "typescript",
+        }
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            path, content = item.get("path"), item.get("content")
+            if not isinstance(path, str) or not isinstance(content, str):
+                continue
+            if total + len(content) > 28000:
+                chunks.append("Additional generated files were omitted from this chat response due to the size limit.")
+                break
+            fence = "```"
+            while fence in content:
+                fence += "`"
+            extension = "." + path.rsplit(".", 1)[-1].casefold() if "." in path else ""
+            language = languages.get(extension, "")
+            safe_path = path.replace("`", "")
+            chunks.append(f"**`{safe_path}`**\n\n{fence}{language}\n{content}\n{fence}")
+            total += len(content)
+        return "\n\n" + "\n\n".join(chunks) if chunks else ""
+
+    @classmethod
+    def _format_mission_status(
+        cls, state: dict[str, Any], mission_id: str
+    ) -> str:
+        status = state.get("status")
+        summary = state.get("summary") if isinstance(state.get("summary"), str) else ""
+        if status in {"queued", "accepted"}:
+            prefix = f"Mission `{mission_id}` is queued."
+        elif status in {"planning", "running"}:
+            worker_id = state.get("worker_id")
+            suffix = f" on worker `{worker_id}`" if isinstance(worker_id, str) and worker_id else ""
+            prefix = f"Mission `{mission_id}` is {status}{suffix}."
+        elif status in {"completed", "failed", "bounced", "cancelled"}:
+            prefix = f"Mission `{mission_id}` is {status}."
+        else:
+            prefix = f"Mission `{mission_id}` has status `{status or 'unknown'}`."
+        reply = f"{prefix} {summary}".strip()
+        return reply + cls._format_artifacts(state.get("artifacts"))
+
+    @staticmethod
     def _error_detail(response: httpx.Response) -> str:
         try:
             payload = response.json()
@@ -245,12 +323,23 @@ class Pipe:
         __event_call__: Any = None,
     ) -> str:
         del __user__, __event_call__
-        try:
-            goal, project_name, repository = self._resolve_turn(
-                body, self.valves.FORGEJO_REPOSITORY.strip()
-            )
-        except ValueError as exc:
-            return f"Could not send the chat turn to OMP: {exc}"
+        history = self._history(body)
+        if not history or history[-1][0] != "user":
+            return "Could not send the chat turn to OMP: no latest user message was found."
+        latest_message = history[-1][1]
+        status_query = self._is_status_query(latest_message)
+        mission_id = self._mission_id_from_history(history[:-1]) if status_query else None
+        if status_query and not mission_id:
+            return "I couldn't find a mission ID earlier in this chat. Open the original mission or include its ID."
+        if status_query:
+            goal, project_name, repository = latest_message, None, self.valves.FORGEJO_REPOSITORY.strip()
+        else:
+            try:
+                goal, project_name, repository = self._resolve_turn(
+                    body, self.valves.FORGEJO_REPOSITORY.strip()
+                )
+            except ValueError as exc:
+                return f"Could not send the chat turn to OMP: {exc}"
 
         if len(goal) > self.valves.MAX_GOAL_CHARACTERS:
             return (
@@ -268,24 +357,40 @@ class Pipe:
             "project_name": project_name,
             "model": body.get("model"),
         }
-        await self._emit_status(__event_emitter__, "Asking OMP…")
+        await self._emit_status(
+            __event_emitter__,
+            "Checking mission status…" if status_query else "Asking OMP…",
+        )
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             try:
-                response = await client.post(
-                    f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/turns",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json=request_body,
-                )
+                if status_query:
+                    response = await client.get(
+                        f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/missions/{mission_id}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                else:
+                    response = await client.post(
+                        f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/turns",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=request_body,
+                    )
                 response.raise_for_status()
                 reply = response.json()
             except httpx.HTTPStatusError as exc:
+                action = "status lookup" if status_query else "chat turn"
                 return (
-                    "OMP rejected the chat turn "
+                    f"OMP {action} failed "
                     f"(HTTP {exc.response.status_code}): {self._error_detail(exc.response)}"
                 )
             except (httpx.RequestError, ValueError) as exc:
                 return f"Could not reach OMP: {exc}"
 
+            if status_query:
+                if not isinstance(reply, dict):
+                    return "OMP returned an unexpected mission status."
+                formatted = self._format_mission_status(reply, mission_id or "")
+                await self._emit_status(__event_emitter__, formatted, done=True)
+                return formatted
             if not isinstance(reply, dict):
                 return "OMP returned an unexpected response."
             if reply.get("type") == "question":
@@ -314,7 +419,7 @@ class Pipe:
         project_name: str | None,
         emitter: Any,
     ) -> str:
-        deadline = time.monotonic() + min(self.valves.RUN_TIMEOUT_SECONDS, 180)
+        deadline = time.monotonic() + self.valves.RUN_TIMEOUT_SECONDS
         project = f" for `{project_name}`" if project_name else ""
         headers = {"Authorization": f"Bearer {token}"}
         url = f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/missions/{mission_id}"
@@ -351,11 +456,11 @@ class Pipe:
                 if isinstance(state.get("attempts"), int):
                     evidence_parts.append(f"Attempts: {state['attempts']}.")
                 if isinstance(evidence, dict):
-                    artifacts = evidence.get("coder_artifacts")
+                    artifacts = evidence.get("artifacts") or evidence.get("coder_artifacts")
                     reviewers = evidence.get("reviewers")
                     checks = evidence.get("supervisor_checks")
                     if isinstance(artifacts, list):
-                        evidence_parts.append(f"Coder artifacts checked: {len(artifacts)}.")
+                        evidence_parts.append(f"Artifacts produced: {len(artifacts)}.")
                     if isinstance(reviewers, list):
                         approved = sum(
                             1 for item in reviewers
@@ -368,6 +473,7 @@ class Pipe:
                         evidence_parts.append(f"Supervisor checks: {len(checks)}.")
                 if evidence_parts:
                     body += "\n\n" + " ".join(evidence_parts)
+                body += self._format_artifacts(state.get("artifacts"))
                 return body
             await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
         return f"{summary}{project}. Mission `{mission_id}`. The crew is still working."

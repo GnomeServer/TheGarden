@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Long-running Agent Manager worker that generates and runs Python scripts."""
+"""Long-running Agent Manager worker for model-driven missions and scripts."""
 
 import asyncio
 import json
 import os
 import re
-import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import unicodedata
 import urllib.error
 import urllib.request
 import uuid
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from mission import execute_mission
 import nats
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
@@ -38,7 +39,6 @@ MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "").rstrip("/")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "luna")
 MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "120"))
-CREW_IMAGE = os.getenv("CREW_IMAGE", "crew:slice")
 SCRIPT_TIMEOUT = float(os.getenv("SCRIPT_TIMEOUT", "300"))
 MAX_SCRIPT_CHARS = int(os.getenv("MAX_SCRIPT_CHARS", "30000"))
 MAX_OUTPUT_CHARS = int(os.getenv("MAX_OUTPUT_CHARS", "12000"))
@@ -52,7 +52,7 @@ MODEL_TLS_INSECURE = os.getenv("MODEL_TLS_INSECURE", "0").lower() in {
     "true",
     "yes",
 }
-WORKER_VERSION = "0.4.0"
+WORKER_VERSION = "0.5.0"
 HEARTBEAT_SECONDS = 15
 _presence = {"status": "idle", "run_id": None}
 
@@ -68,7 +68,7 @@ def heartbeat_payload() -> dict[str, Any]:
         "status": status,
         "current_run_id": _presence["run_id"],
         "version": WORKER_VERSION,
-        "capabilities": ["mission-crew-demo"] + (["create-python-script"] if ALLOW_GENERATED_CODE else []),
+        "capabilities": ["mission-crew"] + (["create-python-script"] if ALLOW_GENERATED_CODE else []),
         "sent_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -148,18 +148,19 @@ def extract_source(content: str) -> str:
     return content + ("\n" if not content.endswith("\n") else "")
 
 
-def generate_source_sync(goal: str) -> str:
+def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> str:
+    url = completions_url()
     payload = {
         "model": MODEL_NAME,
         "temperature": 0.2,
-        "max_tokens": 5000,
+        "max_tokens": max_tokens,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": goal},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user},
         ],
     }
     request = urllib.request.Request(
-        completions_url(),
+        url,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Accept": "application/json",
@@ -168,10 +169,7 @@ def generate_source_sync(goal: str) -> str:
         },
         method="POST",
     )
-    context = None
-    if MODEL_TLS_INSECURE and completions_url().startswith("https://"):
-        context = ssl._create_unverified_context()
-
+    context = ssl._create_unverified_context() if MODEL_TLS_INSECURE and url.startswith("https://") else None
     try:
         with urllib.request.urlopen(
             request,
@@ -181,9 +179,7 @@ def generate_source_sync(goal: str) -> str:
             response_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        raise RuntimeError(
-            f"model API returned HTTP {exc.code}: {detail}"
-        ) from exc
+        raise RuntimeError(f"model API returned HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"could not reach model API: {exc.reason}") from exc
 
@@ -192,10 +188,19 @@ def generate_source_sync(goal: str) -> str:
         content = completion["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise RuntimeError("model API returned an unexpected response") from exc
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("model response content was empty or not text")
+    if len(content) > MAX_SCRIPT_CHARS * 2:
+        raise RuntimeError("model response exceeded the worker output limit")
+    return content.strip()
 
-    if not isinstance(content, str):
-        raise RuntimeError("model response content was not text")
-    return extract_source(content)
+
+async def model_chat(system_prompt: str, user: str, max_tokens: int = 4000) -> str:
+    return await asyncio.to_thread(model_chat_sync, system_prompt, user, max_tokens)
+
+
+def generate_source_sync(goal: str) -> str:
+    return extract_source(model_chat_sync(SYSTEM_PROMPT, goal, 5000))
 
 
 async def generate_source(goal: str, metadata: dict[str, Any]) -> tuple[str, str]:
@@ -276,103 +281,6 @@ def write_script_without_overwrite(
             suffix += 1
 
 
-async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-    """Run the worker-local OMP crew and return its bounded evidence."""
-    mission_id = event.get("run_id") if isinstance(event.get("run_id"), str) else "unknown"
-    goal = event.get("goal") if isinstance(event.get("goal"), str) else ""
-    repo = event.get("forgejo_repository") if isinstance(event.get("forgejo_repository"), str) else ""
-    plan = metadata.get("mission")
-    if not isinstance(plan, dict):
-        raise RuntimeError("mission event is missing its crew plan")
-    counts = {
-        name: plan.get(name)
-        for name in ("planners", "coders", "reviewers")
-    }
-    if (
-        type(counts["planners"]) is not int
-        or counts["planners"] != 1
-        or type(counts["coders"]) is not int
-        or not 1 <= counts["coders"] <= 3
-        or type(counts["reviewers"]) is not int
-        or not 1 <= counts["reviewers"] <= 2
-    ):
-        raise RuntimeError("mission crew plan is outside the worker's supported limits")
-    mission = {
-        "mission_id": mission_id,
-        "goal": goal,
-        "repo": repo,
-        **counts,
-    }
-    steps = [
-        "Worker OMP: validated the crew plan.",
-        f"Planner: 1 planner, {counts['coders']} coder(s), {counts['reviewers']} reviewer(s), up to 3 attempts.",
-    ]
-    if not shutil.which("docker"):
-        return {
-            "status": "failed",
-            "summary": "This laptop has no Docker, so the worker-local crew did not start.",
-            "steps": steps,
-        }
-
-    with tempfile.TemporaryDirectory(prefix="crew-") as directory:
-        root = Path(directory)
-        work = root / "work"
-        work.mkdir()
-        mission_path = root / "mission.json"
-        mission_path.write_text(json.dumps(mission) + "\n", encoding="utf-8")
-        try:
-            completed = await asyncio.to_thread(
-                subprocess.run,
-                [
-                    "docker", "run", "--rm", "--network", "none",
-                    "--user", f"{os.getuid()}:{os.getgid()}",
-                    "-v", f"{mission_path}:/mission.json:ro",
-                    "-v", f"{work}:/work:rw",
-                    CREW_IMAGE,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=180,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return {
-                "status": "failed",
-                "summary": "The worker-local crew did not finish within 180 seconds.",
-                "steps": steps,
-            }
-        line = next(
-            (item for item in reversed(completed.stdout.splitlines()) if item.startswith("{")),
-            "",
-        )
-        if not line:
-            detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "no result JSON"
-            return {
-                "status": "failed",
-                "summary": f"The worker-local crew exited without a result. {detail[:160]}",
-                "steps": steps,
-            }
-        payload = json.loads(line)
-        if not isinstance(payload, dict):
-            raise RuntimeError("worker-local OMP returned an invalid result")
-        outcome = payload.get("status")
-        summary = payload.get("summary") if isinstance(payload.get("summary"), str) else "Crew finished."
-        payload_steps = payload.get("steps")
-        if isinstance(payload_steps, list):
-            steps.extend(item for item in payload_steps if isinstance(item, str))
-        steps.append(f"Worker OMP: finalized with {outcome}.")
-        finalized = outcome in {"accepted", "rejected", "blocked"}
-        return {
-            "status": "completed" if outcome == "accepted" else "failed",
-            "summary": summary,
-            "steps": steps,
-            "crew_outcome": outcome,
-            "crew_plan": counts,
-            "attempts": payload.get("attempts"),
-            "evidence": payload.get("evidence"),
-            "bounce_to": payload.get("bounce_to"),
-            "finalized": finalized,
-        }
 
 
 async def process_message(js: Any, message: Any) -> None:
@@ -429,7 +337,14 @@ async def process_message(js: Any, message: Any) -> None:
         await js.publish("agent.runs.started", encoded_status)
 
         if metadata.get("operation") == "mission":
-            result.update(await run_mission_image(event, metadata))
+            result.update(
+                await execute_mission(
+                    event,
+                    metadata,
+                    model_call=model_chat,
+                    workspace=WORKSPACE,
+                )
+            )
         elif metadata.get("operation") != "create-python-script":
             raise RuntimeError("unsupported worker operation")
         else:
@@ -491,9 +406,11 @@ async def process_message(js: Any, message: Any) -> None:
                 )
             result["source"] = source_origin
     except Exception as exc:
-        # Even model, validation, workspace, and compile failures become a
-        # completion event so the manager can mark the database run failed.
-        result["error"] = str(exc)[:2000]
+        # Model, validation, and workspace failures must be terminal and visible.
+        detail = str(exc)[:1000]
+        result["error"] = detail
+        if metadata.get("operation") == "mission":
+            result["summary"] = f"Worker mission failed: {detail[:500]}"
     result.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
 
     try:

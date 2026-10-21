@@ -4,5 +4,4 @@ worker_role: coder
 # This enables only the unsandboxed create-python-script path. Keep it off by default.
 allow_generated_code: false
 worker_model_name: luna
-# Leave empty until a Tailscale-reachable OpenAI-compatible /v1 route exists.
-worker_model_base_url: ""
+worker_model_base_url: "https://infra-lab-services.tail494f6d.ts.net/litellm/v1"

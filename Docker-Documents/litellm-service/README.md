@@ -17,24 +17,19 @@ are not committed to Git.
 
 ## Endpoints
 
-The checked-in Caddyfile does not route `/litellm/`. This URL is not served:
+The Caddy service exposes a Tailnet-only LiteLLM worker route:
 
 ```text
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
-Containers attached to `caddy_proxy` use:
 
-```text
-http://litellm:4000/v1
-```
+It accepts requests only from Tailscale addresses and requires a worker-scoped
+LiteLLM virtual key. Workers must trust Caddy's internal root certificate.
+Containers attached to `caddy_proxy` use `http://litellm:4000/v1`; the host-local
+gateway uses `http://127.0.0.1:4000/v1`.
 
-The host-local gateway uses:
-
-```text
-http://127.0.0.1:4000/v1
-```
-
-`litellm` is a Docker-only hostname. A remote worker cannot resolve it, and it cannot use the VM loopback address. Remote dynamic prompts have no routed model URL until a Caddy handle is added.
+`litellm` is a Docker-only hostname. A remote worker cannot resolve it or use
+the VM loopback address; it must use the Caddy hostname and worker key.
 
 ## Configuration
 
@@ -134,7 +129,9 @@ curl -sS \
   }'
 ```
 
-A remote worker cannot use the Caddy hostname for LiteLLM until `/litellm` is added to `caddy_service/Caddyfile`. A `401` from loopback or from `http://litellm:4000` means LiteLLM is up and the key was rejected. A failure against the MagicDNS `/litellm/` URL is a missing route, not a model error.
+The Caddy worker route accepts only Tailscale source addresses and requires a
+worker-scoped key. HTTP 403 indicates the request did not arrive from the
+Tailnet; HTTP 401 indicates LiteLLM rejected the key.
 
 A `401` response confirms that TLS and routing work but authentication failed.
 A timeout or model error requires inspecting the LiteLLM and backend logs.
@@ -168,7 +165,10 @@ ID. JetStream assigns each event to an available worker.
 
 ### LiteLLM health works but completions time out
 
-Test `chat/completions` locally first. If the local request times out, inspect the LiteLLM-to-backend route, `LUNA_API_BASE`, `LUNA_MODEL`, and the backend logs. If local `chat/completions` works but `https://infra-lab-services.tail494f6d.ts.net/litellm/v1` fails, that matches the repository: the Caddyfile has no `/litellm` route.
+Test `chat/completions` locally first. If the local request times out, inspect
+the LiteLLM-to-backend route, `LUNA_API_BASE`, `LUNA_MODEL`, and backend logs.
+If local requests work but the worker route fails, check Caddy, the worker's
+trusted Caddy root certificate, and the worker-scoped virtual key.
 
 ### Certificate verification fails
 

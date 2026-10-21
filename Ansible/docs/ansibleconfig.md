@@ -115,15 +115,16 @@ variables, CA trust, and troubleshooting steps are documented in:
 TheGarden/agent-worker/README.md
 ```
 
-`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and Docker;
-copies the worker and crew source; builds `worker_crew_image` (default
-`crew:slice`); writes `worker.env`; and starts the restart loop now and at reboot.
-`allow_generated_code` defaults to `false`; only enable it on a disposable
-worker for controlled testing because `create-python-script` runs unsandboxed.
+`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and
+CA certificates; copies `worker.py` and `mission.py`; installs the worker's
+LiteLLM key and Caddy root certificate; writes `worker.env`; and starts the
+worker now and at reboot. `worker_model_base_url` points at the Tailnet-only
+Caddy route. `allow_generated_code` remains `false`; mission artifacts are
+returned without executing them. The separate `create-python-script` operation
+is unsandboxed.
 
-Use `--ask-become-pass` for package installation, Docker-group changes, and
-cron setup. The mission demo needs NATS and Docker but no model endpoint; the
-optional LiteLLM URL/key only apply to direct model calls.
+Use `--ask-become-pass` for package installation and system CA trust. Each
+worker requires its own LiteLLM virtual key.
 
 ## Proxmox validation
 

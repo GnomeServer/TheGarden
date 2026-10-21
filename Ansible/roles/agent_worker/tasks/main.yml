@@ -9,21 +9,14 @@
     fail_msg: "Set worker_id and worker_role for {{ inventory_hostname }} before running this playbook."
 
 
-- name: Install Python, venv, cron, and Docker
+- name: Install Python, virtualenv, cron, and CA certificates
   ansible.builtin.apt:
     name:
+      - ca-certificates
       - python3
       - python3-venv
       - cron
-      - docker.io
     state: present
-  become: true
-
-- name: Let the laptop user run the shared crew image
-  ansible.builtin.user:
-    name: "{{ ansible_user_id }}"
-    groups: docker
-    append: true
   become: true
 - name: Create worker directories
   ansible.builtin.file:
@@ -45,6 +38,7 @@
     mode: "0644"
   loop:
     - worker.py
+    - mission.py
     - requirements.txt
 
 - name: Create the worker virtualenv
@@ -76,6 +70,22 @@
   delegate_to: localhost
   register: litellm_key_source_stat
 
+- name: Require a worker-scoped LiteLLM key for dynamic missions
+  ansible.builtin.assert:
+    that:
+      - worker_model_base_url | length == 0 or (litellm_key_source_stat.stat.exists | default(false))
+      - worker_model_base_url | length == 0 or (litellm_key_source_stat.stat.isreg | default(false))
+    fail_msg: "Dynamic worker missions require a worker-scoped LiteLLM key file in litellm_key_source."
+
+- name: Export Caddy root CA for the worker model endpoint
+  ansible.builtin.command:
+    cmd: docker cp caddy:/data/caddy/pki/authorities/local/root.crt /tmp/thegarden-caddy-root.crt
+  delegate_to: localhost
+  become: true
+  run_once: true
+  changed_when: false
+  when: worker_model_base_url is match('^https://')
+
 - name: Install the worker LiteLLM key
   ansible.builtin.copy:
     src: "{{ litellm_key_source }}"
@@ -89,27 +99,24 @@
     - litellm_key_source_stat.stat.exists
     - litellm_key_source_stat.stat.isreg
 
-- name: Warn when the LiteLLM key was not copied
-  ansible.builtin.debug:
-    msg: >-
-      No LiteLLM key was copied for {{ inventory_hostname }}. The mission
-      crew demo does not need one. Direct create-python-script model calls
-      remain disabled unless explicitly enabled and configured with a
-      reachable model URL and worker-scoped key.
-  when: not (litellm_key_source_stat.stat.exists and litellm_key_source_stat.stat.isreg)
-
-
-- name: Install the shared crew image source
+- name: Install Caddy root CA on the worker
   ansible.builtin.copy:
-    src: "{{ playbook_dir }}/../../crew/"
-    dest: "{{ ansible_user_dir }}/agent-worker/crew/"
-    owner: "{{ ansible_user_id }}"
+    src: /tmp/thegarden-caddy-root.crt
+    dest: /usr/local/share/ca-certificates/thegarden-caddy-root.crt
+    owner: root
+    group: root
     mode: "0644"
-
-- name: Build the shared crew image
-  ansible.builtin.command:
-    cmd: docker build -t {{ worker_crew_image }} {{ ansible_user_dir }}/agent-worker/crew
   become: true
+  when: worker_model_base_url is match('^https://')
+
+- name: Refresh worker CA trust store
+  ansible.builtin.command: update-ca-certificates
+  become: true
+  changed_when: false
+  when: worker_model_base_url is match('^https://')
+
+
+
 
 - name: Start the worker after reboot
   ansible.builtin.cron:

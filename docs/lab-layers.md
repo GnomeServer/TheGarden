@@ -7,7 +7,7 @@ This document explains the lab in two ways:
 
 These are not strict OSI layers. They are practical defense-in-depth boundaries for this pilot.
 
-Current repository state, separate from the target names below: the host is already Proxmox VE 9 on Debian 13 (`server-debian`), and the service VM is `infra-lab-services`. Inventory names four workers: `inkii`, `naruto`, `raphael`, and `donatello`. `agent-worker/worker.py` is a long-running NATS consumer. For `mission` runs it starts a temporary `crew:slice` container; the separate `create-python-script` operation executes generated Python as the worker OS user.
+Current repository state: the host is Proxmox VE 9 on Debian 13 (`server-debian`), and the service VM is `infra-lab-services`. Inventory names four workers: `inkii`, `naruto`, `raphael`, and `donatello`. `agent-worker/worker.py` consumes NATS mission events and uses a worker-scoped LiteLLM key for a model-backed planner/coder/reviewer flow. It returns generated files to Open WebUI and stores them under the worker workspace; it does not clone or push Forgejo repositories or execute generated files. The separate `create-python-script` operation remains unsandboxed and disabled by default.
 
 ## 1. Functional layers
 
@@ -47,11 +47,11 @@ A user should not connect directly to PostgreSQL, NATS, Docker, or Agent Control
 
 This is where work happens:
 
-- Agent Manager is the checked-in central OMP/API and NATS dispatcher; it persists runs but does not clone repositories or call Forgejo for the mission demo.
-- NATS JetStream carries `agent.runs.>` messages. The worker pool uses a shared durable consumer; the checked-in server has no NATS user or subject ACL.
-- llama.cpp in this repository runs on the VM at `http://llama:8080`, not on a worker laptop.
-- `agent-worker/worker.py` consumes mission events, validates the OMP crew plan, starts the worker-local `crew:slice` image, and returns completion evidence.
-- The current crew image is a deterministic hello-text demo. It runs with no network, does not clone Forgejo, and removes temporary candidate files. `create-python-script` remains an unsandboxed direct execution path.
+- Agent Manager validates and records missions, then publishes them to NATS JetStream.
+- NATS assigns each `agent.runs.created` event to a worker using the shared durable consumer.
+- Workers reach LiteLLM through the Tailnet-only Caddy route and use individual virtual keys.
+- Worker-local OMP plans from the mission goal, runs model-backed coders and reviewers with bounded revisions, and returns text artifacts and evidence.
+- Forgejo checkout, branch creation, repository writes, generated-code execution, and browser validation are not part of the current worker mission path.
 
 ### Records, evidence, and visibility
 

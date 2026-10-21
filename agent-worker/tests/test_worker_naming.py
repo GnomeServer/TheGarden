@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+sys.path.insert(0, str(Path(__file__).parents[1]))
 
 SPEC = importlib.util.spec_from_file_location(
     "worker_under_test", Path(__file__).parents[1] / "worker.py"

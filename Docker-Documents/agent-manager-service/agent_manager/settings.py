@@ -89,9 +89,6 @@ class Settings(BaseSettings):
     model_api_key: str = Field(default="", validation_alias="MODEL_API_KEY")
     model_name: str = Field(default="gpt-5.6-luna", validation_alias="MODEL_NAME")
     reasoning_effort: str = Field(default="medium", validation_alias="REASONING_EFFORT")
-    crew_runtime: str = Field(default="auto", validation_alias="CREW_RUNTIME")
-    crew_image: str = Field(default="python:3.12-slim", validation_alias="CREW_IMAGE")
-    log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     @model_validator(mode="after")
     def separate_service_credentials(self) -> "Settings":
         if self.openwebui_token and self.openwebui_token == self.api_token:

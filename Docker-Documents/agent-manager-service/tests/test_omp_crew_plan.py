@@ -29,9 +29,12 @@ class FakeSession:
         return None
 
 
-class OmpCrewPlanTests(unittest.IsolatedAsyncioTestCase):
-    async def test_omp_dispatches_its_selected_crew_counts(self) -> None:
-        goal = "Create a hello text artifact with readable content. " * 18
+class OmpMissionPlanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_omp_dispatches_the_real_calculator_goal(self) -> None:
+        goal = (
+            "Could you generate a GUI of a calculator that computes differences, "
+            "additions, subtractions, multiplication, and dividing?"
+        )
         jetstream = CapturingJetStream()
         request = SimpleNamespace(
             state=SimpleNamespace(auth_method="open-webui"),
@@ -43,8 +46,8 @@ class OmpCrewPlanTests(unittest.IsolatedAsyncioTestCase):
         actor = SimpleNamespace(id="member-1")
         body = OmpTurn(
             goal=goal,
-            forgejo_repository="lab/report-generator",
-            project_name="report-generator",
+            forgejo_repository="lab/calculator",
+            project_name="calculator",
         )
 
         with patch("agent_manager.omp.record_activity", new_callable=AsyncMock):
@@ -56,21 +59,23 @@ class OmpCrewPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subject, "agent.runs.created")
         plan = event["metadata"]["mission"]
         self.assertEqual(plan["planners"], 1)
-        self.assertEqual(plan["coders"], 2)
+        self.assertEqual(plan["coders"], 1)
         self.assertEqual(plan["reviewers"], 1)
-        self.assertEqual(event["metadata"]["crew"]["size"]["size"], "medium")
+        self.assertEqual(event["metadata"]["crew"]["engine"], "worker-local-model")
 
-    async def test_final_result_exposes_crew_plan_and_evidence(self) -> None:
+    async def test_final_result_exposes_artifacts_and_worker_identity(self) -> None:
         record = SimpleNamespace(
             id="mission-1",
+            worker_id="worker-03",
             status="completed",
             run_metadata={
                 "operation": "mission",
-                "ledger": {"result_summary": "Supervisor accepted the crew result."},
+                "ledger": {"result_summary": "Generated calculator.html."},
                 "result": {
-                    "crew_plan": {"planners": 1, "coders": 3, "reviewers": 2},
-                    "attempts": 2,
-                    "evidence": {"coder_artifacts": ["candidate-1.txt"]},
+                    "crew_plan": {"planners": 1, "coders": 1, "reviewers": 1},
+                    "attempts": 1,
+                    "evidence": {"artifacts": ["calculator.html"]},
+                    "artifacts": [{"path": "calculator.html", "content": "<html></html>"}],
                     "crew_outcome": "accepted",
                 },
             },
@@ -82,10 +87,13 @@ class OmpCrewPlanTests(unittest.IsolatedAsyncioTestCase):
 
         result = await mission_status("mission-1", SimpleNamespace(), StatusSession())
 
-        self.assertEqual(result["crew_plan"]["coders"], 3)
-        self.assertEqual(result["attempts"], 2)
-        self.assertEqual(result["evidence"]["coder_artifacts"], ["candidate-1.txt"])
+        self.assertEqual(result["crew_plan"]["coders"], 1)
+        self.assertEqual(result["worker_id"], "worker-03")
+        self.assertEqual(result["attempts"], 1)
+        self.assertEqual(result["evidence"]["artifacts"], ["calculator.html"])
+        self.assertEqual(result["artifacts"][0]["path"], "calculator.html")
         self.assertEqual(result["crew_outcome"], "accepted")
+
 
 
 if __name__ == "__main__":

@@ -130,7 +130,7 @@ async def accept_or_bounce(
     ledger["bounce_to"] = "none"
     metadata["ledger"] = ledger
     metadata["worker_role"] = "coder"
-    metadata["crew"] = {"size": size, "host": "worker-computer", "image": "crew:slice"}
+    metadata["crew"] = {"size": size, "host": "worker-computer", "engine": "worker-local-model"}
     metadata["mission"] = {
         "mission_id": mission_id,
         "goal": body.goal.strip(),
@@ -297,10 +297,13 @@ async def mission_status(
         "mission_id": record.id,
         "status": record.status,
         "summary": summary[:200],
+        "error": record.error,
         "question": bounce if record.status == "bounced" else None,
         "crew": metadata.get("crew") if isinstance(metadata.get("crew"), dict) else None,
         "crew_plan": result.get("crew_plan"),
         "attempts": result.get("attempts"),
         "evidence": evidence,
         "crew_outcome": result.get("crew_outcome"),
+        "worker_id": record.worker_id,
+        "artifacts": result.get("artifacts") if isinstance(result.get("artifacts"), list) else [],
     }

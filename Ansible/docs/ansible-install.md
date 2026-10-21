@@ -79,8 +79,7 @@ ansible-playbook playbooks/docker-services.yml --syntax-check
 ansible-playbook playbooks/agent-workers.yml --syntax-check
 ```
 
-The worker role provisions the long-running Python worker, Docker runtime,
-`worker.env`, and `crew:slice` image, and starts the process now and at reboot.
-It does not configure Tailscale ACLs or provide the model endpoint. Use
-`TheGarden/agent-worker/README.md` for the required NATS reachability and manual
-troubleshooting steps.
+The worker role installs the dynamic model-backed mission runner, a worker-scoped
+LiteLLM key, and Caddy's internal CA certificate. It configures the Tailnet
+LiteLLM route and starts the worker now and at reboot. See
+`TheGarden/agent-worker/README.md` for the mission artifact and status behavior.

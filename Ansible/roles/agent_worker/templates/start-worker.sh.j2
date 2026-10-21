@@ -1,11 +1,5 @@
 #!/bin/sh
 set -eu
-if command -v sg >/dev/null 2>&1 && getent group docker >/dev/null 2>&1; then
-  case " $(id -nG) " in
-    *" docker "*) ;;
-    *) exec sg docker -c "exec \"$0\"" ;;
-  esac
-fi
 cd "$HOME/agent-worker"
 exec 9>"$HOME/agent-worker/worker.lock"
 flock -n 9 || exit 0

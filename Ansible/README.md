@@ -117,18 +117,24 @@ ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/site.yml --check --diff
 ```
 
-`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and Docker;
-copies `worker.py` and the `crew/` image source; builds the configured
-`worker_crew_image` (default `crew:slice`); writes `worker.env` and
-`start-worker.sh`; and starts the long-running worker now and at reboot.
+`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and CA
+certificates; copies `worker.py`, `mission.py`, and requirements; installs each
+worker's LiteLLM virtual key and Caddy root CA; writes the worker environment
+and start script; and starts the worker now and at reboot. Mission generation
+uses the Tailnet-only Caddy route at
+`https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
 
 The worker process polls the shared durable `agent-workers-coder` consumer and
 sends a heartbeat every 15 seconds. The default `worker_nats_url` is
 `nats://100.94.49.45:4222`; that listener must be reachable over Tailscale.
+Mission artifacts are generated from the user's goal and saved under
+`AGENT_WORKSPACE/missions/`; the worker returns artifact contents to Agent
+Manager/Open WebUI. This flow does not clone or push the configured Forgejo
+repository.
 
 Add a laptop by copying the commented `michelangelo` block in
-`inventory/hosts.yml`, filling the Tailscale address, SSH user, and worker id,
-then:
+`inventory/hosts.yml`, filling the Tailscale address, SSH user, worker id, and
+worker-scoped `litellm_key_source`, then:
 
 ```bash
 cd Ansible
@@ -136,9 +142,7 @@ ansible agent_workers --limit michelangelo -m ansible.builtin.ping
 ansible-playbook playbooks/agent-workers.yml --limit michelangelo --ask-become-pass
 ```
 
-Use `--ask-become-pass` because package installation, Docker-group changes, and
-cron setup require privilege. `allow_generated_code` defaults to `false`; only
-enable it on a disposable worker for controlled `create-python-script` tests.
-The optional LiteLLM key and `worker_model_base_url` are for direct model calls;
-the current `mission` demo does not need a model endpoint. `worker_nats_url`
-must reach the Agent Manager's NATS listener over Tailscale.
+Use `--ask-become-pass` because package installation and system CA trust require
+privilege. `allow_generated_code` remains `false`; the separate
+`create-python-script` operation executes generated Python unsandboxed and is
+not needed for mission artifacts.

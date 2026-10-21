@@ -10,22 +10,22 @@ This Compose project deploys the first control-plane slice for agentic coding ru
 The Agent Manager is the central orchestrator: the OMP endpoint validates a
 mission, estimates crew counts, stores the run, and publishes
 `agent.runs.created`. NATS JetStream assigns it to one available coder worker.
-For `mission` runs, that worker starts its local `crew:slice` image with the
-OMP-selected counts; the current planner/coder/reviewer/supervisor flow is a
-deterministic hello-text demo, not repository coding. The manager consumes
-`agent.runs.status` on durable consumer `agent-manager-status` and
-`agent.runs.completed` on `agent-manager-completions`; completion evidence is
-stored in `metadata.result`. A worker status moves `queued` to `running`;
-late status/completion events cannot reopen a terminal run. Completion sets
-`completed` or `failed` and closes the run timestamps. Unacknowledged messages are redelivered
-after a restart; acknowledged messages are not replayed. See the
-[`worker protocol`](../../agent-worker/README.md).
+For `mission` runs, the worker's local OMP calls the worker-scoped LiteLLM
+endpoint. A model-backed planner creates acceptance criteria and coder tasks;
+coders produce goal-driven files; independent reviewers can request up to three
+revision attempts. Accepted artifact contents and review evidence return in the
+worker completion event and are stored in `metadata.result`. Artifacts are
+saved under the worker's `AGENT_WORKSPACE/missions/` directory. This flow does
+not clone, modify, or push the configured Forgejo repository, and it does not
+execute generated files. The manager consumes `agent.runs.status` and
+`agent.runs.completed`; status moves `queued` to `running`, terminal events
+close the run, and late events cannot reopen it.
 
-OpenWebUI shows the queued and worker-started phases while it polls, then the
-final summary and evidence. The dashboard shows the current run phase and
-worker, refreshing every 30 seconds. Individual planner/coder/reviewer steps
-are summarized after the crew finishes; this demo does not stream each agent
-transition live.
+OpenWebUI polls mission status and returns generated artifact files after
+completion. A later “what's the status?” message queries that same mission
+instead of creating another run. The dashboard shows the current run phase and
+worker, refreshing every 30 seconds; per-agent model calls are summarized after
+the crew finishes rather than streamed live.
 
 The dashboard's worker runtime view aggregates `RunRecord` start and completion
 timestamps by worker and UTC day. The
@@ -346,25 +346,26 @@ The worker pool should use one shared durable consumer per role, such as
 The worker process must receive its variables in the same shell or service
 unit that starts it:
 
+Ansible provisions each worker with its unique NATS identity, model URL, and
+worker-scoped LiteLLM key. The runtime environment is:
+
 ```text
 NATS_URL=nats://100.94.49.45:4222
-WORKER_ID=worker-01
+WORKER_ID=worker-03
 WORKER_ROLE=coder
 WORKER_CONSUMER=agent-workers-coder
+MODEL_BASE_URL=https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 MODEL_NAME=luna
 MODEL_API_KEY=<worker-scoped-LiteLLM-key>
-ALLOW_GENERATED_CODE=1
+MODEL_TLS_INSECURE=0
+ALLOW_GENERATED_CODE=0
 ```
 
-Inventory IDs are `worker-01` through `worker-04`, not hostnames. Do not set
-`MODEL_BASE_URL` to `http://litellm:4000/v1` on a laptop; that name is Docker
-DNS. Do not use `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`
-either: the checked-in Caddyfile has no `/litellm/` route. VM-local checks use
-`http://127.0.0.1:4000/v1`. A remote dynamic prompt has no routed model URL in
-this repository. `metadata.script` does not need one.
-
-Do not use the LiteLLM master key as `MODEL_API_KEY`. Do not place any key in
-Git. `MODEL_TLS_INSECURE=1` is not a substitute for a missing Caddy route.
+The worker uses the installed Caddy root CA to validate TLS. Do not use the
+LiteLLM master key or backend key as `MODEL_API_KEY`. Mission artifacts are
+returned to OpenWebUI and stored on the worker; they do not modify Forgejo.
+The separate `create-python-script` operation remains disabled because it runs
+generated Python unsandboxed.
 
 ### Duplicate completion events
 

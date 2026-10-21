@@ -23,9 +23,10 @@ The repository Caddyfile is `Caddyfile` in this directory, mounted by `compose.y
 - TLS: Caddy's internal CA
 - Grafana: `grafana:3000` under `/grafana/`
 - Forgejo: `forgejo:3000` under `/forgejo/`, with the `/forgejo` prefix stripped
+- LiteLLM: `/litellm/v1`, reverse-proxied to `litellm:4000` for Tailscale source addresses only
+- Untrusted requests to `/litellm/*` receive HTTP 403
 - Proxmox fallback: `https://10.1.10.156:8006` for every other path on this site
-- Not routed: `/litellm/`, `/llama/`, Open WebUI, Agent Manager, NATS, and PostgreSQL
-- Not published: port `8443` or any listener other than `80` and `443`
+- Not routed: `/llama/`, Open WebUI, Agent Manager, NATS, and PostgreSQL
 
 This project creates the `caddy_proxy` network. Grafana, Forgejo, and the other Compose projects join it as an external network. Do not mark this project's network `external: true`.
 

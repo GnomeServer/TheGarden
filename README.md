@@ -142,11 +142,11 @@ The role does not install Proxmox or modify networking. The staged installation 
 
 ### `Ansible/playbooks/agent-workers.yml`
 
-`playbooks/agent-workers.yml` configures the long-running worker: it installs Python, a virtualenv, Docker, copies `worker.py` and the crew image source, builds the configured `worker_crew_image` (default `crew:slice`), writes `worker.env`, and starts `start-worker.sh` now and at reboot. Generated-script execution is disabled by default because it runs unsandboxed as the laptop user; the mission demo does not require it. The role does not configure Tailscale ACLs or verify live NATS connectivity.
+`playbooks/agent-workers.yml` installs the dynamic worker runtime, Python environment, Caddy CA trust, and worker-scoped LiteLLM key; copies `worker.py` and `mission.py`; writes `worker.env`; and starts `start-worker.sh` now and at reboot. Generated mission artifacts are returned to OpenWebUI and stored on the worker; they do not modify Forgejo. The separate `create-python-script` operation remains disabled by default because it executes unsandboxed code.
 
 ## Inventory and Tailscale
 
-`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and worker hosts in `agent_workers`. The worker role installs the runtime and image; verify each laptop can reach the configured NATS endpoint over Tailscale. `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated tests and is not loaded separately by default. Remote Tailscale peers are a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`.
+`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and worker hosts in `agent_workers`. The worker role installs the runtime and model connection; verify each laptop can reach the configured NATS and LiteLLM endpoints over Tailscale. `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated work and is not loaded separately by default. Remote Tailscale peers are a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`.
 
 Observed Tailscale nodes:
 
@@ -195,14 +195,14 @@ Repository Compose projects for the `infra-lab-services` VM:
 - Grafana, Prometheus, and Node Exporter (`Docker-Documents/grafana_services`)
 - Agent Manager, its PostgreSQL database, and NATS JetStream (`Docker-Documents/agent-manager-service`)
 
-The checked-in Caddyfile listens on ports 80 and 443 only. It routes `/grafana/` to Grafana, `/forgejo/` to Forgejo, and every other path on `infra-lab-services.tail494f6d.ts.net` to the Proxmox UI at `https://10.1.10.156:8006`. It does not route `/litellm/`, `/llama/`, or Open WebUI, and it does not publish port `8443`.
+The checked-in Caddyfile listens on ports 80 and 443. It routes `/grafana/` to Grafana, `/forgejo/` to Forgejo, and `/litellm/` to LiteLLM for Tailscale source addresses only; the route requires a worker-scoped virtual key. Unmatched paths fall back to the Proxmox UI at `https://10.1.10.156:8006`. It does not route `/llama/` or Open WebUI, and it does not publish port `8443`.
 
 `Ansible/playbooks/docker-services.yml` deploys every project above except LiteLLM. LiteLLM is started from its own Compose directory. The base Agent Manager Compose file does not publish NATS; remote workers need `compose.worker-test.yml`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) and [`Ansible/README.md`](Ansible/README.md).
 
 ## Not managed yet
 
 - SSH private keys, credentials, or vault passwords
-- Model-backed planner/coder/reviewer agents, a skill registry, and per-task model routing are not implemented yet.
+- Forgejo checkout, branch/PR creation, generated-code execution, browser validation, and JEV model routing remain to be implemented.
 - Firewall rules
 - Tailscale ACLs, routes, or DNS settings
 - A complete package or service desired-state policy
