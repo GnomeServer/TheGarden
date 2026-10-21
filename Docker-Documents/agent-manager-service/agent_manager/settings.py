@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     worker_offline_after_seconds: int = Field(
         default=45, ge=15, le=3600, validation_alias="WORKER_OFFLINE_AFTER_SECONDS"
     )
+    worker_run_stale_after_seconds: int = Field(
+        default=1800,
+        ge=1200,
+        le=86400,
+        validation_alias="WORKER_RUN_STALE_AFTER_SECONDS",
+    )
     prometheus_url: str = Field(
         default="http://prometheus:9090", validation_alias="PROMETHEUS_URL"
     )

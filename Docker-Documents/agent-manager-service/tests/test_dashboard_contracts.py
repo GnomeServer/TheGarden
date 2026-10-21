@@ -70,6 +70,8 @@ class DashboardSanitizationTests(unittest.IsolatedAsyncioTestCase):
             },
             status="failed",
             worker_id="worker-01",
+            started_at=datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc),
+            completed_at=datetime(2026, 10, 20, 12, 5, tzinfo=timezone.utc),
             error="secret command output",
             goal="private prompt",
             created_at=datetime.now(timezone.utc),
@@ -84,7 +86,8 @@ class DashboardSanitizationTests(unittest.IsolatedAsyncioTestCase):
             set(output[0]),
             {"id", "request_summary", "worker_role", "operation", "source", "script_name",
              "ledger", "bounce", "result_summary", "chatter", "phase", "status", "worker_id",
-             "result_code", "error_summary", "created_at", "started_at", "updated_at"},
+            "result_code", "error_summary", "created_at", "started_at",
+            "duration_seconds", "updated_at"},
         )
         self.assertNotIn("private prompt", repr(output))
         self.assertEqual(output[0]["request_summary"], "Project: Quarterly report")
@@ -92,6 +95,7 @@ class DashboardSanitizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output[0]["operation"], "create-python-script")
         self.assertEqual(output[0]["script_name"], "audit_report.py")
         self.assertEqual(output[0]["phase"], "Stopped after a worker failure. Raw output is withheld.")
+        self.assertEqual(output[0]["duration_seconds"], 300)
         self.assertNotIn("secret command output", repr(output))
 
     async def test_worker_admission_status_uses_core_health_not_heartbeat_presence(self) -> None:

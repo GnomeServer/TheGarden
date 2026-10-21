@@ -7,7 +7,41 @@ This Compose project deploys the first control-plane slice for agentic coding ru
 - `nats`: private NATS server with JetStream enabled and persistent storage
 - `nats-exporter`: private Prometheus metrics for NATS clients, subscriptions, and JetStream
 
-The manager does not execute repository code and does not call Forgejo or a model. Workers consume `agent.runs.created`. The manager consumes `agent.runs.status` on durable consumer `agent-manager-status` and `agent.runs.completed` on durable consumer `agent-manager-completions`. A status event with `status: running` moves only `queued` to `running`. A completion event writes `metadata.result` and sets status to the worker's `completed` or `failed`, even if the run was already terminal. Those consumers redeliver unacknowledged messages after a restart; already-acked messages are not replayed. The worker protocol is in [`../../agent-worker/README.md`](../../agent-worker/README.md).
+The Agent Manager is the central orchestrator: the OMP endpoint validates a
+mission, estimates crew counts, stores the run, and publishes
+`agent.runs.created`. NATS JetStream assigns it to one available coder worker.
+For `mission` runs, that worker starts its local `crew:slice` image with the
+OMP-selected counts; the current planner/coder/reviewer/supervisor flow is a
+deterministic hello-text demo, not repository coding. The manager consumes
+`agent.runs.status` on durable consumer `agent-manager-status` and
+`agent.runs.completed` on `agent-manager-completions`; completion evidence is
+stored in `metadata.result`. A worker status moves `queued` to `running`;
+late status/completion events cannot reopen a terminal run. Completion sets
+`completed` or `failed` and closes the run timestamps. Unacknowledged messages are redelivered
+after a restart; acknowledged messages are not replayed. See the
+[`worker protocol`](../../agent-worker/README.md).
+
+OpenWebUI shows the queued and worker-started phases while it polls, then the
+final summary and evidence. The dashboard shows the current run phase and
+worker, refreshing every 30 seconds. Individual planner/coder/reviewer steps
+are summarized after the crew finishes; this demo does not stream each agent
+transition live.
+
+The dashboard's worker runtime view aggregates `RunRecord` start and completion
+timestamps by worker and UTC day. The
+`/v1/dashboard/worker-execution?from=YYYY-MM-DD&to=YYYY-MM-DD` endpoint returns
+elapsed seconds and run counts over a maximum 31-day range; active runs accrue
+time until queried. SSH remains in Access evidence and is not used for worker
+runtime. These are machine execution durations, not employee work hours.
+
+Queued and running runs are reconciled after
+`WORKER_RUN_STALE_AFTER_SECONDS` (default 1800). A running run is retained if
+a fresh worker heartbeat still claims it. Otherwise Agent Manager marks it
+failed, sets its terminal timestamp, and stops its displayed runtime. New queue
+events expire after the same interval; a worker acknowledges an expired event
+without executing it. Late status or completion events cannot reopen a terminal
+run. This timeout exceeds the worker's 900-second JetStream acknowledgment
+window to allow redelivery before finalization.
 
 The human control surface is available at `/dashboard/` through Caddy. It
 tracks runs, deadline-aware tasks, Forgejo users and activity, worker presence,
@@ -19,7 +53,7 @@ For an **existing central VM**, use the guarded manager-only
 the new-install commands below. It preserves live credentials, the NATS override,
 database volumes, Caddy routes, and the current manager image for recovery.
 Open WebUI integration is [opt-in](../open_webui_services/README.md#agent-manager-coder-function-manual-opt-in);
-generated Python is not sandboxed and must run only on disposable workers.
+`create-python-script` executes generated Python as the worker user and is not sandboxed; restrict it to disposable workers. The `mission` demo container has no network and retains no candidate files after exit.
 
 ## Open the dashboard
 

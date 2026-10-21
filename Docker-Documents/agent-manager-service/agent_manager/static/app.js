@@ -8,7 +8,7 @@ const state = {
   users: [],
   runs: [],
   activity: [],
-  estimates: [],
+  workerExecution: null,
   workSessions: null,
   nodeHealth: null,
   accessEvents: null,
@@ -51,6 +51,11 @@ function formatDuration(seconds) {
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
   return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function formatWorkerDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  return total < 60 ? `${total}s` : formatDuration(total);
 }
 
 function personLabel(user) {
@@ -228,8 +233,8 @@ function taskQuery() {
 
 async function refreshAll() {
   if (!state.session) return;
-  const from = $("estimate-from").value;
-  const to = $("estimate-to").value;
+  const from = $("worker-run-from").value;
+  const to = $("worker-run-to").value;
   const results = await Promise.allSettled([
     api("/v1/dashboard/summary"),
     api(taskQuery()),
@@ -237,7 +242,7 @@ async function refreshAll() {
     api("/v1/workers"),
     api("/v1/dashboard/runs?limit=100"),
     api("/v1/activity?limit=150"),
-    api(`/v1/activity/estimates?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+    api(`/v1/dashboard/worker-execution?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
     api("/v1/nodes/health"),
     api("/v1/access-events?limit=100"),
     api("/v1/work-sessions?limit=100"),
@@ -259,7 +264,7 @@ async function refreshAll() {
     "workers",
     "runs",
     "activity",
-    "estimates",
+    "workerExecution",
     "nodeHealth",
     "accessEvents",
     "workSessions",
@@ -305,7 +310,7 @@ function render() {
   renderWorkers();
   renderRuns();
   renderActivity();
-  renderEstimates();
+  renderWorkerExecution();
   renderNodes();
   renderAccess();
   renderIdentityMappings();
@@ -463,7 +468,7 @@ function renderSummary() {
     metric("In progress", summary.tasks?.in_progress, "tasks"),
     metric("Blocked", summary.tasks?.blocked, "tasks"),
     metric("Workers online", summary.workers?.online, "heartbeat presence"),
-    metric("Observed today", formatDuration(summary.observed_seconds_today), "estimated activity"),
+    metric("Worker time today", formatWorkerDuration(summary.worker_execution_seconds_today), `${summary.worker_runs_today || 0} runs · elapsed execution`),
   ].join("");
 }
 
@@ -789,6 +794,7 @@ function renderRuns() {
         <td>${esc(source)}${run.operation ? `<small class="subline">${esc(run.operation)}</small>` : ""}</td>
         <td>${esc(run.phase || "—")}${Array.isArray(run.chatter) && run.chatter.length ? `<ol class="chatter">${run.chatter.map((line) => `<li>${esc(line)}</li>`).join("")}</ol>` : ""}${run.bounce ? `<small class="subline">Bounce: ${esc(run.bounce)}</small>` : ""}${run.result_summary ? `<small class="subline">${esc(run.result_summary)}</small>` : ""}</td>
         <td>${esc(run.worker_role || "—")}${run.worker_id ? `<small class="subline">${esc(run.worker_id)}</small>` : ""}</td>
+        <td>${typeof run.duration_seconds === "number" ? esc(formatWorkerDuration(run.duration_seconds)) : "—"}</td>
         <td><span class="badge run-${esc(status.kind)}">${esc(status.label)}</span></td>
         <td>${esc(run.error_summary || "—")}</td>
       </tr>
@@ -796,7 +802,7 @@ function renderRuns() {
   }).join("");
   target.innerHTML = `
     <table>
-      <thead><tr><th scope="col">Created</th><th scope="col">Request</th><th scope="col">From</th><th scope="col">Step</th><th scope="col">Worker</th><th scope="col">State</th><th scope="col">Result</th></tr></thead>
+      <thead><tr><th scope="col">Created</th><th scope="col">Request</th><th scope="col">From</th><th scope="col">Step</th><th scope="col">Worker</th><th scope="col">Run time</th><th scope="col">State</th><th scope="col">Result</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   `;
@@ -1150,90 +1156,48 @@ async function deleteIdentityMapping(button) {
 }
 
 
-function renderEstimates() {
-  const target = $("estimates");
-  if (state.estimatesError) {
-    setError(target, "Activity estimates could not be loaded. Check the date range and try again.");
+function renderWorkerExecution() {
+  const target = $("worker-execution");
+  if (state.workerExecutionError) {
+    setError(target, "Worker execution time could not be loaded. Check the date range and try again.");
     return;
   }
-  if (!state.estimates) {
-    target.innerHTML = '<p class="loading">Loading estimates…</p>';
+  if (!state.workerExecution) {
+    target.innerHTML = '<p class="loading">Loading worker execution…</p>';
     return;
   }
-  if (!state.estimates.length) {
-    setEmpty(target, "No observed activity estimates for this date range.");
+  if (!state.workerExecution.length) {
+    setEmpty(target, "No worker executions in this date range.");
     return;
   }
-  const sorted = [...state.estimates].sort((a, b) =>
-    String(b.day).localeCompare(String(a.day)) || String(a.user_id).localeCompare(String(b.user_id)),
+  const sorted = [...state.workerExecution].sort((a, b) =>
+    String(b.day).localeCompare(String(a.day)) || String(a.worker_id).localeCompare(String(b.worker_id)),
   );
-  target.innerHTML = sorted.map((item) => {
-    const self = String(item.user_id) === String(state.session.user.id);
-    const status = item.review_status || "pending";
-    return `
-      <article class="estimate-card" data-estimate-card>
-        <div class="estimate-main">
-          <div><p class="eyebrow">${esc(formatDay(item.day))} UTC</p><h3>${esc(memberName(item.user_id))}</h3></div>
-          <strong class="estimate-total">${esc(formatDuration(item.estimated_seconds))}<small>estimated</small></strong>
-        </div>
-        <div class="source-breakdown">
-          <span>SSH <strong>${esc(formatDuration(item.sources?.ssh))}</strong></span>
-          <span>Dashboard <strong>${esc(formatDuration(item.sources?.dashboard))}</strong></span>
-          <span class="badge review-${esc(status)}">${esc(status.replaceAll("_", " "))}</span>
-          ${item.reviewed_by ? `<span class="reviewer">Reviewed by ${esc(memberName(item.reviewed_by))}</span>` : ""}
-        </div>
-        <details class="review-panel">
-          <summary>${status === "pending" ? "Review estimate" : "Update review"}</summary>
-          <div class="review-fields">
-            <label>Review note <input type="text" data-review-note maxlength="1000" placeholder="Optional context"></label>
-            <label>Adjusted seconds <input type="number" min="0" step="60" data-adjusted-seconds inputmode="numeric" placeholder="Leave blank to keep estimate"></label>
-            <div class="review-actions">
-              <button type="button" class="button primary" data-review="approved" data-user="${esc(item.user_id)}" data-day="${esc(item.day)}" ${self ? "disabled" : ""}>Approve</button>
-              <button type="button" class="button secondary" data-review="needs_correction" data-user="${esc(item.user_id)}" data-day="${esc(item.day)}" ${self ? "disabled" : ""}>Needs correction</button>
-            </div>
-            ${self ? '<p class="review-hint">You cannot review your own estimate.</p>' : ""}
-          </div>
-        </details>
-      </article>
-    `;
-  }).join("");
+  target.innerHTML = sorted.map((item) => `
+    <article class="estimate-card">
+      <div class="estimate-main">
+        <div><p class="eyebrow">${esc(formatDay(item.day))} UTC</p><h3>${esc(item.worker_id)}</h3></div>
+        <strong class="estimate-total">${esc(formatWorkerDuration(item.duration_seconds))}<small>worker runtime</small></strong>
+      </div>
+      <div class="source-breakdown">
+        <span>Runs <strong>${esc(item.run_count)}</strong></span>
+        <span>Active now <strong>${esc(item.active_runs)}</strong></span>
+      </div>
+    </article>
+  `).join("");
 }
 
-async function submitReview(button) {
-  const card = button.closest("[data-estimate-card]");
-  if (!card) return;
-  const body = { status: button.dataset.review };
-  const note = card.querySelector("[data-review-note]").value.trim();
-  const adjusted = card.querySelector("[data-adjusted-seconds]").value;
-  if (note) body.note = note;
-  if (adjusted !== "") body.adjusted_seconds = Number(adjusted);
-  button.disabled = true;
+async function reloadWorkerExecution() {
+  const from = encodeURIComponent($("worker-run-from").value);
+  const to = encodeURIComponent($("worker-run-to").value);
   try {
-    const result = await api(`/v1/activity/estimates/${encodeURIComponent(button.dataset.user)}/${encodeURIComponent(button.dataset.day)}/review`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    showToast(body.status === "approved" ? "Estimate approved" : "Correction requested", result?.undo_id);
-    state.estimatesError = null;
-    await reloadEstimates();
+    state.workerExecution = await api(`/v1/dashboard/worker-execution?from=${from}&to=${to}`);
+    state.workerExecutionError = null;
   } catch (error) {
-    showToast(error.message);
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function reloadEstimates() {
-  const from = encodeURIComponent($("estimate-from").value);
-  const to = encodeURIComponent($("estimate-to").value);
-  try {
-    state.estimates = await api(`/v1/activity/estimates?from=${from}&to=${to}`);
-    state.estimatesError = null;
-  } catch (error) {
-    state.estimatesError = error;
+    state.workerExecutionError = error;
     if (handleAuthError(error)) return;
   }
-  renderEstimates();
+  renderWorkerExecution();
 }
 
 function switchView(view, updateHash = true) {
@@ -1317,11 +1281,7 @@ $("task-status-filter").addEventListener("change", () => {
   renderTasks();
   refreshAll().catch(() => {});
 });
-$("load-estimates").addEventListener("click", reloadEstimates);
-$("estimates").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-review]");
-  if (button) submitReview(button);
-});
+ $("load-worker-runs").addEventListener("click", reloadWorkerExecution);
 $("identity-admin").addEventListener("click", (event) => {
   const mapButton = event.target.closest("[data-map-identity]");
   if (mapButton) {
@@ -1371,8 +1331,8 @@ $("logout").addEventListener("click", async () => {
   showLogin("You have signed out.");
 });
 
-$("estimate-to").value = utcDateValue(new Date());
-$("estimate-from").value = $("estimate-to").value;
+$("worker-run-to").value = utcDateValue(new Date());
+ $("worker-run-from").value = $("worker-run-to").value;
 for (const eventName of ["pointerdown", "touchstart", "click", "keydown"]) {
   document.addEventListener(eventName, noteInteraction, { passive: true });
 }

@@ -567,63 +567,12 @@ select {
   margin-top: .8rem;
   padding-bottom: .8rem;
 }
-.source-breakdown span:not(.badge):not(.reviewer) {
+.source-breakdown span {
   display: flex;
   gap: .3rem;
 }
 .source-breakdown strong {
   color: var(--ink);
-}
-.reviewer {
-  font-size: .69rem;
-}
-.review-pending {
-  background: var(--amber-bg);
-  color: var(--amber);
-}
-.review-approved {
-  background: var(--mint);
-  color: #1d6845;
-}
-.review-needs_correction {
-  background: var(--red-bg);
-  color: var(--red);
-}
-.review-panel summary {
-  color: var(--green);
-  cursor: pointer;
-  font-size: .8rem;
-  font-weight: 700;
-  list-style-position: inside;
-  padding-top: .8rem;
-}
-.review-fields {
-  display: grid;
-  gap: .6rem;
-  padding-top: .6rem;
-}
-.review-fields label {
-  color: var(--muted);
-  font-size: .72rem;
-  font-weight: 600;
-}
-.review-fields input {
-  display: block;
-  margin-top: .25rem;
-}
-.review-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: .5rem;
-}
-.review-actions .button {
-  min-height: 36px;
-  padding: .42rem .7rem;
-}
-.review-hint {
-  color: var(--red);
-  font-size: .75rem;
-  margin: 0;
 }
 .worker-grid {
   display: grid;

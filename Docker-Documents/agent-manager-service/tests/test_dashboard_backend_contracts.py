@@ -90,7 +90,7 @@ class ActivityEstimateTests(unittest.IsolatedAsyncioTestCase):
         opened = datetime(2026, 10, 12, 10, 0, tzinfo=timezone.utc)
         closed = opened + timedelta(minutes=2)
         session = SimpleNamespace(execute=AsyncMock(side_effect=[
-            Result([SimpleNamespace(id="member-1", forgejo_login="raphael")]),
+            Result([("member-1",)]),
             Result([
                 SimpleNamespace(
                     user_id="member-1", node_id="worker-01", session_id="ssh-session",

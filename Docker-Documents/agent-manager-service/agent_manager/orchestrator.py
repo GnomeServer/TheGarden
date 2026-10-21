@@ -1,4 +1,4 @@
-"""OMP hands a mission here. The orchestrator sizes a crew and tears it down."""
+"""Central dispatch to worker laptops plus ephemeral worker helpers."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,25 @@ from .crew_rules import (  # noqa: E402
     missing_requirements,
     review_locally,
 )
+
+async def dispatch_to_worker(jetstream: Any, event: dict[str, Any]) -> None:
+    """Dispatch an OMP-approved mission to the worker pool."""
+    run_id = event.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("mission event is missing run_id")
+    event.setdefault(
+        "expires_at",
+        (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=settings.worker_run_stale_after_seconds)
+        ).isoformat(),
+    )
+    await jetstream.publish(
+        "agent.runs.created",
+        json.dumps(event).encode("utf-8"),
+        headers={"Nats-Msg-Id": f"agent.runs.created:{run_id}"},
+    )
+
 
 class DockerCrew:
     """Creates and destroys the crew network. The model key never enters a container."""

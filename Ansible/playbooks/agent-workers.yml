@@ -3,6 +3,19 @@
   hosts: agent_workers
   gather_facts: true
   become: false
-
+  vars:
+    ansible_pipelining: false
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/ansible-sudo"
+  pre_tasks:
+    - name: Create the become helper directory
+      ansible.builtin.file:
+        path: "{{ ansible_user_dir }}/.local/bin"
+        state: directory
+        mode: "0700"
+    - name: Install the sudo-rs become helper
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../roles/agent_worker/files/ansible-sudo"
+        dest: "{{ ansible_user_dir }}/.local/bin/ansible-sudo"
+        mode: "0700"
   roles:
     - agent_worker

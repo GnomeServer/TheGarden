@@ -117,12 +117,14 @@ ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/site.yml --check --diff
 ```
 
-## Worker laptops
+`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and Docker;
+copies `worker.py` and the `crew/` image source; builds the configured
+`worker_crew_image` (default `crew:slice`); writes `worker.env` and
+`start-worker.sh`; and starts the long-running worker now and at reboot.
 
-`playbooks/agent-workers.yml` installs the Python worker from `../agent-worker`,
-creates a virtualenv, writes `~/agent-worker/worker.env`, and starts
-`start-worker.sh` now and on reboot. It does not install Pi. A missing LiteLLM
-key is a warning, not a failure. Generated scripts run as the laptop user.
+The worker process polls the shared durable `agent-workers-coder` consumer and
+sends a heartbeat every 15 seconds. The default `worker_nats_url` is
+`nats://100.94.49.45:4222`; that listener must be reachable over Tailscale.
 
 Add a laptop by copying the commented `michelangelo` block in
 `inventory/hosts.yml`, filling the Tailscale address, SSH user, and worker id,
@@ -134,8 +136,9 @@ ansible agent_workers --limit michelangelo -m ansible.builtin.ping
 ansible-playbook playbooks/agent-workers.yml --limit michelangelo --ask-become-pass
 ```
 
-`--ask-become-pass` is only needed for `python3-venv` and `cron`. Place the
-virtual key on the controller at the host's `litellm_key_source` before the
-run if dynamic Open WebUI prompts should work. Set `worker_model_base_url` in
-`inventory/group_vars/agent_workers.yml` when a Tailscale-reachable `/v1` route
-exists. Do not commit key files.
+Use `--ask-become-pass` because package installation, Docker-group changes, and
+cron setup require privilege. `allow_generated_code` defaults to `false`; only
+enable it on a disposable worker for controlled `create-python-script` tests.
+The optional LiteLLM key and `worker_model_base_url` are for direct model calls;
+the current `mission` demo does not need a model endpoint. `worker_nats_url`
+must reach the Agent Manager's NATS listener over Tailscale.

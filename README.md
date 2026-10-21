@@ -142,11 +142,11 @@ The role does not install Proxmox or modify networking. The staged installation 
 
 ### `Ansible/playbooks/agent-workers.yml`
 
-This playbook targets `agent_workers` and applies `roles/agent_worker`. The role copies a LiteLLM key to `~/.config/litellm/worker-api-key` and tries to install Pi harness files. Those sources (`files/caddy-local-root.crt`, `templates/models.json.j2`, `templates/settings.json.j2`) are not in the role, and the role does not install `agent-worker/worker.py` or set `WORKER_*`. Do not treat this playbook as a working worker rollout.
+`playbooks/agent-workers.yml` configures the long-running worker: it installs Python, a virtualenv, Docker, copies `worker.py` and the crew image source, builds the configured `worker_crew_image` (default `crew:slice`), writes `worker.env`, and starts `start-worker.sh` now and at reboot. Generated-script execution is disabled by default because it runs unsandboxed as the laptop user; the mission demo does not require it. The role does not configure Tailscale ACLs or verify live NATS connectivity.
 
 ## Inventory and Tailscale
 
-`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and the approved worker nodes in the `agent_workers` group. The Docker target and the worker hosts pin `ansible_python_interpreter` to `/usr/bin/python3`. `playbooks/agent-workers.yml` does not install `worker.py`; the role also references certificate and template files that are not in `roles/agent_worker/`. Runtime setup is still manual. See [`agent-worker/README.md`](agent-worker/README.md). `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated tests and is not loaded separately by default. Remote Tailscale peers are also available as a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`; operating-system usernames and SSH policy must be verified before enabling additional peers.
+`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and worker hosts in `agent_workers`. The worker role installs the runtime and image; verify each laptop can reach the configured NATS endpoint over Tailscale. `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated tests and is not loaded separately by default. Remote Tailscale peers are a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`.
 
 Observed Tailscale nodes:
 
@@ -202,7 +202,7 @@ The checked-in Caddyfile listens on ports 80 and 443 only. It routes `/grafana/`
 ## Not managed yet
 
 - SSH private keys, credentials, or vault passwords
-- Python worker runtime (`worker.py`, virtualenv, and `WORKER_*`). `roles/agent_worker` does not install that runtime
+- Model-backed planner/coder/reviewer agents, a skill registry, and per-task model routing are not implemented yet.
 - Firewall rules
 - Tailscale ACLs, routes, or DNS settings
 - A complete package or service desired-state policy

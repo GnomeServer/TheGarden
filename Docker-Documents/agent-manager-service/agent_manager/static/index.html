@@ -46,7 +46,7 @@
         </section>
         <section class="content-section" aria-labelledby="reported-time-title">
           <div class="section-heading"><div><p class="eyebrow">OPTIONAL SELF-REPORT</p><h2 id="reported-time-title">Reported time</h2></div></div>
-          <p class="section-note">Optional timer, separate from activity estimates. Rejected entries can be resubmitted or deleted.</p>
+          <p class="section-note">Optional self-reported human time, separate from measured worker execution. Rejected entries can be resubmitted or deleted.</p>
           <article class="panel timer-panel">
             <div id="timer-current" class="timer-current" aria-live="polite"><p class="loading">Loading reported time…</p></div>
             <form id="timer-form" class="timer-form">
@@ -57,10 +57,10 @@
           </article>
           <div id="work-sessions" class="table-wrap section-gap" aria-live="polite"><p class="loading">Loading reported entries…</p></div>
         </section>
-        <section class="content-section" aria-labelledby="estimates-title">
-          <div class="section-heading"><div><p class="eyebrow">OBSERVED TIME</p><h2 id="estimates-title">Activity estimates</h2></div><div class="date-filters"><label for="estimate-from">From (UTC)</label><input id="estimate-from" type="date"><label for="estimate-to">To (UTC)</label><input id="estimate-to" type="date"><button id="load-estimates" class="button secondary" type="button">Update</button></div></div>
-          <p class="notice"><strong>Estimates, not hours worked.</strong> Activity is inferred from SSH and recent foreground dashboard use. It can be incomplete or inaccurate; review before relying on it. The selected date range uses UTC days.</p>
-          <div id="estimates" class="estimate-list" aria-live="polite"><p class="loading">Loading estimates…</p></div>
+        <section class="content-section" aria-labelledby="worker-execution-title">
+          <div class="section-heading"><div><p class="eyebrow">WORKER EXECUTION</p><h2 id="worker-execution-title">Worker run time</h2></div><div class="date-filters"><label for="worker-run-from">From (UTC)</label><input id="worker-run-from" type="date"><label for="worker-run-to">To (UTC)</label><input id="worker-run-to" type="date"><button id="load-worker-runs" class="button secondary" type="button">Update</button></div></div>
+          <p class="notice"><strong>Measured worker execution, not human hours.</strong> Duration comes from run-start and run-completion timestamps. SSH remains in Access evidence and is not counted as work time; active runs accrue elapsed time.</p>
+          <div id="worker-execution" class="estimate-list" aria-live="polite"><p class="loading">Loading worker execution…</p></div>
         </section>
       </section>
 

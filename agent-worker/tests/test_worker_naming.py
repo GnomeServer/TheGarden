@@ -53,6 +53,27 @@ class WorkerNamingTests(unittest.IsolatedAsyncioTestCase):
             if subject == "agent.runs.completed"
         )
 
+    async def test_expired_mission_is_failed_without_starting_worker_execution(self) -> None:
+        event = {
+            "run_id": "expired-run",
+            "expires_at": "2020-01-01T00:00:00+00:00",
+            "metadata": {"operation": "mission", "worker_role": "coder"},
+        }
+        message = SimpleNamespace(
+            data=json.dumps(event).encode("utf-8"),
+            ack=AsyncMock(),
+        )
+        js = CapturingJetStream()
+
+        await worker.process_message(js, message)
+
+        self.assertEqual([subject for subject, _ in js.events], ["agent.runs.completed"])
+        completion = js.events[0][1]
+        self.assertEqual(completion["status"], "failed")
+        self.assertIn("expired", completion["summary"])
+        self.assertNotIn("started_at", completion)
+        message.ack.assert_awaited_once()
+
     async def test_running_status_is_published_on_the_manager_subject(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             event = {

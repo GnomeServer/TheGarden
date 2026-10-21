@@ -39,7 +39,7 @@ def make_run(*, status="queued", started_at=None, completed_at=None):
 
 
 def make_event_session(run, worker):
-    async def get(model, _record_id):
+    async def get(model, _record_id, **_kwargs):
         if model is RunRecord:
             return run
         if model is WorkerRecord:
@@ -78,6 +78,7 @@ class RunOutputTests(unittest.TestCase):
 class RunEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_running_event_persists_owner_and_worker_start_time(self):
         run = make_run()
+        run.run_metadata = {"operation": "mission", "chatter": ["OMP: crew selected."]}
         worker = SimpleNamespace(id="worker-03", reported_status="idle", current_run_id=None)
         session = make_event_session(run, worker)
         started_at = "2026-10-13T12:00:05+00:00"
@@ -103,6 +104,10 @@ class RunEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.started_at, datetime.fromisoformat(started_at))
         self.assertEqual(worker.reported_status, "busy")
         self.assertEqual(worker.current_run_id, run.id)
+        self.assertEqual(
+            run.run_metadata["chatter"][-1],
+            "Worker OMP: worker laptop picked up the mission and started the crew.",
+        )
 
     async def test_completed_completion_persists_owner_and_terminal_time(self):
         run = make_run(status="running")
@@ -175,6 +180,42 @@ class RunEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error, "script exited nonzero")
         self.assertEqual(worker.reported_status, "degraded")
         self.assertIsNone(worker.current_run_id)
+
+    async def test_late_completion_does_not_overwrite_terminal_stale_failure(self):
+        started_at = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        completed_at = started_at + timedelta(minutes=31)
+        run = make_run(
+            status="failed",
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+        run.error = "worker delivery expired"
+        run.run_metadata = {"result": {"reconciled": True}}
+        worker = SimpleNamespace(
+            id="worker-03", reported_status="degraded",
+            current_run_id=None, last_error=run.error,
+        )
+        session = make_event_session(run, worker)
+        record_activity_mock = AsyncMock()
+
+        with (
+            patch("agent_manager.main.SessionLocal", return_value=SessionContext(session)),
+            patch("agent_manager.main.record_activity", record_activity_mock),
+            patch("agent_manager.main.live_broker.publish", new_callable=AsyncMock),
+        ):
+            await apply_run_completion({
+                "run_id": run.id,
+                "worker_id": "worker-03",
+                "status": "completed",
+                "summary": "late result",
+                "event_id": "late-completion",
+            })
+
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.error, "worker delivery expired")
+        self.assertEqual(run.run_metadata["result"], {"reconciled": True})
+        self.assertEqual(run.completed_at, completed_at)
+        record_activity_mock.assert_not_awaited()
 
 
 if __name__ == "__main__":

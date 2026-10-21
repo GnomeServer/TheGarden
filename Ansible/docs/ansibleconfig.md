@@ -101,7 +101,7 @@ services are available.
 ## Worker deployment
 
 The worker inventory is in `inventory/hosts.yml` under `agent_workers`. The
-role and playbook scaffold are:
+playbook and active role are:
 
 ```text
 TheGarden/Ansible/roles/agent_worker
@@ -115,7 +115,15 @@ variables, CA trust, and troubleshooting steps are documented in:
 TheGarden/agent-worker/README.md
 ```
 
-`playbooks/agent-workers.yml` installs `worker.py`, a virtualenv, `worker.env`, and a reboot cron job. Limit it to one new host, for example `michelangelo`, after that host is uncommented in `inventory/hosts.yml`. Use `--ask-become-pass` so the laptop can install `python3-venv`.
+`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and Docker;
+copies the worker and crew source; builds `worker_crew_image` (default
+`crew:slice`); writes `worker.env`; and starts the restart loop now and at reboot.
+`allow_generated_code` defaults to `false`; only enable it on a disposable
+worker for controlled testing because `create-python-script` runs unsandboxed.
+
+Use `--ask-become-pass` for package installation, Docker-group changes, and
+cron setup. The mission demo needs NATS and Docker but no model endpoint; the
+optional LiteLLM URL/key only apply to direct model calls.
 
 ## Proxmox validation
 

@@ -278,7 +278,7 @@ async def require_admin(
 async def estimate_totals(
     session: AsyncSession, from_day: date, to_day: date
 ) -> dict[tuple[str, date], dict[str, int]]:
-    """Calculate capped observational estimates from SSH sessions and dashboard pulses."""
+    """Legacy human-activity estimate from SSH sessions and dashboard pulses; not worker runtime."""
     member_rows = (
         await session.execute(
             select(UserRecord.id).where(

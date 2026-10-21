@@ -8,15 +8,23 @@
       - worker_role | length > 0
     fail_msg: "Set worker_id and worker_role for {{ inventory_hostname }} before running this playbook."
 
-- name: Install Python, venv, and cron
+
+- name: Install Python, venv, cron, and Docker
   ansible.builtin.apt:
     name:
       - python3
       - python3-venv
       - cron
+      - docker.io
     state: present
   become: true
 
+- name: Let the laptop user run the shared crew image
+  ansible.builtin.user:
+    name: "{{ ansible_user_id }}"
+    groups: docker
+    append: true
+  become: true
 - name: Create worker directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -84,10 +92,24 @@
 - name: Warn when the LiteLLM key was not copied
   ansible.builtin.debug:
     msg: >-
-      No LiteLLM key was copied for {{ inventory_hostname }}.
-      Dynamic Open WebUI prompts will fail until litellm_key_source points at a
-      controller file and this playbook is run again.
+      No LiteLLM key was copied for {{ inventory_hostname }}. The mission
+      crew demo does not need one. Direct create-python-script model calls
+      remain disabled unless explicitly enabled and configured with a
+      reachable model URL and worker-scoped key.
   when: not (litellm_key_source_stat.stat.exists and litellm_key_source_stat.stat.isreg)
+
+
+- name: Install the shared crew image source
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../crew/"
+    dest: "{{ ansible_user_dir }}/agent-worker/crew/"
+    owner: "{{ ansible_user_id }}"
+    mode: "0644"
+
+- name: Build the shared crew image
+  ansible.builtin.command:
+    cmd: docker build -t {{ worker_crew_image }} {{ ansible_user_dir }}/agent-worker/crew
+  become: true
 
 - name: Start the worker after reboot
   ansible.builtin.cron:

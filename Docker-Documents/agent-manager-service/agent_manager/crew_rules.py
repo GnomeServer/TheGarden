@@ -35,9 +35,10 @@ def missing_requirements(goal: str) -> str | None:
     """Planner gate. A gap here bounces to OMP before any coder starts."""
     text = goal.casefold()
     if any(word in text for word in ("calculator", "gui", "button")):
+        asks_for_code = any(word in text for word in ("tkinter", "code", "script", "python"))
         missing: list[str] = []
         has_ops = any(word in text for word in ("add", "subtract", "multiply", "divide", "all computation", "computation"))
-        if not has_ops:
+        if not has_ops and not asks_for_code:
             missing.append("which operations the buttons should perform")
         if "button" not in text and "gui" not in text and "calculator" not in text:
             missing.append("whether input is buttons or a text field")
@@ -55,7 +56,7 @@ def is_chat_turn(goal: str) -> bool:
     folded = text.casefold()
     if folded.startswith("### task:"):
         return True
-    if any(token in folded for token in ("calculator", "gui ", "ansible", "playbook", "create a program", "create an app")):
+    if any(token in folded for token in ("calculator", "gui ", "tkinter", "ansible", "playbook", "create a program", "create an app", "error handling", "write the code", "complete code")):
         return False
     if folded.startswith(("build ", "implement ", "deploy ", "fix the ")):
         return False

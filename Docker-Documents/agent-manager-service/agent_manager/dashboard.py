@@ -6,7 +6,7 @@ import hmac
 from nats.errors import NoRespondersError, TimeoutError as NatsTimeoutError
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 from urllib.parse import urlencode
 
@@ -171,6 +171,129 @@ def worker_out(worker: WorkerRecord) -> dict[str, Any]:
         "version": worker.version,
         "capabilities": safe_capabilities,
     }
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def run_duration_seconds(
+    status: str,
+    started_at: datetime | None,
+    completed_at: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> int | None:
+    if not isinstance(started_at, datetime):
+        return None
+    if isinstance(completed_at, datetime):
+        end = _utc(completed_at)
+    elif status == "running":
+        end = _utc(now or utcnow())
+    else:
+        return None
+    return max(0, int((end - _utc(started_at)).total_seconds()))
+
+
+def aggregate_worker_execution(
+    rows: list[tuple[Any, ...]],
+    from_day: date,
+    to_day: date,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate elapsed worker-run time by worker and UTC day."""
+    if to_day < from_day or (to_day - from_day).days > 30:
+        raise ValueError("Worker execution range must be ordered and no longer than 31 days")
+
+    current = _utc(now or utcnow())
+    first = datetime.combine(from_day, datetime.min.time(), tzinfo=timezone.utc)
+    after_last = datetime.combine(to_day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+    totals: dict[tuple[str, date], dict[str, Any]] = {}
+
+    for worker_id, status, started_at, completed_at in rows:
+        if (
+            not isinstance(worker_id, str)
+            or not worker_id
+            or len(worker_id) > 255
+            or not worker_id.replace("-", "").replace("_", "").replace(".", "").isalnum()
+            or status not in {"running", "completed", "failed"}
+            or not isinstance(started_at, datetime)
+        ):
+            continue
+        start = _utc(started_at)
+        if start >= current:
+            continue
+        if completed_at is None:
+            if status != "running":
+                continue
+            end = current
+        elif isinstance(completed_at, datetime):
+            end = min(_utc(completed_at), current)
+        else:
+            continue
+        if end <= start:
+            continue
+
+        cursor = max(start, first)
+        finish = min(end, after_last)
+        while cursor < finish:
+            day = cursor.date()
+            boundary = min(
+                finish,
+                datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc),
+            )
+            seconds = int((boundary - cursor).total_seconds())
+            if seconds > 0:
+                key = (worker_id, day)
+                item = totals.setdefault(key, {
+                    "worker_id": worker_id,
+                    "day": day.isoformat(),
+                    "duration_seconds": 0,
+                    "run_count": 0,
+                    "active_runs": 0,
+                })
+                item["duration_seconds"] += seconds
+                item["run_count"] += 1
+                if status == "running":
+                    item["active_runs"] += 1
+            cursor = boundary
+
+    return sorted(
+        totals.values(),
+        key=lambda item: (item["day"], item["worker_id"]),
+        reverse=True,
+    )
+
+
+async def query_worker_execution(
+    session: AsyncSession,
+    from_day: date,
+    to_day: date,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    if to_day < from_day or (to_day - from_day).days > 30:
+        raise HTTPException(status_code=422, detail="Worker execution range must be ordered and no longer than 31 days")
+    first = datetime.combine(from_day, datetime.min.time(), tzinfo=timezone.utc)
+    after_last = datetime.combine(to_day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+    rows = (
+        await session.execute(
+            select(
+                RunRecord.worker_id,
+                RunRecord.status,
+                RunRecord.started_at,
+                RunRecord.completed_at,
+            ).where(
+                RunRecord.worker_id.is_not(None),
+                RunRecord.started_at.is_not(None),
+                RunRecord.status.in_({"running", "completed", "failed"}),
+                RunRecord.started_at < after_last,
+                or_(RunRecord.completed_at.is_(None), RunRecord.completed_at > first),
+            )
+        )
+    ).all()
+    return aggregate_worker_execution(rows, from_day, to_day, now=now)
 
 
 
@@ -614,18 +737,19 @@ async def dashboard_summary(
             WorkerRecord.last_seen_at >= offline_cutoff, WorkerRecord.reported_status == "busy"
         )
     )
-    from .tracking import estimate_totals
-
-    observed = await estimate_totals(session, now.date(), now.date())
-    observed_seconds = sum(
-        values["ssh"] + values["dashboard"] for values in observed.values()
+    worker_execution = await query_worker_execution(
+        session, now.date(), now.date(), now=now
     )
+    worker_execution_seconds = sum(
+        item["duration_seconds"] for item in worker_execution
+    )
+    worker_runs_today = sum(item["run_count"] for item in worker_execution)
     return {
         "tasks": {key: task_counts.get(key, 0) for key in ("todo", "in_progress", "blocked", "done")},
         "workers": {"online": workers_online or 0, "busy": workers_busy or 0},
         "runs": {key: run_counts.get(key, 0) for key in ("queued", "running", "completed", "failed")},
-        "observed_seconds_today": observed_seconds,
-        "observed_time_is_estimate": True,
+        "worker_execution_seconds_today": worker_execution_seconds,
+        "worker_runs_today": worker_runs_today,
     }
 
 
@@ -887,9 +1011,26 @@ async def dashboard_runs(
             "error_summary": error_summary,
             "created_at": iso(record.created_at),
             "started_at": iso(getattr(record, "started_at", None)),
+            "duration_seconds": run_duration_seconds(
+                run_status,
+                getattr(record, "started_at", None),
+                getattr(record, "completed_at", None),
+            ),
             "updated_at": iso(record.updated_at),
         })
     return output
+
+@router.get("/v1/dashboard/worker-execution")
+async def dashboard_worker_execution(
+    from_day: date = Query(alias="from"),
+    to_day: date = Query(alias="to"),
+    user: UserRecord = Depends(session_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    del user
+    return await query_worker_execution(session, from_day, to_day)
+
+
 
 
 @router.get("/v1/tasks")

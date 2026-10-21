@@ -13,10 +13,10 @@ import unicodedata
 import urllib.error
 import urllib.request
 import uuid
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
 import nats
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
@@ -38,6 +38,7 @@ MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "").rstrip("/")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "luna")
 MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "120"))
+CREW_IMAGE = os.getenv("CREW_IMAGE", "crew:slice")
 SCRIPT_TIMEOUT = float(os.getenv("SCRIPT_TIMEOUT", "300"))
 MAX_SCRIPT_CHARS = int(os.getenv("MAX_SCRIPT_CHARS", "30000"))
 MAX_OUTPUT_CHARS = int(os.getenv("MAX_OUTPUT_CHARS", "12000"))
@@ -51,7 +52,7 @@ MODEL_TLS_INSECURE = os.getenv("MODEL_TLS_INSECURE", "0").lower() in {
     "true",
     "yes",
 }
-WORKER_VERSION = "0.3.0"
+WORKER_VERSION = "0.4.0"
 HEARTBEAT_SECONDS = 15
 _presence = {"status": "idle", "run_id": None}
 
@@ -67,7 +68,7 @@ def heartbeat_payload() -> dict[str, Any]:
         "status": status,
         "current_run_id": _presence["run_id"],
         "version": WORKER_VERSION,
-        "capabilities": ["create-python-script"] if ALLOW_GENERATED_CODE else [],
+        "capabilities": ["mission-crew-demo"] + (["create-python-script"] if ALLOW_GENERATED_CODE else []),
         "sent_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -83,6 +84,24 @@ def running_status_event(run_id: str) -> dict[str, Any]:
         "sent_at": datetime.now(timezone.utc).isoformat(),
         "event_id": f"run-status:{run_id}:running",
     }
+
+
+def run_event_expired(event: dict[str, Any], *, now: datetime | None = None) -> bool:
+    """Reject queued events whose Manager-assigned execution window elapsed."""
+    deadline = event.get("expires_at")
+    if deadline is None:
+        return False
+    if not isinstance(deadline, str):
+        return True
+    try:
+        expires_at = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if expires_at.tzinfo is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    return current >= expires_at.astimezone(timezone.utc)
+
 
 
 SYSTEM_PROMPT = """You generate one complete Python 3 source file from a user request.
@@ -258,57 +277,102 @@ def write_script_without_overwrite(
 
 
 async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-    """Worker OMP starts one ephemeral image, then that image exits. No second review."""
+    """Run the worker-local OMP crew and return its bounded evidence."""
+    mission_id = event.get("run_id") if isinstance(event.get("run_id"), str) else "unknown"
     goal = event.get("goal") if isinstance(event.get("goal"), str) else ""
-    crew = metadata.get("crew") if isinstance(metadata.get("crew"), dict) else {}
-    nodes = crew.get("size") if isinstance(crew.get("size"), dict) else {}
-    node_text = (
-        f"{nodes.get('size', 'small')}: {nodes.get('planners', 1)} planner, "
-        f"{nodes.get('coders', 1)} coder(s), {nodes.get('reviewers', 1)} reviewer(s)"
-    )
-    script_path = Path(__file__).resolve().parents[1] / "Docker-Documents/agent-manager-service/agent_manager/worker_omp.py"
-    if not script_path.exists():
+    repo = event.get("forgejo_repository") if isinstance(event.get("forgejo_repository"), str) else ""
+    plan = metadata.get("mission")
+    if not isinstance(plan, dict):
+        raise RuntimeError("mission event is missing its crew plan")
+    counts = {
+        name: plan.get(name)
+        for name in ("planners", "coders", "reviewers")
+    }
+    if (
+        type(counts["planners"]) is not int
+        or counts["planners"] != 1
+        or type(counts["coders"]) is not int
+        or not 1 <= counts["coders"] <= 3
+        or type(counts["reviewers"]) is not int
+        or not 1 <= counts["reviewers"] <= 2
+    ):
+        raise RuntimeError("mission crew plan is outside the worker's supported limits")
+    mission = {
+        "mission_id": mission_id,
+        "goal": goal,
+        "repo": repo,
+        **counts,
+    }
+    steps = [
+        "Worker OMP: validated the crew plan.",
+        f"Planner: 1 planner, {counts['coders']} coder(s), {counts['reviewers']} reviewer(s), up to 3 attempts.",
+    ]
+    if not shutil.which("docker"):
         return {
             "status": "failed",
-            "summary": "Worker OMP could not find the ephemeral image program.",
+            "summary": "This laptop has no Docker, so the worker-local crew did not start.",
+            "steps": steps,
         }
-    env = os.environ.copy()
-    env["GOAL"] = goal
-    env["CREW_NODES"] = node_text
-    command = [sys.executable, str(script_path)]
-    host = "process"
-    if shutil.which("docker"):
-        command = [
-            "docker", "run", "--rm",
-            "-e", f"GOAL={goal}",
-            "-e", f"CREW_NODES={node_text}",
-            "-e", f"MODEL_BASE_URL={env.get('MODEL_BASE_URL', '')}",
-            "-e", f"MODEL_API_KEY={env.get('MODEL_API_KEY', '')}",
-            "-e", f"MODEL_NAME={env.get('MODEL_NAME', 'gpt-5.6-luna')}",
-            "-e", f"REASONING_EFFORT={env.get('REASONING_EFFORT', 'medium')}",
-            "-v", f"{script_path}:/worker_omp.py:ro",
-            "python:3.12-slim", "python", "/worker_omp.py",
-        ]
-        host = "docker"
-    completed = await asyncio.to_thread(
-        subprocess.run,
-        command,
-        env=None if host == "docker" else env,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("{")), "")
-    if not line:
+
+    with tempfile.TemporaryDirectory(prefix="crew-") as directory:
+        root = Path(directory)
+        work = root / "work"
+        work.mkdir()
+        mission_path = root / "mission.json"
+        mission_path.write_text(json.dumps(mission) + "\n", encoding="utf-8")
+        try:
+            completed = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "docker", "run", "--rm", "--network", "none",
+                    "--user", f"{os.getuid()}:{os.getgid()}",
+                    "-v", f"{mission_path}:/mission.json:ro",
+                    "-v", f"{work}:/work:rw",
+                    CREW_IMAGE,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "failed",
+                "summary": "The worker-local crew did not finish within 180 seconds.",
+                "steps": steps,
+            }
+        line = next(
+            (item for item in reversed(completed.stdout.splitlines()) if item.startswith("{")),
+            "",
+        )
+        if not line:
+            detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "no result JSON"
+            return {
+                "status": "failed",
+                "summary": f"The worker-local crew exited without a result. {detail[:160]}",
+                "steps": steps,
+            }
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise RuntimeError("worker-local OMP returned an invalid result")
+        outcome = payload.get("status")
+        summary = payload.get("summary") if isinstance(payload.get("summary"), str) else "Crew finished."
+        payload_steps = payload.get("steps")
+        if isinstance(payload_steps, list):
+            steps.extend(item for item in payload_steps if isinstance(item, str))
+        steps.append(f"Worker OMP: finalized with {outcome}.")
+        finalized = outcome in {"accepted", "rejected", "blocked"}
         return {
-            "status": "failed",
-            "summary": f"Worker image on {host} exited without a result.",
-            "error": completed.stderr[:500],
+            "status": "completed" if outcome == "accepted" else "failed",
+            "summary": summary,
+            "steps": steps,
+            "crew_outcome": outcome,
+            "crew_plan": counts,
+            "attempts": payload.get("attempts"),
+            "evidence": payload.get("evidence"),
+            "bounce_to": payload.get("bounce_to"),
+            "finalized": finalized,
         }
-    payload = json.loads(line)
-    payload["summary"] = f"{payload.get('summary', 'Worker finished.')} Image host: {host}. Nodes: {node_text}."
-    return payload
 
 
 async def process_message(js: Any, message: Any) -> None:
@@ -342,6 +406,19 @@ async def process_message(js: Any, message: Any) -> None:
         "status": "failed",
         "script": None,
     }
+    if run_event_expired(event):
+        result.update({
+            "status": "failed",
+            "summary": "The run expired before a worker could start it.",
+            "error": "run delivery expired before worker pickup",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        await js.publish("agent.runs.completed", json.dumps(result).encode("utf-8"))
+        print(json.dumps(result, indent=2), flush=True)
+        await message.ack()
+        return
+    result["started_at"] = datetime.now(timezone.utc).isoformat()
+
 
     try:
         _presence["status"] = "busy"
@@ -417,6 +494,7 @@ async def process_message(js: Any, message: Any) -> None:
         # Even model, validation, workspace, and compile failures become a
         # completion event so the manager can mark the database run failed.
         result["error"] = str(exc)[:2000]
+    result.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
 
     try:
         await js.publish("agent.runs.completed", json.dumps(result).encode("utf-8"))

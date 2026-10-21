@@ -295,7 +295,9 @@ class Pipe:
                 summary = reply.get("summary") if isinstance(reply.get("summary"), str) else "Mission recorded."
                 mission_id = reply.get("mission_id")
                 if isinstance(mission_id, str) and mission_id:
-                    followed = await self._follow_mission(client, mission_id, token, summary, project_name)
+                    followed = await self._follow_mission(
+                        client, mission_id, token, summary, project_name, __event_emitter__
+                    )
                     await self._emit_status(__event_emitter__, followed, done=True)
                     return followed
                 project = f" for `{project_name}`" if project_name else ""
@@ -310,11 +312,13 @@ class Pipe:
         token: str,
         summary: str,
         project_name: str | None,
+        emitter: Any,
     ) -> str:
         deadline = time.monotonic() + min(self.valves.RUN_TIMEOUT_SECONDS, 180)
         project = f" for `{project_name}`" if project_name else ""
         headers = {"Authorization": f"Bearer {token}"}
         url = f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/missions/{mission_id}"
+        last_progress = None
         while time.monotonic() < deadline:
             try:
                 response = await client.get(url, headers=headers)
@@ -326,17 +330,45 @@ class Pipe:
             if not isinstance(state, dict):
                 break
             status = state.get("status")
+            done = state.get("summary") if isinstance(state.get("summary"), str) else ""
+            handoff = done.startswith("OMP handed the job")
+            progress = None
+            if status == "queued":
+                progress = done if handoff else "Mission queued; waiting for a worker."
+            elif status == "running":
+                progress = "Worker laptop picked up the mission; worker-local OMP is running the crew."
+            if progress and progress != last_progress:
+                await self._emit_status(emitter, progress)
+                last_progress = progress
             if status == "bounced":
-                question = state.get("question") or state.get("summary") or summary
+                question = state.get("question") or done or summary
                 return question if isinstance(question, str) else summary
-            if status == "completed":
-                done = state.get("summary") if isinstance(state.get("summary"), str) else summary
-                script = state.get("script") if isinstance(state.get("script"), str) else ""
-                body = f"{done}{project}. Mission `{mission_id}`."
-                return f"{body}\n\n```python\n{script.rstrip()}\n```" if script.strip() else body
-            if status == "failed":
-                failed = state.get("summary") if isinstance(state.get("summary"), str) else "The crew stopped before finishing."
-                return f"{failed}{project}. Mission `{mission_id}`."
+            if status in {"completed", "failed"} and not handoff:
+                text = done or summary
+                body = f"{text}{project}. Mission `{mission_id}`."
+                evidence = state.get("evidence")
+                evidence_parts = []
+                if isinstance(state.get("attempts"), int):
+                    evidence_parts.append(f"Attempts: {state['attempts']}.")
+                if isinstance(evidence, dict):
+                    artifacts = evidence.get("coder_artifacts")
+                    reviewers = evidence.get("reviewers")
+                    checks = evidence.get("supervisor_checks")
+                    if isinstance(artifacts, list):
+                        evidence_parts.append(f"Coder artifacts checked: {len(artifacts)}.")
+                    if isinstance(reviewers, list):
+                        approved = sum(
+                            1 for item in reviewers
+                            if isinstance(item, dict) and item.get("decision") == "approved"
+                        )
+                        evidence_parts.append(
+                            f"Reviewer verdicts: {approved}/{len(reviewers)} approved."
+                        )
+                    if isinstance(checks, list):
+                        evidence_parts.append(f"Supervisor checks: {len(checks)}.")
+                if evidence_parts:
+                    body += "\n\n" + " ".join(evidence_parts)
+                return body
             await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
         return f"{summary}{project}. Mission `{mission_id}`. The crew is still working."
 

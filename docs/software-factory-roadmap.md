@@ -94,23 +94,25 @@ Suggested task format:
 
 Unchecked means not verified in the lab. It does not mean the repository has no code.
 
-- [ ] A worker can consume a run from NATS and report its result. — `agent-worker/worker.py` consumes `agent.runs.created` and publishes `agent.runs.started` and `agent.runs.completed`. Not verified as a lab run.
-- [ ] Agent Manager consumes worker status events and updates PostgreSQL. — the service consumes `agent.runs.started` and `agent.runs.completed` and updates status. It publishes `agent.runs.cancelled` and never consumes it, so status stays `cancel_requested`. Not verified as a lab run.
-- [ ] The run state machine rejects invalid status changes. — a completion overwrites status, including an earlier terminal status.
-- [ ] A deterministic validator independently checks a worker result.
-- [ ] Evidence is stored and linked to a run.
+- [ ] A worker can consume a run from NATS and report its result. — checked-in `agent-worker/worker.py` handles `mission` and `create-python-script`; the mission path validates OMP's crew counts, starts `crew:slice`, and publishes completion evidence. Not verified as a lab run.
+- [ ] Agent Manager consumes worker status events and updates PostgreSQL. — the service consumes `agent.runs.started` and `agent.runs.completed`; a background reaper now finalizes stale queued/running runs after `WORKER_RUN_STALE_AFTER_SECONDS` when no worker heartbeat owns them. Not verified as a lab recovery.
+- [ ] The run state machine rejects every invalid transition. — late status/completion events are ignored for terminal runs; other transition rules remain incomplete.
+- [ ] A general deterministic validator independently checks a worker result. — `crew/supervisor.py` checks only the current hello-text demo contract.
+- [ ] Evidence is stored and linked to a run. — mission completion evidence is recorded in `metadata.result`; temporary candidate files are removed with the worker image. Not verified as a lab run.
 - [ ] A worker laptop can join through a documented, secure connection process.
 - [ ] The tracked Agent Manager source and the live deployment checkout are kept in sync.
-- [ ] Ansible can configure a standard worker laptop. — `playbooks/agent-workers.yml` does not install `worker.py`, and the role is missing `caddy-local-root.crt`, `models.json.j2`, and `settings.json.j2`.
+- [ ] Ansible can configure a standard worker laptop. — the role installs the worker process and demo crew image; end-to-end NATS reachability and live service operation are not verified on each host.
 - [ ] Machine secrets are deployed reproducibly without putting plaintext secrets in Git.
 
 ### Not built yet
 
 - [ ] A formal mission contract and definition-of-done format.
-- [ ] A versioned skill format and capability registry.
-- [ ] A real coding worker using a disposable repository.
+- [ ] A versioned skill format, skill selection, and capability registry.
+- [ ] A real coding worker using a disposable Forgejo repository.
+- [ ] Model-backed planner, coder, and reviewer agents in the worker-local crew.
 - [ ] An independent reviewer using a fresh checkout.
 - [ ] A browser or user-journey validator.
+- [ ] Per-task model routing across multiple configured models; the current gateway exposes one public model alias (`luna`), and Jev routing is not integrated.
 - [ ] Preview, staging, release, and rollback workflows.
 - [ ] Production signals automatically becoming new missions.
 - [ ] A continuous-learning process that turns repeated failures into tests, skills, or documentation.
@@ -120,33 +122,39 @@ Unchecked means not verified in the lab. It does not mean the repository has no 
 ## 4. Current architecture in plain language
 
 ```text
-Human
+User
   ↓
-Open WebUI or Agent Manager API
+Open WebUI + Agent Manager Pipe
   ↓
-Agent Manager: the factory supervisor
-  ├── PostgreSQL: permanent run records
-  └── NATS JetStream: live task messages
-          ↓
-      Worker laptop
-          ↓
-      Temporary workspace and sandbox
-          ↓
-      Forgejo branch, tests, and evidence
-          ↓
-      Independent validator
-          ↓
-      Human approval or rejection
+Central OMP: checks mission and estimates crew counts
+  ↓
+Agent Manager: records the run, publishes to NATS JetStream
+  ↓
+One available coder worker laptop
+  ↓
+Worker-local OMP (`crew:slice`)
+  ├── Planner
+  ├── 1–3 deterministic coder demo processes
+  ├── 1–2 deterministic reviewer demo processes
+  └── Supervisor; planner retries at most three times
+  ↓
+Worker completion + bounded evidence → NATS → Agent Manager/PostgreSQL
+  ↓
+Open WebUI polls and presents the final status
 ```
+
+The current crew image only accepts hello-text demo goals. It does not clone
+Forgejo, run model-backed coding agents, or retain candidate files after the
+container exits.
 
 ### What the main services mean
 
 | Service | Simple explanation | Should it be the permanent record? |
 |---|---|---:|
-| Agent Manager | Factory supervisor and API | No, it uses PostgreSQL |
+| Agent Manager | Central OMP/API, run ledger, and NATS dispatch | No, it uses PostgreSQL |
 | PostgreSQL | The factory ledger | Yes, for run and task state |
 | NATS JetStream | The conveyor belt for messages | No, it carries work and events |
-| Forgejo | Code warehouse and review desk | Yes, for code and branches |
+| Forgejo | Repository and review system; not used by the current crew demo | Yes, for code and branches |
 | Garage | Large evidence/artifact storage, when deployed | For artifacts, not workflow state |
 | Prometheus | Numeric measurements | No, metrics only |
 | Grafana | Human dashboards | No, dashboards only |

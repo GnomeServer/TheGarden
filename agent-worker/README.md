@@ -9,14 +9,27 @@ OpenAI-compatible gateway only when `metadata.script` is absent. The workspace
 is `AGENT_WORKSPACE/<project-slug>/` when `metadata.project_name` is set, and
 `AGENT_WORKSPACE/<run-id>/` otherwise.
 
-The worker currently supports the `create-python-script` operation. A script
-may also be supplied as `metadata.script` for deterministic pipeline tests,
-bypassing the model call.
+The worker supports two distinct operations:
 
-> **Test-worker safety:** generated code runs as the worker operating-system
-> user. This is not a sandbox. Use a disposable/test worker, do not provide
-> production credentials, and keep `ALLOW_GENERATED_CODE=1` disabled except for
-> controlled tests.
+- `mission` starts the worker-local `crew:slice` image. The worker validates
+  OMP's plan (one planner, 1–3 coders, 1–2 reviewers), mounts the mission
+  read-only, and returns the crew outcome and supervisor evidence. The current
+  crew image is a deterministic hello-text demo: it does not clone Forgejo or
+  modify a repository. Its bounded retry loop is controlled by the planner.
+  The Manager stamps each queued event with an expiry; an expired delivery is
+  reported failed and acknowledged without running the crew.
+- `create-python-script` generates or accepts one Python script, then runs it
+  directly as the worker operating-system user. This operation is not sandboxed.
+
+The OMP mission endpoint chooses crew counts and places them in
+`metadata.mission`; callers should not select a worker laptop or override the
+plan. Mission evidence is stored with the run result, but the temporary
+container's candidate files are not retained as downloadable artifacts.
+
+> **Test-worker safety:** keep `ALLOW_GENERATED_CODE=0`; set it to `1` only for
+> controlled tests on a disposable worker with no production credentials. This
+> setting controls the unsandboxed `create-python-script` operation; it does
+> not enable the separate `mission` crew image.
 
 ## Repository layout
 
@@ -115,22 +128,27 @@ endpoint problem, not an empty JetStream queue.
 
 ## Install or update a worker
 
-Copy the source files through a trusted SSH channel:
+The Ansible role is the preferred installer; it copies both the Python worker
+and crew image source, builds `crew:slice`, writes `worker.env`, and starts the
+worker now and at reboot. For a manual install, first ensure Python, Docker,
+and Docker-group access are configured on the worker:
 
 ```bash
-mkdir -p ~/agent-worker
-
+WORKER='<worker-id>@<tailnet-user-IP>'
+ssh "$WORKER" 'mkdir -p ~/agent-worker'
 scp "$REPO_ROOT/agent-worker/worker.py" \
     "$REPO_ROOT/agent-worker/requirements.txt" \
-    <worker-id>@<tailnet-user-IP>:~/agent-worker/
+    "$WORKER:~/agent-worker/"
+scp -r "$REPO_ROOT/crew" "$WORKER:~/agent-worker/crew"
+ssh "$WORKER" 'docker build -t crew:slice ~/agent-worker/crew'
 ```
 
-Create the environment once:
+Create the Python environment on the worker:
 
 ```bash
-cd ~/agent-worker
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+ssh "$WORKER" 'cd ~/agent-worker &&
+  python3 -m venv .venv &&
+  .venv/bin/python -m pip install -r requirements.txt'
 ```
 
 Do not copy `.env` files, private keys, LiteLLM master keys, or API tokens from
@@ -146,8 +164,8 @@ export NATS_URL='nats://100.94.49.45:4222'
 export WORKER_ID='<worker-id>'
 export WORKER_ROLE='coder'
 export WORKER_CONSUMER='agent-workers-coder'
-export AGENT_WORKSPACE="$HOME/agent-workspace"
-export ALLOW_GENERATED_CODE=1
+export CREW_IMAGE='crew:slice'
+export ALLOW_GENERATED_CODE=0
 ```
 
 The model gateway uses the worker-scoped LiteLLM virtual key:

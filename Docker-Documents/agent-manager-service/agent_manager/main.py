@@ -19,7 +19,7 @@ from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, RetentionPolic
 from nats.js.errors import NotFoundError
 from prometheus_client import Counter, Gauge, make_asgi_app
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import and_, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import api_token_user, require_run_submission, run_client
@@ -250,6 +250,14 @@ async def ensure_worker_consumer_filter(connection: nats.NATS) -> None:
 
 async def publish_run_event(request: Request, subject: str, payload: dict[str, Any]) -> None:
     connection: nats.NATS = request.app.state.nats
+    if subject == RUN_CREATED_SUBJECT:
+        payload.setdefault(
+            "expires_at",
+            (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=settings.worker_run_stale_after_seconds)
+            ).isoformat(),
+        )
     message_id = payload["run_id"]
     await connection.jetstream().publish(
         subject,
@@ -306,13 +314,25 @@ async def apply_run_status(payload: dict[str, Any]) -> None:
             )
         ):
             return
-        record = await session.get(RunRecord, run_id)
+        record = await session.get(RunRecord, run_id, with_for_update=True)
         if record is None:
             logger.warning("status received for unknown run %s", run_id)
+            return
+        if record.status in {"completed", "failed", "cancelled", "bounced"}:
+            logger.info("ignoring late status for terminal run %s", run_id)
             return
         if record.status == "queued":
             record.status = "running"
         record.worker_id = worker_id
+        metadata = dict(record.run_metadata or {})
+        if metadata.get("operation") == "mission":
+            chatter = [
+                line for line in metadata.get("chatter", [])
+                if isinstance(line, str)
+            ]
+            chatter.append("Worker OMP: worker laptop picked up the mission and started the crew.")
+            metadata["chatter"] = chatter[-12:]
+            record.run_metadata = metadata
         if record.started_at is None:
             record.started_at = (
                 parse_event_time(payload.get("sent_at"))
@@ -346,9 +366,12 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
         raise ValueError(f"unsupported worker status: {worker_status!r}")
     event_id = str(payload.get("event_id") or f"run-completion:{run_id}:{worker_status}")
     async with SessionLocal() as session:
-        record = await session.get(RunRecord, run_id)
+        record = await session.get(RunRecord, run_id, with_for_update=True)
         if record is None:
             logger.warning("completion received for unknown run %s", run_id)
+            return
+        if record.status in {"completed", "failed", "cancelled", "bounced"}:
+            logger.info("ignoring late completion for terminal run %s", run_id)
             return
         previous_status = record.status
         metadata = dict(record.run_metadata or {})
@@ -588,6 +611,134 @@ async def refresh_operational_gauges() -> None:
         await asyncio.sleep(15)
 
 
+async def reconcile_stale_runs(*, now: datetime | None = None) -> int:
+    """Fail queued or running runs whose worker delivery window has expired."""
+    current = now or datetime.now(timezone.utc)
+    stale_before = current - timedelta(seconds=settings.worker_run_stale_after_seconds)
+    offline_before = current - timedelta(seconds=settings.worker_offline_after_seconds)
+    finalized: list[tuple[str, str | None, ActivityRecord]] = []
+
+    async with SessionLocal() as session:
+        records = (
+            await session.execute(
+                select(RunRecord)
+                .where(
+                    RunRecord.completed_at.is_(None),
+                    or_(
+                        and_(
+                            RunRecord.status.in_({"queued", "accepted"}),
+                            RunRecord.created_at <= stale_before,
+                        ),
+                        and_(
+                            RunRecord.status == "running",
+                            RunRecord.started_at.is_not(None),
+                            RunRecord.started_at <= stale_before,
+                        ),
+                    ),
+                )
+                .order_by(RunRecord.created_at)
+                .limit(100)
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars().all()
+
+        for record in records:
+            active_worker = await session.scalar(
+                select(WorkerRecord.id)
+                .where(
+                    WorkerRecord.current_run_id == record.id,
+                    WorkerRecord.reported_status == "busy",
+                    WorkerRecord.last_seen_at >= offline_before,
+                )
+                .limit(1)
+            )
+            if active_worker:
+                continue
+
+            previous_status = record.status
+            summary = (
+                "Worker run expired before a laptop picked it up."
+                if previous_status in {"queued", "accepted"}
+                else "Worker stopped reporting before completing the run."
+            )
+            error = (
+                f"Run was finalized after exceeding the "
+                f"{settings.worker_run_stale_after_seconds}-second worker timeout."
+            )
+            metadata = dict(record.run_metadata or {})
+            result = dict(metadata.get("result") or {})
+            result.update({
+                "event": "run.completed",
+                "status": "failed",
+                "summary": summary,
+                "error": error,
+                "reconciled": True,
+            })
+            metadata["result"] = result
+            ledger = dict(metadata.get("ledger") or {})
+            ledger["result_summary"] = summary
+            if metadata.get("operation") == "mission":
+                ledger["kind"] = "mission"
+            metadata["ledger"] = ledger
+            chatter = [
+                line for line in metadata.get("chatter", [])
+                if isinstance(line, str)
+            ]
+            chatter.append(
+                "Orchestrator: finalized the run after its worker delivery expired."
+            )
+            metadata["chatter"] = chatter[-12:]
+            record.run_metadata = metadata
+            record.status = "failed"
+            record.error = error
+            record.completed_at = current
+
+            worker = (
+                await session.get(WorkerRecord, record.worker_id)
+                if isinstance(record.worker_id, str)
+                else None
+            )
+            if worker is not None and worker.current_run_id == record.id:
+                worker.reported_status = "degraded"
+                worker.current_run_id = None
+                worker.last_error = error
+
+            event = await record_activity(
+                session,
+                source="worker",
+                source_event_id=f"run-stale:{record.id}",
+                event_type="run.failed",
+                worker_id=worker.id if worker is not None else None,
+                run_id=record.id,
+                summary=summary,
+                payload={"status": "failed", "stale": True},
+            )
+            finalized.append((record.id, record.worker_id, event))
+
+        if finalized:
+            await session.commit()
+
+    if finalized:
+        RUNS_FAILED.inc(len(finalized))
+    for run_id, worker_id, event in finalized:
+        await live_broker.publish(
+            "run", {"id": run_id, "status": "failed", "worker_id": worker_id}
+        )
+        await live_broker.publish("activity", activity_out(event))
+    return len(finalized)
+
+
+async def stale_run_reconciliation_loop() -> None:
+    while True:
+        try:
+            failed = await reconcile_stale_runs()
+            if failed:
+                logger.warning("finalized %d stale worker run(s)", failed)
+        except Exception:
+            logger.exception("stale run reconciliation failed")
+        await asyncio.sleep(30)
+
+
 async def deadline_notification_loop() -> None:
     while True:
         try:
@@ -629,6 +780,7 @@ async def lifespan(app: FastAPI):
             )
         ),
         asyncio.create_task(refresh_operational_gauges()),
+        asyncio.create_task(stale_run_reconciliation_loop()),
         asyncio.create_task(deadline_notification_loop()),
     ]
     app.state.background_tasks = tasks

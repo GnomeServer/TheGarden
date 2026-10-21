@@ -1,5 +1,9 @@
 # Pi + LiteLLM worker setup
 
+> This is a legacy manual Pi-harness guide, not the current worker deployment.
+> The factory worker is `agent-worker/worker.py`, provisioned by
+> `Ansible/playbooks/agent-workers.yml`; see [`agent-worker/README.md`](../agent-worker/README.md).
+
 This guide configures the Pi coding harness on a worker to use the shared
 LiteLLM gateway over the Tailscale network.
 

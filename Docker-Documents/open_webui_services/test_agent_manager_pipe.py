@@ -40,7 +40,36 @@ class FakeAgentManagerClient:
     def __init__(self) -> None:
         self.url: str | None = None
         self.request_body: dict | None = None
-
+        self.states = [
+            {
+                "type": "mission",
+                "mission_id": "mission-1",
+                "status": "queued",
+                "summary": "OMP handed the job to a worker laptop. Crew: 1 planner, 2 coders, 2 reviewers.",
+            },
+            {
+                "type": "mission",
+                "mission_id": "mission-1",
+                "status": "running",
+                "summary": "OMP handed the job to a worker laptop. Crew is running.",
+            },
+            {
+                "type": "mission",
+                "mission_id": "mission-1",
+                "status": "completed",
+                "summary": "Supervisor accepted 2 coder artifacts after 1 attempt.",
+                "question": None,
+                "attempts": 1,
+                "evidence": {
+                    "coder_artifacts": ["candidate-1.txt", "candidate-2.txt"],
+                    "reviewers": [
+                        {"reviewer_id": 1, "decision": "approved"},
+                        {"reviewer_id": 2, "decision": "approved"},
+                    ],
+                    "supervisor_checks": ["artifacts", "reviews", "policy"],
+                },
+            },
+        ]
     async def __aenter__(self) -> FakeAgentManagerClient:
         return self
 
@@ -63,16 +92,7 @@ class FakeAgentManagerClient:
 
     async def get(self, url: str, *, headers: dict) -> FakeResponse:
         self.get_url = url
-        return FakeResponse(
-            {
-                "type": "mission",
-                "mission_id": "mission-1",
-                "status": "completed",
-                "summary": "Reviewer accepted the script. The crew has been removed.",
-                "question": None,
-                "script": "print('ok')\n",
-            }
-        )
+        return FakeResponse(self.states.pop(0))
 
 
 class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
@@ -80,6 +100,7 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         pipe = Pipe()
         pipe.valves.AGENT_MANAGER_API_TOKEN = "test-token"
         pipe.valves.FORGEJO_REPOSITORY = "owner/repository"
+        pipe.valves.POLL_INTERVAL_SECONDS = 0.5
         return pipe
 
     async def test_missing_project_is_a_question_not_a_run(self) -> None:
@@ -125,6 +146,7 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_project_reply_keeps_the_previous_goal(self) -> None:
         pipe = self.configured_pipe()
         client = FakeAgentManagerClient()
+        event_emitter = AsyncMock()
         messages = [
             {"role": "user", "content": "Write a short status note for the lab."},
             {"role": "assistant", "content": "What project name should this mission use?"},
@@ -135,11 +157,23 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         with patch.object(agent_manager_pipe.httpx, "AsyncClient", return_value=client):
-            result = await pipe.pipe({"messages": messages})
+            result = await pipe.pipe(
+                {"messages": messages},
+                __event_emitter__=event_emitter,
+            )
 
         self.assertEqual(client.request_body["project_name"], "The Garden")
         self.assertEqual(client.request_body["goal"], "write a short status note for the lab")
-        self.assertIn("Reviewer accepted the script", result)
+        self.assertIn("Reviewer verdicts: 2/2 approved.", result)
+        self.assertIn("Coder artifacts checked: 2.", result)
+        self.assertIn("Attempts: 1.", result)
+        progress = [
+            call.args[0]["data"]["description"]
+            for call in event_emitter.await_args_list
+        ]
+        self.assertTrue(any("Crew: 1 planner, 2 coders, 2 reviewers." in item for item in progress))
+        self.assertTrue(any("worker-local OMP is running the crew" in item for item in progress))
+        self.assertTrue(event_emitter.await_args_list[-1].args[0]["data"]["done"])
 
 if __name__ == "__main__":
     unittest.main()

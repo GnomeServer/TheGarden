@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import time
 import uuid
@@ -15,8 +14,8 @@ from .auth import require_run_submission
 from .dashboard import record_activity
 from .database import get_session
 from .models import RunRecord, UserRecord
-from .crew_rules import attach_project_reply, is_chat_turn, missing_requirements
-from .orchestrator import ask_model, crew_label, crew_size, run_ephemeral_worker, start_crew
+from .crew_rules import attach_project_reply, crew_label, crew_size, is_chat_turn, missing_requirements
+from .orchestrator import ask_model, dispatch_to_worker
 
 router = APIRouter()
 
@@ -64,7 +63,7 @@ async def accept_or_bounce(
     request: Request,
     session: AsyncSession,
 ) -> dict[str, str]:
-    """Record one mission on the existing run ledger. Do not queue a worker."""
+    """Record a mission and hand its planned work to the central orchestrator."""
     repository = body.forgejo_repository.strip()
     project = (body.project_name or "").strip()
     bounced = not REPO_PATTERN.match(repository)
@@ -121,9 +120,8 @@ async def accept_or_bounce(
     if bounce:
         return question(bounce or "The orchestrator sent this mission back.")
     summary = (
-        f"OMP sized the job {crew_label(size)}. "
-        "Orchestrator handed it to the worker computers. "
-        "Their OMP starts the ephemeral image and returns the revised result."
+        f"OMP handed the job to a worker laptop. "
+        f"The worker runs {crew_label(size)}."
     )
     metadata = dict(record.run_metadata or {})
     ledger = dict(metadata.get("ledger") or {})
@@ -132,11 +130,18 @@ async def accept_or_bounce(
     ledger["bounce_to"] = "none"
     metadata["ledger"] = ledger
     metadata["worker_role"] = "coder"
-    metadata["crew"] = {"size": size, "host": "worker-computer"}
+    metadata["crew"] = {"size": size, "host": "worker-computer", "image": "crew:slice"}
+    metadata["mission"] = {
+        "mission_id": mission_id,
+        "goal": body.goal.strip(),
+        "repo": repository,
+        "planners": int(size["planners"]),
+        "coders": int(size["coders"]),
+        "reviewers": int(size["reviewers"]),
+    }
     metadata["chatter"] = [
-        f"OMP: this job is {crew_label(size)}.",
-        "OMP: planner, coder, and reviewer nodes are assigned.",
-        "Orchestrator: sending the task to the worker computers.",
+        f"OMP: sized this as {crew_label(size)}.",
+        "Orchestrator: publishing the mission plan to the worker laptops.",
         "Worker OMP: not heard from yet.",
     ]
     record.run_metadata = metadata
@@ -153,14 +158,10 @@ async def accept_or_bounce(
         "metadata": metadata,
     }
     try:
-        await request.app.state.nats.jetstream().publish(
-            "agent.runs.created",
-            json.dumps(event).encode("utf-8"),
-            headers={"Nats-Msg-Id": f"agent.runs.created:{mission_id}"},
-        )
+        await dispatch_to_worker(request.app.state.nats.jetstream(), event)
     except Exception:
-        return question("OMP sized the crew, but the orchestrator could not reach the worker computers.")
-    return question(f"{summary} Mission {mission_id}.")
+        return question("OMP recorded the mission, but the orchestrator could not reach the worker laptops.")
+    return mission_reply(mission_id, "queued", summary)
 
 
 @router.post("/v1/omp/turns")
@@ -288,7 +289,7 @@ async def mission_status(
         raise HTTPException(status_code=404, detail="Mission not found")
     ledger = metadata.get("ledger") if isinstance(metadata.get("ledger"), dict) else {}
     result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
-    script = result.get("script") if isinstance(result.get("script"), str) else None
+    evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else None
     summary = ledger.get("result_summary") if isinstance(ledger.get("result_summary"), str) else ""
     bounce = ledger.get("bounce") if isinstance(ledger.get("bounce"), str) else None
     return {
@@ -297,6 +298,9 @@ async def mission_status(
         "status": record.status,
         "summary": summary[:200],
         "question": bounce if record.status == "bounced" else None,
-        "script": script[:8000] if record.status == "completed" and script else None,
         "crew": metadata.get("crew") if isinstance(metadata.get("crew"), dict) else None,
+        "crew_plan": result.get("crew_plan"),
+        "attempts": result.get("attempts"),
+        "evidence": evidence,
+        "crew_outcome": result.get("crew_outcome"),
     }

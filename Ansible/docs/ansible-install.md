@@ -79,6 +79,8 @@ ansible-playbook playbooks/docker-services.yml --syntax-check
 ansible-playbook playbooks/agent-workers.yml --syntax-check
 ```
 
-The worker role is being developed as a controlled provisioning path. Until it
-is complete, use `TheGarden/agent-worker/README.md` for the manual worker
-runtime setup and troubleshooting procedure.
+The worker role provisions the long-running Python worker, Docker runtime,
+`worker.env`, and `crew:slice` image, and starts the process now and at reboot.
+It does not configure Tailscale ACLs or provide the model endpoint. Use
+`TheGarden/agent-worker/README.md` for the required NATS reachability and manual
+troubleshooting steps.

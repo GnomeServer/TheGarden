@@ -7,7 +7,7 @@ This document explains the lab in two ways:
 
 These are not strict OSI layers. They are practical defense-in-depth boundaries for this pilot.
 
-Current repository state, separate from the target names below: the host is already Proxmox VE 9 on Debian 13 (`server-debian`), installed in place, not by replacing the disk with the official ISO. The guest is Debian VMID `100`, hostname `infra-lab-services`, not Ubuntu `infra-01`. Inventory names four workers: `inkii`, `naruto`, `raphael`, and `donatello`. `agent-worker/worker.py` runs generated Python as the worker OS user in `AGENT_WORKSPACE`. It does not start a sandbox container, clone Forgejo, or push a branch.
+Current repository state, separate from the target names below: the host is already Proxmox VE 9 on Debian 13 (`server-debian`), and the service VM is `infra-lab-services`. Inventory names four workers: `inkii`, `naruto`, `raphael`, and `donatello`. `agent-worker/worker.py` is a long-running NATS consumer. For `mission` runs it starts a temporary `crew:slice` container; the separate `create-python-script` operation executes generated Python as the worker OS user.
 
 ## 1. Functional layers
 
@@ -47,11 +47,11 @@ A user should not connect directly to PostgreSQL, NATS, Docker, or Agent Control
 
 This is where work happens:
 
-- Agent Control in the target design contains the Planner and Supervisor. The checked-in service is Agent Manager: it stores runs and publishes NATS events. It does not plan work or call Forgejo.
-- NATS carries `agent.runs.>` messages. The checked-in server has JetStream and no user or subject ACL.
-- llama.cpp in this repository runs on the VM at `http://llama:8080`, not as `llama-server` on a worker.
-- `agent-worker/worker.py` consumes `agent.runs.created` and publishes start and completion events.
-- Sandboxes, Forgejo checkouts, and branch pushes are not implemented. The current worker executes the script as its OS user.
+- Agent Manager is the checked-in central OMP/API and NATS dispatcher; it persists runs but does not clone repositories or call Forgejo for the mission demo.
+- NATS JetStream carries `agent.runs.>` messages. The worker pool uses a shared durable consumer; the checked-in server has no NATS user or subject ACL.
+- llama.cpp in this repository runs on the VM at `http://llama:8080`, not on a worker laptop.
+- `agent-worker/worker.py` consumes mission events, validates the OMP crew plan, starts the worker-local `crew:slice` image, and returns completion evidence.
+- The current crew image is a deterministic hello-text demo. It runs with no network, does not clone Forgejo, and removes temporary candidate files. `create-python-script` remains an unsandboxed direct execution path.
 
 ### Records, evidence, and visibility
 
