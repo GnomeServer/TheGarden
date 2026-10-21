@@ -15,7 +15,7 @@ VM 100: infra-lab-services
   Interface:         ens18
   LAN address:       10.1.10.2/24
   Gateway:           10.1.10.1
-  Caddy:             ports 80 and 443
+  Caddy:             ports 80, 443, and 8443 (Open WebUI)
 ```
 
 The VM is connected to the Proxmox bridge and has its own network identity. The VM can reach the Proxmox host over the LAN address after the host firewall path was allowed. Tailscale is now also installed on the VM.
@@ -372,24 +372,18 @@ Caddy's internal CA still needs to be trusted by browsers, or `curl -k` can be u
 
 ## Services routed by this Caddyfile
 
-Caddy fronts Grafana, Forgejo, and LiteLLM. The worker model route
-`/litellm/*` is restricted to Tailscale source addresses and proxies to
-`litellm:4000`; it also requires a worker-scoped virtual key. All other paths
-fall back to the Proxmox UI.
+Caddy fronts Grafana, Forgejo, Agent Manager, LiteLLM, and Open WebUI:
 
-Open WebUI, llama.cpp, Agent Manager, NATS, PostgreSQL, and Docker APIs are not
-proxied by this site. In particular:
+- `/dashboard/`, `/v1/*`, and `/auth/*` proxy to Agent Manager on the 443 site.
+- `/litellm/*` proxies to LiteLLM for Tailscale source addresses only; other
+  sources receive HTTP 403.
+- HTTPS port `8443` proxies Open WebUI and matches its configured `WEBUI_URL`.
+- Unmatched paths on port 443 fall back to the Proxmox UI.
 
-- Open WebUI's Compose default `WEBUI_URL` uses port `8443`, but this project
-  publishes only `80` and `443`.
-- LiteLLM worker clients use
-  `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
-- llama.cpp is reachable to containers at `http://llama:8080`; there is no
-  `/llama` route.
-- Agent Manager is loopback-bound on `127.0.0.1:8090` and on `caddy_proxy` at
-  `agent-manager:8000`.
+Open WebUI, Agent Manager, NATS, and PostgreSQL are not exposed on arbitrary
+paths or ports. The example below is not deployed. It shows separate hostnames,
+which this lab does not use:
 
-The example below is not deployed. It shows separate hostnames, which this lab does not use:
 
 ```caddyfile
 forgejo.example.internal {

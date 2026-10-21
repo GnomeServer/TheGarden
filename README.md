@@ -195,7 +195,7 @@ Repository Compose projects for the `infra-lab-services` VM:
 - Grafana, Prometheus, and Node Exporter (`Docker-Documents/grafana_services`)
 - Agent Manager, its PostgreSQL database, and NATS JetStream (`Docker-Documents/agent-manager-service`)
 
-The checked-in Caddyfile listens on ports 80 and 443. It routes `/grafana/` to Grafana, `/forgejo/` to Forgejo, and `/litellm/` to LiteLLM for Tailscale source addresses only; the route requires a worker-scoped virtual key. Unmatched paths fall back to the Proxmox UI at `https://10.1.10.156:8006`. It does not route `/llama/` or Open WebUI, and it does not publish port `8443`.
+The checked-in Caddyfile listens on ports 80 and 443, plus HTTPS port 8443 for Open WebUI. It routes `/dashboard/`, `/v1/*`, and `/auth/*` to Agent Manager; `/grafana/` to Grafana; `/forgejo/` to Forgejo; and `/litellm/` to LiteLLM for Tailscale source addresses only, requiring a worker-scoped virtual key. Unmatched paths on port 443 fall back to the Proxmox UI at `https://10.1.10.156:8006`; `/llama/` is not routed.
 
 `Ansible/playbooks/docker-services.yml` deploys every project above except LiteLLM. LiteLLM is started from its own Compose directory. The base Agent Manager Compose file does not publish NATS; remote workers need `compose.worker-test.yml`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) and [`Ansible/README.md`](Ansible/README.md).
 

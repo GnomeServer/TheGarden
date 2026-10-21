@@ -15,29 +15,34 @@ The repository Caddyfile is `Caddyfile` in this directory, mounted by `compose.y
 
 ## Current configuration
 
+- Compose project name: `caddy-service`, fixed so deployment from a worktree reuses the existing Caddy volumes
 - Image: `caddy:2.11.4-alpine`
 - HTTP: VM port `80`
 - HTTPS: VM port `443` and UDP `443` for HTTP/3
+- Open WebUI HTTPS: VM port `8443`
 - Docker network: `caddy_proxy`
-- Persistent volumes: `caddy_data` and `caddy_config`
+- Persistent volumes: `caddy-service_caddy_data` and `caddy-service_caddy_config`
 - TLS: Caddy's internal CA
 - Grafana: `grafana:3000` under `/grafana/`
 - Forgejo: `forgejo:3000` under `/forgejo/`, with the `/forgejo` prefix stripped
+- Agent Manager dashboard and APIs: `/dashboard/`, `/v1/*`, `/auth/*`, `/healthz`, and `/readyz`
 - LiteLLM: `/litellm/v1`, reverse-proxied to `litellm:4000` for Tailscale source addresses only
 - Untrusted requests to `/litellm/*` receive HTTP 403
-- Proxmox fallback: `https://10.1.10.156:8006` for every other path on this site
-- Not routed: `/llama/`, Open WebUI, Agent Manager, NATS, and PostgreSQL
+- Proxmox fallback: `https://10.1.10.156:8006` for other paths on port 443
 
-This project creates the `caddy_proxy` network. Grafana, Forgejo, and the other Compose projects join it as an external network. Do not mark this project's network `external: true`.
+This project creates the `caddy_proxy` network. Grafana, Forgejo, Open WebUI,
+LiteLLM, and Agent Manager join it as an external network. Do not mark this
+project's network `external: true`.
 
 ## Deploy
 
-Copy `Caddyfile`, `compose.yml`, and the empty `site/` directory to `~/caddy-service` on the VM. Then run:
+The Compose file fixes the project name so deploying from a worktree does not
+create new Caddy data volumes. From the checked-out repository:
 
 ```bash
-cd ~/caddy-service
-sudo docker compose config
-sudo docker compose up -d
+cd Docker-Documents/caddy_service
+sudo docker compose config --quiet
+sudo docker compose up -d --force-recreate caddy
 sudo docker compose ps
 ```
 

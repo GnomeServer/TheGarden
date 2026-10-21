@@ -13,11 +13,10 @@ This Compose project runs Open WebUI and Ollama as separate containers on `infra
 - Compose `WEBUI_URL` default: `https://infra-lab-services.tail494f6d.ts.net:8443/`
 - Compose `ENABLE_SIGNUP` default: `true` via `OPEN_WEBUI_ENABLE_SIGNUP`
 
-There is no committed `.env.example`. The checked-in Caddyfile does not proxy Open WebUI and does not publish port `8443`. Caddy publishes `80` and `443` only. Until a listener is added, other containers on `caddy_proxy` reach Open WebUI at `http://open-webui:8080`.
-
-## Why a dedicated origin was considered
-
-Open WebUI serves root-relative assets such as `/static/...` and `/_app/...`. Serving it under `/open-webui/` loaded HTML while the browser requested assets from the wrong path. The Compose default therefore names port `8443`. That port is not in `caddy_service/compose.yml` or `Caddyfile`.
+There is no committed `.env.example`. Caddy terminates TLS and routes
+`https://infra-lab-services.tail494f6d.ts.net:8443/` to `open-webui:8080`.
+Open WebUI is not directly published on the host. Tailnet browsers must trust
+Caddy's internal root CA.
 
 ## Files and volumes
 
@@ -76,7 +75,7 @@ sudo docker compose up -d --force-recreate open-webui
 
 ## Verify Open WebUI
 
-Do not test `https://infra-lab-services.tail494f6d.ts.net:8443/health`. That listener is not in the repository. From another container on `caddy_proxy`, the health URL is `http://open-webui:8080/health`. A tailnet browser cannot resolve that Docker name, and Caddy does not proxy it.
+From a tailnet browser, check `https://infra-lab-services.tail494f6d.ts.net:8443/health`; from another container on `caddy_proxy`, use `http://open-webui:8080/health`.
 
 Check logs:
 
@@ -199,8 +198,8 @@ The separate-container arrangement used here is preferred because Open WebUI and
 
 ## Troubleshooting
 
-- **Blank page:** a `/open-webui/` prefix breaks root-relative assets. Port `8443` is the Compose `WEBUI_URL`, but this repository does not publish it.
-- **502 from Caddy:** Caddy does not proxy Open WebUI. A 502 on `/grafana/` or `/forgejo/` means that upstream is down or not on `caddy_proxy`.
+- **Blank page:** use the configured `WEBUI_URL` at `https://infra-lab-services.tail494f6d.ts.net:8443/`; the Caddy route uses a separate origin because Open WebUI assets are root-relative.
+- **502 from Caddy on port 8443:** verify the `open-webui` container is running and attached to `caddy_proxy`. A 502 on `/dashboard/` indicates the Agent Manager upstream; the root path falls back to Proxmox.
 - **No models:** run `ollama list`; models must be pulled intentionally, or check that the LiteLLM virtual key is allowed to use `luna`.
 - **Ollama connection error:** Open WebUI should use `http://ollama:11434`, not a host-published port.
 - **LiteLLM 401:** use the generated `.luna-worker-api-key`, not `LITELLM_MASTER_KEY` or the backend `LLAMA_API_KEY`.

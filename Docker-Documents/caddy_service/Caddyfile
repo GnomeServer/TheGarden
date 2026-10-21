@@ -18,6 +18,14 @@ infra-lab-services.tail494f6d.ts.net {
 		reverse_proxy forgejo:3000
 	}
 
+	@agent_manager {
+		path /dashboard /dashboard/* /v1/* /auth/* /healthz /readyz /metrics
+	}
+
+	handle @agent_manager {
+		reverse_proxy agent-manager:8000
+	}
+
 	@litellm_tailnet {
 		path /litellm/*
 		remote_ip 100.64.0.0/10
@@ -40,4 +48,8 @@ infra-lab-services.tail494f6d.ts.net {
 			}
 		}
 	}
+}
+infra-lab-services.tail494f6d.ts.net:8443 {
+	tls internal
+	reverse_proxy open-webui:8080
 }
