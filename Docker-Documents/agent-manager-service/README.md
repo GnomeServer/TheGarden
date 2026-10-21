@@ -33,6 +33,10 @@ timestamps by worker and UTC day. The
 elapsed seconds and run counts over a maximum 31-day range; active runs accrue
 time until queried. SSH remains in Access evidence and is not used for worker
 runtime. These are machine execution durations, not employee work hours.
+The Work page also separates approximate dashboard activity from worker
+runtime. Dashboard time counts one minute per foreground pulse while the page
+is visible and recently active; it excludes SSH sessions and is not verified
+work time.
 
 Queued and running runs are reconciled after
 `WORKER_RUN_STALE_AFTER_SECONDS` (default 1800). A running run is retained if

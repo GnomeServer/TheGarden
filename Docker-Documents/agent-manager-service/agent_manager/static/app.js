@@ -9,6 +9,7 @@ const state = {
   runs: [],
   activity: [],
   workerExecution: null,
+  dashboardActivity: null,
   workSessions: null,
   nodeHealth: null,
   accessEvents: null,
@@ -235,6 +236,8 @@ async function refreshAll() {
   if (!state.session) return;
   const from = $("worker-run-from").value;
   const to = $("worker-run-to").value;
+  const dashboardFrom = $("dashboard-time-from").value;
+  const dashboardTo = $("dashboard-time-to").value;
   const results = await Promise.allSettled([
     api("/v1/dashboard/summary"),
     api(taskQuery()),
@@ -243,6 +246,7 @@ async function refreshAll() {
     api("/v1/dashboard/runs?limit=100"),
     api("/v1/activity?limit=150"),
     api(`/v1/dashboard/worker-execution?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+    api(`/v1/activity/estimates?from=${encodeURIComponent(dashboardFrom)}&to=${encodeURIComponent(dashboardTo)}`),
     api("/v1/nodes/health"),
     api("/v1/access-events?limit=100"),
     api("/v1/work-sessions?limit=100"),
@@ -265,6 +269,7 @@ async function refreshAll() {
     "runs",
     "activity",
     "workerExecution",
+    "dashboardActivity",
     "nodeHealth",
     "accessEvents",
     "workSessions",
@@ -301,6 +306,7 @@ async function refreshAll() {
   render();
 }
 
+
 function render() {
   renderSummary();
   renderTasks();
@@ -311,6 +317,7 @@ function render() {
   renderRuns();
   renderActivity();
   renderWorkerExecution();
+  renderDashboardActivity();
   renderNodes();
   renderAccess();
   renderIdentityMappings();
@@ -1187,6 +1194,62 @@ function renderWorkerExecution() {
   `).join("");
 }
 
+function renderDashboardActivity() {
+  const target = $("dashboard-time");
+  if (state.dashboardActivityError) {
+    setError(target, "Dashboard activity estimates could not be loaded.");
+    return;
+  }
+  if (!state.dashboardActivity) {
+    target.innerHTML = '<p class="loading">Loading dashboard activity…</p>';
+    return;
+  }
+  const items = state.dashboardActivity
+    .map((item) => ({
+      ...item,
+      dashboardSeconds: Number(item.sources?.dashboard || 0),
+    }))
+    .filter((item) => item.dashboardSeconds > 0)
+    .sort((a, b) =>
+      String(b.day).localeCompare(String(a.day)) ||
+      memberName(a.user_id).localeCompare(memberName(b.user_id)),
+    );
+  if (!items.length) {
+    setEmpty(target, "No foreground dashboard activity in this date range.");
+    return;
+  }
+  const totalSeconds = items.reduce((total, item) => total + item.dashboardSeconds, 0);
+  const cards = items.map((item) => `
+    <article class="estimate-card">
+      <div class="estimate-main">
+        <div><p class="eyebrow">${esc(formatDay(item.day))} UTC</p><h3>${esc(memberName(item.user_id))}</h3></div>
+        <strong class="estimate-total">${esc(formatWorkerDuration(item.dashboardSeconds))}<small>dashboard activity estimate</small></strong>
+      </div>
+    </article>
+  `).join("");
+  target.innerHTML = `
+    <article class="estimate-card">
+      <div class="estimate-main">
+        <div><p class="eyebrow">Selected range</p><h3>Team dashboard use</h3></div>
+        <strong class="estimate-total">${esc(formatWorkerDuration(totalSeconds))}<small>estimated active time</small></strong>
+      </div>
+    </article>
+    ${cards}
+  `;
+}
+
+async function reloadDashboardActivity() {
+  const from = encodeURIComponent($("dashboard-time-from").value);
+  const to = encodeURIComponent($("dashboard-time-to").value);
+  try {
+    state.dashboardActivity = await api(`/v1/activity/estimates?from=${from}&to=${to}`);
+    state.dashboardActivityError = null;
+  } catch (error) {
+    state.dashboardActivityError = error;
+    if (handleAuthError(error)) return;
+  }
+  renderDashboardActivity();
+}
 async function reloadWorkerExecution() {
   const from = encodeURIComponent($("worker-run-from").value);
   const to = encodeURIComponent($("worker-run-to").value);
@@ -1282,6 +1345,7 @@ $("task-status-filter").addEventListener("change", () => {
   refreshAll().catch(() => {});
 });
  $("load-worker-runs").addEventListener("click", reloadWorkerExecution);
+ $("load-dashboard-time").addEventListener("click", reloadDashboardActivity);
 $("identity-admin").addEventListener("click", (event) => {
   const mapButton = event.target.closest("[data-map-identity]");
   if (mapButton) {
@@ -1333,6 +1397,8 @@ $("logout").addEventListener("click", async () => {
 
 $("worker-run-to").value = utcDateValue(new Date());
  $("worker-run-from").value = $("worker-run-to").value;
+ $("dashboard-time-to").value = utcDateValue(new Date());
+ $("dashboard-time-from").value = $("dashboard-time-to").value;
 for (const eventName of ["pointerdown", "touchstart", "click", "keydown"]) {
   document.addEventListener(eventName, noteInteraction, { passive: true });
 }
