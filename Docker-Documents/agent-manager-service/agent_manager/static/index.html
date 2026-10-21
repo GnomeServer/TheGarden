@@ -6,7 +6,7 @@
   <meta name="theme-color" id="theme-color" content="#12151c">
   <title>TheGarden — Team dashboard</title>
   <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.5.5">
-  <script src="/dashboard/static/app.js?v=1.5.8" defer></script>
+  <script src="/dashboard/static/app.js?v=1.5.9" defer></script>
 </head>
 <body>
   <section id="login" class="login-shell hidden" aria-labelledby="login-title">
@@ -59,7 +59,7 @@
         </section>
         <section class="content-section" aria-labelledby="worker-execution-title">
           <div class="section-heading"><div><p class="eyebrow">WORKER EXECUTION</p><h2 id="worker-execution-title">Worker run time</h2></div><div class="date-filters"><label for="worker-run-from">From (UTC)</label><input id="worker-run-from" type="date"><label for="worker-run-to">To (UTC)</label><input id="worker-run-to" type="date"><button id="load-worker-runs" class="button secondary" type="button">Update</button></div></div>
-          <p class="notice"><strong>Measured worker execution, not human hours.</strong> Duration comes from run-start and run-completion timestamps. SSH remains in Access evidence and is not counted as work time; active runs accrue elapsed time.</p>
+          <p class="notice"><strong>Measured worker execution, not human hours.</strong> Duration comes from run-start and run-completion timestamps; active runs accrue elapsed time.</p>
           <div id="worker-execution" class="estimate-list" aria-live="polite"><p class="loading">Loading worker execution…</p></div>
         </section>
       </section>
