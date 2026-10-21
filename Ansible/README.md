@@ -34,10 +34,10 @@ docker_hosts
 └── infra-lab-services     local connection; docker-services.yml does not SSH to 10.1.10.2
 
 agent_workers
-├── inkii                  100.98.125.127  user inkii     worker-02
-├── naruto                 100.88.92.78    user naruto    worker-04
-├── raphael                100.116.35.103  user raphael   worker-01
-└── donatello              100.94.145.104  user bgurrol4  worker-03
+├── inkii                  100.98.125.127  user inkii       worker-02
+├── naruto                 100.88.92.78    user naruto      worker-04
+├── raphael                100.116.35.103  user raphael     worker-01
+└── donatello              100.94.145.104  user bgurrol4    worker-03
 ```
 
 Every host above pins `ansible_python_interpreter` to `/usr/bin/python3`. Worker hosts are reached by SSH. `infra-lab-services` is `ansible_connection: local`.
@@ -132,15 +132,10 @@ Mission artifacts are generated from the user's goal and saved under
 Manager/Open WebUI. This flow does not clone or push the configured Forgejo
 repository.
 
-Add a laptop by copying the commented `michelangelo` block in
-`inventory/hosts.yml`, filling the Tailscale address, SSH user, worker id, and
-worker-scoped `litellm_key_source`, then:
-
-```bash
-cd Ansible
-ansible agent_workers --limit michelangelo -m ansible.builtin.ping
-ansible-playbook playbooks/agent-workers.yml --limit michelangelo --ask-become-pass
-```
+The Tailscale machines `michelangelo` and `dell-drd17c4` (Sammy) are not
+registered as workers because their owners have not opted in yet. Do not run
+the worker playbook against them until they are ready and provide their SSH
+login and worker-scoped LiteLLM key paths.
 
 Use `--ask-become-pass` because package installation and system CA trust require
 privilege. `allow_generated_code` remains `false`; the separate
