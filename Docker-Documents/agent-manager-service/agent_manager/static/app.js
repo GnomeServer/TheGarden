@@ -1218,7 +1218,6 @@ function renderDashboardActivity() {
     setEmpty(target, "No foreground dashboard activity in this date range.");
     return;
   }
-  const totalSeconds = items.reduce((total, item) => total + item.dashboardSeconds, 0);
   const cards = items.map((item) => `
     <article class="estimate-card">
       <div class="estimate-main">
@@ -1227,15 +1226,7 @@ function renderDashboardActivity() {
       </div>
     </article>
   `).join("");
-  target.innerHTML = `
-    <article class="estimate-card">
-      <div class="estimate-main">
-        <div><p class="eyebrow">Selected range</p><h3>Team dashboard use</h3></div>
-        <strong class="estimate-total">${esc(formatWorkerDuration(totalSeconds))}<small>estimated active time</small></strong>
-      </div>
-    </article>
-    ${cards}
-  `;
+  target.innerHTML = cards;
 }
 
 async function reloadDashboardActivity() {
