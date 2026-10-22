@@ -22,6 +22,7 @@ The Caddy service exposes a Tailnet-only LiteLLM worker route:
 ```text
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
+`handle_path /litellm/*` strips the prefix before proxying to `litellm:4000`, so LiteLLM receives `/v1/...`. Caddy and LiteLLM share `caddy_proxy`.
 
 It accepts requests only from Tailscale addresses and requires a worker-scoped
 LiteLLM virtual key. Workers must trust Caddy's internal root certificate.
@@ -29,7 +30,8 @@ Containers attached to `caddy_proxy` use `http://litellm:4000/v1`; the host-loca
 gateway uses `http://127.0.0.1:4000/v1`.
 
 `litellm` is a Docker-only hostname. A remote worker cannot resolve it or use
-the VM loopback address; it must use the Caddy hostname and worker key.
+the VM loopback address; it must use the Tailnet-only Caddy hostname and its
+worker-scoped key.
 
 ## Configuration
 
@@ -134,11 +136,35 @@ curl -sS \
 ```
 
 The Caddy worker route accepts only Tailscale source addresses and requires a
-worker-scoped key. HTTP 403 indicates the request did not arrive from the
-Tailnet; HTTP 401 indicates LiteLLM rejected the key.
+worker-scoped key. HTTP 403 means the request did not arrive from the Tailnet;
+HTTP 401 means LiteLLM rejected the key.
 
-A `401` response confirms that TLS and routing work but authentication failed.
-A timeout or model error requires inspecting the LiteLLM and backend logs.
+A remote worker uses `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
+The deployed Caddy container mounts `~/caddy-service/Caddyfile`; editing this
+repository copy does not update the live route until that copy is deployed and
+Caddy is reloaded. Test the unauthenticated health route from the worker:
+
+```bash
+curl -i --cacert "$HOME/.config/litellm/caddy-root.crt" \
+  https://infra-lab-services.tail494f6d.ts.net/litellm/health/liveliness
+```
+
+Then test authentication without printing the worker key:
+
+```bash
+WORKER_KEY="$(tr -d '\r\n' < "$HOME/.config/litellm/worker-api-key")"
+curl -sS -i --cacert "$HOME/.config/litellm/caddy-root.crt" \
+  -H "Authorization: Bearer ${WORKER_KEY}" \
+  https://infra-lab-services.tail494f6d.ts.net/litellm/v1/models
+unset WORKER_KEY
+```
+
+A `401` from `/v1/models` means routing and TLS succeeded but LiteLLM rejected
+the key. A `404`, `502`, or unexpected Proxmox HTML response points to the
+active Caddy route or upstream network; DNS, TLS, and timeout errors point to
+tailnet access, CA trust, or service availability. If `/v1/models` succeeds but
+a completion reports context overflow, the API is reachable and the remaining
+issue is the model/backend.
 
 ## Open WebUI
 

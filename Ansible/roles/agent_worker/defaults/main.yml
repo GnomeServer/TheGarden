@@ -6,3 +6,4 @@ worker_consumer: "agent-workers-{{ worker_role }}"
 allow_generated_code: false
 worker_model_name: luna
 worker_model_base_url: ""
+worker_omp_image: local/omp-worker:18.12.5

@@ -10,6 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .artifacts import (
+    mission_artifact,
+    provision_upload_capability,
+    upload_event_metadata,
+)
 from .auth import require_run_submission
 from .dashboard import record_activity
 from .database import get_session
@@ -130,7 +135,7 @@ async def accept_or_bounce(
     ledger["bounce_to"] = "none"
     metadata["ledger"] = ledger
     metadata["worker_role"] = "coder"
-    metadata["crew"] = {"size": size, "host": "worker-computer", "engine": "worker-local-model"}
+    metadata["crew"] = {"size": size, "host": "worker-computer", "engine": "worker-omp-image"}
     metadata["mission"] = {
         "mission_id": mission_id,
         "goal": body.goal.strip(),
@@ -145,6 +150,7 @@ async def accept_or_bounce(
         "Worker OMP: not heard from yet.",
     ]
     record.run_metadata = metadata
+    upload_token, upload_url = provision_upload_capability(record)
     record.status = "queued"
     await session.commit()
     event = {
@@ -155,7 +161,7 @@ async def accept_or_bounce(
         "forgejo_repository": record.forgejo_repository,
         "base_ref": "main",
         "model": body.model,
-        "metadata": metadata,
+        "metadata": upload_event_metadata(record, upload_token, upload_url),
     }
     try:
         await dispatch_to_worker(request.app.state.nats.jetstream(), event)
@@ -290,6 +296,9 @@ async def mission_status(
     ledger = metadata.get("ledger") if isinstance(metadata.get("ledger"), dict) else {}
     result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
     evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else None
+    reviewer_count = result.get("reviewer_count")
+    if type(reviewer_count) is not int or reviewer_count < 0:
+        reviewer_count = None
     summary = ledger.get("result_summary") if isinstance(ledger.get("result_summary"), str) else ""
     bounce = ledger.get("bounce") if isinstance(ledger.get("bounce"), str) else None
     return {
@@ -305,5 +314,6 @@ async def mission_status(
         "evidence": evidence,
         "crew_outcome": result.get("crew_outcome"),
         "worker_id": record.worker_id,
-        "artifacts": result.get("artifacts") if isinstance(result.get("artifacts"), list) else [],
+        "reviewer_count": reviewer_count,
+        "artifact": mission_artifact(metadata, record.id),
     }

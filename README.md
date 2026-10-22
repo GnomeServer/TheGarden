@@ -142,7 +142,13 @@ The role does not install Proxmox or modify networking. The staged installation 
 
 ### `Ansible/playbooks/agent-workers.yml`
 
-`playbooks/agent-workers.yml` installs the dynamic worker runtime, Python environment, Caddy CA trust, and worker-scoped LiteLLM key; copies `worker.py` and `mission.py`; writes `worker.env`; and starts `start-worker.sh` now and at reboot. Generated mission artifacts are returned to OpenWebUI and stored on the worker; they do not modify Forgejo. The separate `create-python-script` operation remains disabled by default because it executes unsandboxed code.
+`playbooks/agent-workers.yml` provisions the queue consumer and manages it as a
+systemd service. It builds the pinned OMP job image and installs the
+worker-scoped LiteLLM key and Caddy root certificate. Approved output files are
+uploaded to Agent Manager's PostgreSQL artifact storage and returned as signed
+download links; the temporary OMP workspace is removed afterward. Missions do
+not modify Forgejo. The legacy `create-python-script` operation remains disabled
+by default and is unsandboxed if explicitly enabled.
 
 ## Inventory and Tailscale
 

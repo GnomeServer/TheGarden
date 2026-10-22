@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import re
 import time
-import unicodedata
 from typing import Any
 
 import httpx
@@ -68,58 +67,45 @@ class Pipe:
         raise ValueError("Could not find a text prompt in the latest user message.")
 
     @staticmethod
-    def _extract_run_directives(
-        text: str,
-    ) -> tuple[str, str | None, str | None]:
+    def _extract_project_directive(text: str) -> tuple[str, str | None]:
         lines = text.splitlines()
-        directives: dict[str, str] = {}
         index = 0
+        project_name: str | None = None
         while index < len(lines):
             line = lines[index].strip()
             if not line:
                 index += 1
                 continue
             label, separator, value = line.partition(":")
-            directive = label.strip().casefold()
-            if not separator or directive not in {"project", "script"}:
+            if not separator or label.strip().casefold() != "project":
                 break
-            if directive in directives:
-                raise ValueError(f"Specify {directive.title()} only once.")
-            value = value.strip()
-            if not value:
-                raise ValueError(f"{directive.title()} needs a name.")
-            directives[directive] = value
+            if project_name is not None:
+                raise ValueError("Specify Project only once.")
+            project_name = value.strip()
+            if not project_name:
+                raise ValueError("Project needs a name.")
             index += 1
 
-        if not directives:
-            return text, None, None
+        if project_name is None:
+            return text, None
         goal = "\n".join(lines[index:]).strip()
         if not goal:
-            raise ValueError("Add task instructions after the Project/Script lines.")
-        return goal, directives.get("project"), directives.get("script")
+            raise ValueError("Add task instructions after the Project line.")
+        return goal, project_name
 
     @staticmethod
-    def _suggest_script_name(goal: str) -> str:
-        normalized = (
-            unicodedata.normalize("NFKD", goal)
-            .encode("ascii", "ignore")
-            .decode("ascii")
-            .casefold()
-        )
-        generic_words = {
-            "a", "an", "and", "app", "application", "build", "builds",
-            "create", "creates", "develop", "development", "file", "for",
-            "generate", "generates", "implement", "make", "makes", "me",
-            "my", "of", "please", "program", "python", "script", "the",
-            "that", "this", "to", "using", "with", "write", "writes",
-        }
-        words = [
-            word
-            for word in re.findall(r"[a-z0-9]+", normalized)
-            if word not in generic_words
-        ]
-        stem = "_".join(words[:8]) or "generated_script"
-        return f"{stem[:125].rstrip('_')}.py"
+    def _format_artifacts(artifact: Any) -> str:
+        if not isinstance(artifact, dict):
+            return "The mission completed, but no downloadable artifact was reported."
+        filename = artifact.get("filename")
+        download_url = artifact.get("download_url")
+        size_bytes = artifact.get("size_bytes")
+        if not isinstance(filename, str) or not filename or not isinstance(download_url, str) or not download_url:
+            return "The mission completed, but no downloadable artifact was reported."
+        # Escape Markdown label metacharacters without modifying the signed URL.
+        safe_filename = filename.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+        size = f"{size_bytes:,} bytes" if isinstance(size_bytes, int) and size_bytes >= 0 else "size unknown"
+        return f"Download the completed work:\n- [{safe_filename}]({download_url}) ({size})"
 
     @staticmethod
     async def _emit_status(
@@ -213,17 +199,17 @@ class Pipe:
             prior_project = None
             if previous_user:
                 try:
-                    prior_goal, prior_project, _script = cls._extract_run_directives(previous_user)
+                    prior_goal, prior_project = cls._extract_project_directive(previous_user)
                 except ValueError:
                     prior_goal = previous_user
             return extra_goal or prior_goal or latest, project_name or prior_project, repository
         if "Which Forgejo repository should this mission use?" in previous_assistant:
             try:
-                goal, project_name, _script = cls._extract_run_directives(previous_user or latest)
+                goal, project_name = cls._extract_project_directive(previous_user or latest)
             except ValueError:
                 goal, project_name = previous_user or latest, None
             return goal, project_name, latest.strip()
-        goal, project_name, _script = cls._extract_run_directives(latest)
+        goal, project_name = cls._extract_project_directive(latest)
         return goal, project_name, repository
 
     @staticmethod
@@ -422,6 +408,7 @@ class Pipe:
         deadline = time.monotonic() + self.valves.RUN_TIMEOUT_SECONDS
         project = f" for `{project_name}`" if project_name else ""
         headers = {"Authorization": f"Bearer {token}"}
+        last_status = "unknown"
         url = f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/missions/{mission_id}"
         last_progress = None
         while time.monotonic() < deadline:
@@ -445,6 +432,7 @@ class Pipe:
             if progress and progress != last_progress:
                 await self._emit_status(emitter, progress)
                 last_progress = progress
+            last_status = status if isinstance(status, str) else "unknown"
             if status == "bounced":
                 question = state.get("question") or done or summary
                 return question if isinstance(question, str) else summary
@@ -473,8 +461,9 @@ class Pipe:
                         evidence_parts.append(f"Supervisor checks: {len(checks)}.")
                 if evidence_parts:
                     body += "\n\n" + " ".join(evidence_parts)
-                body += self._format_artifacts(state.get("artifacts"))
+                if status == "completed":
+                    body += self._format_artifacts(state.get("artifact"))
                 return body
             await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
-        return f"{summary}{project}. Mission `{mission_id}`. The crew is still working."
+        return f"{summary}{project}. Mission `{mission_id}` (status: `{last_status}`). Polling timed out before completion."
 

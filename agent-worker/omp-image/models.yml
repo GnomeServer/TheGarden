@@ -1,0 +1,13 @@
+providers:
+  worker-litellm:
+    baseUrl: __MODEL_BASE_URL__
+    apiKey: LITELLM_API_KEY
+    authHeader: true
+    api: openai-completions
+    models:
+      - id: luna
+        name: Luna via LiteLLM
+        reasoning: false
+        input: [text]
+        contextWindow: 4096
+        maxTokens: 2048

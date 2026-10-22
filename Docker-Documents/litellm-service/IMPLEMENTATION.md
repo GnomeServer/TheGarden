@@ -7,8 +7,9 @@ TheGarden/Docker-Documents/litellm-service
 ```
 
 Use [`README.md`](README.md) for the current configuration and operational
-commands. The Compose project uses the public model alias `luna`, a LiteLLM
-virtual key. The checked-in Caddyfile exposes the worker URL at
+commands. The Compose project exposes the public model alias `luna`; remote
+workers authenticate with worker-scoped LiteLLM virtual keys. The Caddy service
+exposes the Tailnet-only worker URL at
 
 ```text
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
@@ -38,11 +39,21 @@ Open WebUI container
   → configured Luna backend
 ```
 
-Remote workers use the Caddy endpoint with their own virtual key. Validate
-LiteLLM readiness, then test `/v1/models` and `/v1/chat/completions` from each
-worker using the installed Caddy root certificate. Do not use Caddy's internal
-root key on workers, and do not disable TLS verification in persistent
-configuration.
+Remote workers use the Tailnet-only Caddy endpoint above with their own
+worker-scoped virtual key. Validate LiteLLM readiness, then test `/v1/models`
+and `/v1/chat/completions` from a worker using the installed Caddy root
+certificate. Do not copy Caddy's internal root key or disable TLS verification.
+VM-local checks use `http://127.0.0.1:4000/v1`; containers on `caddy_proxy` use
+`http://litellm:4000/v1`.
+
+## Validation order
+
+1. Check LiteLLM health.
+2. Test `/v1/models` with the worker virtual key.
+3. Test `/v1/chat/completions` locally through LiteLLM.
+4. Test the Caddy endpoint from a tailnet device with the Caddy root CA.
+5. Test from the worker with its CA bundle.
+6. Inspect LiteLLM, Caddy, and backend logs for timeouts.
 
 Do not create a second CA, copy `root.key`, expose PostgreSQL, or give the
 LiteLLM master key to a worker.

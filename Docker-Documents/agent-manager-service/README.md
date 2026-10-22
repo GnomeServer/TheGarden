@@ -275,6 +275,20 @@ Bearer token required. A missing or wrong token is 401.
 
 `project_name` and `script_name` are stored inside `metadata`, not as columns. The same keys in the JSON body replace copies inside client `metadata`.
 
+## Mission artifacts
+
+Each queued mission receives a run-scoped upload capability in its
+`agent.runs.created` event metadata. The worker uploads one file or ZIP as a raw
+request body to `PUT /v1/omp/missions/{run_id}/artifact`, with
+`X-Artifact-Filename` and `Content-Type` headers. Uploads are limited to 50 MiB;
+the manager rejects unsafe filenames, allows same-content retries, and rejects
+a different second artifact. Artifact bytes are stored in the
+`mission_artifacts` PostgreSQL table, backed by the existing
+`manager_postgres_data` volume. Mission status exposes the artifact descriptor
+and a signed download URL that expires after seven days. Daily cleanup removes
+artifact rows after the default 30-day retention period; set
+`ARTIFACT_RETENTION_DAYS` to change the retention period.
+
 Compose and `.env.example` set `MODEL_BASE_URL` to `http://llama:8080/v1`. The Python fallback `http://litellm:4000/v1` is unused while Compose sets the variable. The API does not call Forgejo, llama.cpp, LiteLLM, or Ollama. Ollama is on `open-webui_internal` at `http://ollama:11434`.
 
 ## Caddy routes and metrics
@@ -361,11 +375,18 @@ MODEL_TLS_INSECURE=0
 ALLOW_GENERATED_CODE=0
 ```
 
-The worker uses the installed Caddy root CA to validate TLS. Do not use the
-LiteLLM master key or backend key as `MODEL_API_KEY`. Mission artifacts are
-returned to OpenWebUI and stored on the worker; they do not modify Forgejo.
-The separate `create-python-script` operation remains disabled because it runs
-generated Python unsandboxed.
+Inventory worker IDs are `worker-01` through `worker-04`, not hostnames. Remote workers use the Tailnet-only Caddy endpoint
+`https://infra-lab-services.tail494f6d.ts.net/litellm/v1`; do not use Docker-only
+`http://litellm:4000/v1` or the VM loopback address from a laptop. Workers must
+trust Caddy's root CA and use their worker-scoped LiteLLM key. Never use the
+LiteLLM master or backend key, and keep `MODEL_TLS_INSECURE=0`.
+
+Approved mission files are uploaded to Agent Manager's PostgreSQL-backed
+artifact storage and returned as signed download links, not embedded in the
+mission status payload. The temporary OMP workspace is removed after upload.
+Mission jobs do not modify Forgejo. The separate `create-python-script`
+operation remains disabled by default because it runs generated Python
+unsandboxed.
 
 ### Duplicate completion events
 

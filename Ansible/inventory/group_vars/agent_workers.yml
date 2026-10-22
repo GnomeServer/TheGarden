@@ -5,3 +5,4 @@ worker_role: coder
 allow_generated_code: false
 worker_model_name: luna
 worker_model_base_url: "https://infra-lab-services.tail494f6d.ts.net/litellm/v1"
+caddy_root_ca_source: /home/infra-lab-user/TheGarden/.secrets/caddy-root.crt

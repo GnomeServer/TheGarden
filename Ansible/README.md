@@ -117,27 +117,45 @@ ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/site.yml --check --diff
 ```
 
-`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and CA
-certificates; copies `worker.py`, `mission.py`, and requirements; installs each
-worker's LiteLLM virtual key and Caddy root CA; writes the worker environment
-and start script; and starts the worker now and at reboot. Mission generation
-uses the Tailnet-only Caddy route at
+`playbooks/agent-workers.yml` is the canonical deployment for the laptop queue
+consumer and pinned OMP job image. Mission model traffic uses the Tailnet-only
+Caddy endpoint at
 `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
 
 The worker process polls the shared durable `agent-workers-coder` consumer and
 sends a heartbeat every 15 seconds. The default `worker_nats_url` is
 `nats://100.94.49.45:4222`; that listener must be reachable over Tailscale.
-Mission artifacts are generated from the user's goal and saved under
-`AGENT_WORKSPACE/missions/`; the worker returns artifact contents to Agent
-Manager/Open WebUI. This flow does not clone or push the configured Forgejo
-repository.
+Mission jobs run in the pinned OMP image, which delegates to the planner, coder,
+and reviewer definitions. After explicit reviewer approval, the worker packages
+the files and uploads them to Agent Manager's PostgreSQL-backed artifact store;
+the temporary job workspace is removed after upload. The worker does not clone
+or push the configured Forgejo repository.
+
+`playbooks/agent-workers.yml` installs the Python queue consumer, writes
+`~/agent-worker/worker.env`, copies `agent-worker/omp-image/`, builds the pinned
+OMP job image, and manages `dark-factory-agent-worker` with systemd. Source,
+environment, certificate, and image changes notify one service restart. Legacy
+cron-started workers are stopped during the one-time cutover. The worker user
+needs Docker access; membership in the Docker group is root-equivalent. The
+separate `create-python-script` operation remains disabled by default and runs
+generated code unsandboxed if explicitly enabled.
 
 The Tailscale machines `michelangelo` and `dell-drd17c4` (Sammy) are not
 registered as workers because their owners have not opted in yet. Do not run
 the worker playbook against them until they are ready and provide their SSH
 login and worker-scoped LiteLLM key paths.
 
-Use `--ask-become-pass` because package installation and system CA trust require
-privilege. `allow_generated_code` remains `false`; the separate
-`create-python-script` operation executes generated Python unsandboxed and is
-not needed for mission artifacts.
+Set the target to an enrolled inventory host before running these commands:
+
+```bash
+cd Ansible
+WORKER_HOST=inkii
+ansible agent_workers --limit "$WORKER_HOST" -m ansible.builtin.ping
+ansible-playbook playbooks/agent-workers.yml --limit "$WORKER_HOST" --ask-become-pass
+```
+
+`--ask-become-pass` is needed for package installation, system CA trust, and
+systemd management. Before the run, from the repository root run
+`scripts/export_caddy_root_ca.sh` (or `../scripts/export_caddy_root_ca.sh` from
+`Ansible/`) and place the worker-scoped LiteLLM key at the inventory host's
+`litellm_key_source`. Do not commit key files.

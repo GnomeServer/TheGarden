@@ -61,9 +61,10 @@ class OmpMissionPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["planners"], 1)
         self.assertEqual(plan["coders"], 1)
         self.assertEqual(plan["reviewers"], 1)
-        self.assertEqual(event["metadata"]["crew"]["engine"], "worker-local-model")
+        self.assertEqual(event["metadata"]["crew"]["engine"], "worker-omp-image")
 
-    async def test_final_result_exposes_artifacts_and_worker_identity(self) -> None:
+    async def test_final_result_exposes_signed_download_without_source_content(self) -> None:
+        artifact_id = "b2123ee9-84f6-4c12-9f07-11e023b1702c"
         record = SimpleNamespace(
             id="mission-1",
             worker_id="worker-03",
@@ -72,11 +73,19 @@ class OmpMissionPlanTests(unittest.IsolatedAsyncioTestCase):
             run_metadata={
                 "operation": "mission",
                 "ledger": {"result_summary": "Generated calculator.html."},
+                "artifact": {
+                    "id": artifact_id,
+                    "filename": "calculator.html",
+                    "content_type": "text/html",
+                    "size_bytes": 12,
+                    "sha256": "0" * 64,
+                },
                 "result": {
                     "crew_plan": {"planners": 1, "coders": 1, "reviewers": 1},
                     "attempts": 1,
+                    "reviewer_count": 0,
                     "evidence": {"artifacts": ["calculator.html"]},
-                    "artifacts": [{"path": "calculator.html", "content": "<html></html>"}],
+                    "artifacts": [{"path": "calculator.html", "content": "PRIVATE-PRODUCT-SOURCE"}],
                     "crew_outcome": "accepted",
                 },
             },
@@ -92,8 +101,14 @@ class OmpMissionPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["worker_id"], "worker-03")
         self.assertEqual(result["attempts"], 1)
         self.assertEqual(result["evidence"]["artifacts"], ["calculator.html"])
-        self.assertEqual(result["artifacts"][0]["path"], "calculator.html")
         self.assertEqual(result["crew_outcome"], "accepted")
+        self.assertEqual(result["reviewer_count"], 0)
+        self.assertEqual(result["artifact"]["filename"], "calculator.html")
+        self.assertIn(f"/artifacts/{artifact_id}/download?", result["artifact"]["download_url"])
+        self.assertIn("expires=", result["artifact"]["download_url"])
+        self.assertIn("signature=", result["artifact"]["download_url"])
+        self.assertNotIn("artifacts", result)
+        self.assertNotIn("PRIVATE-PRODUCT-SOURCE", json.dumps(result))
 
 
 

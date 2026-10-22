@@ -115,13 +115,16 @@ variables, CA trust, and troubleshooting steps are documented in:
 TheGarden/agent-worker/README.md
 ```
 
-`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and
-CA certificates; copies `worker.py` and `mission.py`; installs the worker's
-LiteLLM key and Caddy root certificate; writes `worker.env`; and starts the
-worker now and at reboot. `worker_model_base_url` points at the Tailnet-only
-Caddy route. `allow_generated_code` remains `false`; mission artifacts are
-returned without executing them. The separate `create-python-script` operation
-is unsandboxed.
+`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, CA trust,
+and process-management tools; copies `worker.py`, requirements, and the OMP job
+image sources; builds the pinned image; installs each worker's LiteLLM key and
+Caddy root certificate; and manages the worker with systemd. Source,
+environment, certificate, and image changes restart the service. The playbook
+removes the legacy cron entry and obsolete `mission.py` module. Mission output
+is uploaded to Agent Manager's PostgreSQL artifact store and returned as a
+signed download link; the temporary OMP workspace is removed after upload.
+`allow_generated_code` remains `false`; the separate `create-python-script`
+operation is unsandboxed if explicitly enabled.
 
 Use `--ask-become-pass` for package installation and system CA trust. Each
 worker requires its own LiteLLM virtual key.

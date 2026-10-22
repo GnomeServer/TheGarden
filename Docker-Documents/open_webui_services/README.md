@@ -132,10 +132,10 @@ API key:  contents of the local LiteLLM `.luna-worker-api-key` file
 Model:    luna
 ```
 
-Open WebUI should use the Docker URL. The checked-in Caddyfile has no `/litellm/` route, so this is not a worker URL:
+Open WebUI should use the Docker URL. Remote workers use the Caddy endpoint:
 
 ```text
-http://litellm:4000/v1
+https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
 
 ## Naming Agent Manager work from Open WebUI
@@ -155,6 +155,17 @@ Create a dependency-free script that writes a report.json file.
 
 Named scripts are stored at `<workspace>/<project-slug>/<normalized-filename>`. `.py` is added only when omitted. Duplicates become `name_2.py`, `name_3.py`. The UUID remains the Agent Manager run ID. The Pipe requires the `FORGEJO_REPOSITORY` valve. It stops on `completed`, `failed`, or `cancelled`, not on `cancel_requested`.
 API callers without an input dialog must include `Project: <name>`.
+
+Completed work is returned as Manager-hosted artifact downloads, not inline
+source. A single output file downloads directly; multiple output files are
+packaged as a ZIP bundle. Download links are signed and expire after seven
+days. Worker workspaces are temporary and are cleaned up after the job, so
+download artifacts before the links expire rather than relying on workspace files remaining available.
+
+The Pipe's `AGENT_MANAGER_API_TOKEN` valve must be set to the separate
+run-only `AGENT_MANAGER_OPENWEBUI_TOKEN` from Agent Manager's private `.env`.
+Do not use the administrator `AGENT_MANAGER_API_TOKEN` or a LiteLLM key.
+Artifact links are Manager-issued signed URLs; the Pipe never exposes upload tokens.
 
 ## Using llama.cpp directly
 

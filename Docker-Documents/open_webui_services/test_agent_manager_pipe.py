@@ -7,22 +7,42 @@ import agent_manager_pipe
 from agent_manager_pipe import Pipe
 
 
-class RunNamingTests(unittest.TestCase):
-    def test_directives_are_removed_from_the_task(self) -> None:
+class ProjectDirectiveTests(unittest.TestCase):
+    def test_script_filename_instruction_remains_in_the_mission_goal(self) -> None:
         self.assertEqual(
-            Pipe._extract_run_directives(
-                "Project: Quarterly Reports\nScript: audit_report\n\nBuild a report."
+            Pipe._extract_project_directive(
+                "Project: Quarterly Reports\nScript: audit_report.py\n\nBuild a report."
             ),
-            ("Build a report.", "Quarterly Reports", "audit_report"),
+            ("Script: audit_report.py\n\nBuild a report.", "Quarterly Reports"),
         )
 
-    def test_script_name_comes_from_request_content(self) -> None:
-        self.assertEqual(
-            Pipe._suggest_script_name(
-                "Create a dependency-free Python script that writes a report.json file."
-            ),
-            "dependency_free_report_json.py",
+    def test_script_directive_without_project_is_not_discarded(self) -> None:
+        prompt = "Script: audit_report.py\n\nBuild a report."
+        self.assertEqual(Pipe._extract_project_directive(prompt), (prompt, None))
+
+
+class ArtifactFormattingTests(unittest.TestCase):
+    def test_signed_download_url_and_filename_are_preserved(self) -> None:
+        signed_url = (
+            "https://manager.example/v1/omp/missions/run-1/artifacts/id/download"
+            "?expires=123&signature=abc"
         )
+        result = Pipe._format_artifacts(
+            {
+                "filename": "report [final].zip",
+                "download_url": signed_url,
+                "size_bytes": 2048,
+            }
+        )
+
+        self.assertIn(f"[report \\[final\\].zip]({signed_url})", result)
+        self.assertIn("2,048 bytes", result)
+
+    def test_missing_artifact_has_an_explicit_user_message(self) -> None:
+        result = Pipe._format_artifacts(None)
+
+        self.assertIn("completed", result)
+        self.assertIn("no downloadable artifact", result)
 
 
 class FakeResponse:
@@ -37,6 +57,11 @@ class FakeResponse:
 
 
 class FakeAgentManagerClient:
+    signed_url = (
+        "https://manager.example/v1/omp/missions/mission-1/artifacts/"
+        "b2123ee9-84f6-4c12-9f07-11e023b1702c/download?expires=123&signature=abc"
+    )
+
     def __init__(self) -> None:
         self.url: str | None = None
         self.request_body: dict | None = None
@@ -67,7 +92,6 @@ class FakeAgentManagerClient:
                 "mission_id": "mission-1",
                 "status": "completed",
                 "summary": "Worker generated calculator.html after 1 attempt.",
-                "question": None,
                 "attempts": 1,
                 "evidence": {
                     "artifacts": ["calculator.html"],
@@ -76,8 +100,13 @@ class FakeAgentManagerClient:
                         {"reviewer_id": 2, "decision": "approved"},
                     ],
                 },
+                "artifact": {
+                    "filename": "calculator.html",
+                    "download_url": self.signed_url,
+                    "size_bytes": 2048,
+                },
                 "artifacts": [
-                    {"path": "calculator.html", "content": "<!doctype html><title>Calculator</title>"},
+                    {"path": "calculator.html", "content": "PRIVATE-PRODUCT-SOURCE"},
                 ],
             },
         ]
@@ -93,7 +122,9 @@ class FakeAgentManagerClient:
         self.url = url
         self.request_body = json
         if not json.get("project_name"):
-            return FakeResponse({"type": "question", "text": "What project name should this mission use?"})
+            return FakeResponse(
+                {"type": "question", "text": "What project name should this mission use?"}
+            )
         return FakeResponse(
             {
                 "type": "mission",
@@ -108,6 +139,7 @@ class FakeAgentManagerClient:
         if self.post_calls == 0:
             return FakeResponse(self.status_response)
         return FakeResponse(self.states.pop(0))
+
 
 class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
     def configured_pipe(self) -> Pipe:
@@ -135,29 +167,21 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "What project name should this mission use?")
         self.assertNotIn("script_name", client.request_body)
 
-    async def test_explicit_names_go_to_omp_as_a_mission(self) -> None:
+    async def test_script_directive_stays_in_goal_and_is_not_a_script_field(self) -> None:
         pipe = self.configured_pipe()
-        event_call = AsyncMock()
         client = FakeAgentManagerClient()
-        prompt = (
-            "Project: Quarterly Reports\nScript: audit_report.py\n\nBuild a report."
+        prompt = "Project: Quarterly Reports\nScript: audit_report.py\n\nBuild a report."
+
+        with patch.object(agent_manager_pipe.httpx, "AsyncClient", return_value=client):
+            await pipe.pipe({"messages": [{"role": "user", "content": prompt}]})
+
+        self.assertEqual(
+            client.request_body["goal"], "Script: audit_report.py\n\nBuild a report."
         )
-
-        with patch.object(
-            agent_manager_pipe.httpx, "AsyncClient", return_value=client
-        ):
-            await pipe.pipe(
-                {"messages": [{"role": "user", "content": prompt}]},
-                __event_call__=event_call,
-            )
-
-        event_call.assert_not_awaited()
-        self.assertTrue(client.url.endswith("/v1/omp/turns"))
-        self.assertEqual(client.request_body["goal"], "Build a report.")
         self.assertEqual(client.request_body["project_name"], "Quarterly Reports")
         self.assertNotIn("script_name", client.request_body)
 
-    async def test_project_reply_keeps_the_previous_goal(self) -> None:
+    async def test_project_reply_returns_download_link_without_product_source(self) -> None:
         pipe = self.configured_pipe()
         client = FakeAgentManagerClient()
         event_emitter = AsyncMock()
@@ -180,8 +204,9 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.request_body["goal"], "write a short status note for the lab")
         self.assertIn("Reviewer verdicts: 2/2 approved.", result)
         self.assertIn("Artifacts produced: 1.", result)
-        self.assertIn("<!doctype html><title>Calculator</title>", result)
+        self.assertIn(f"[calculator.html]({client.signed_url})", result)
         self.assertIn("Attempts: 1.", result)
+        self.assertNotIn("PRIVATE-PRODUCT-SOURCE", result)
         progress = [
             call.args[0]["data"]["description"]
             for call in event_emitter.await_args_list
@@ -212,6 +237,7 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
             [f"http://agent-manager:8000/v1/omp/missions/{mission_id}"],
         )
         self.assertIn(f"Mission `{mission_id}` is running on worker `worker-03`.", result)
+
 
 if __name__ == "__main__":
     unittest.main()

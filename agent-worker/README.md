@@ -1,32 +1,24 @@
 # Agent worker
 
-`worker.py` is a long-running Agent Manager worker. It consumes
-`agent.runs.created` from NATS JetStream, publishes `agent.runs.status` (and the
-same payload on `agent.runs.started`), then publishes one `agent.runs.completed`
-event. It also publishes `agent.workers.heartbeat` and answers
-`agent.workers.health.<role>`. The mission path calls the configured
-OpenAI-compatible gateway for planning, coding, and review. Mission artifacts
-are saved under
-`AGENT_WORKSPACE/missions/<project-slug>/<mission-id>/` and returned to the
-Agent Manager. The worker does not execute those generated files or modify the
-configured Forgejo repository.
+`worker.py` is the long-running Agent Manager queue consumer. It consumes
+`agent.runs.created`, publishes running and completion events, sends
+`agent.workers.heartbeat`, and answers `agent.workers.health.<role>`. The
+Manager stamps queued runs with an expiry; expired deliveries are rejected
+before model work starts.
 
-The worker supports two operations:
+For `mission`, the worker launches the pinned OMP job image. Its planner
+coordinates the requested coder and reviewer agents and accepts a result only
+after explicit reviewer approval. The isolated image receives a temporary
+workspace, mission file, scoped LiteLLM key, and trusted Caddy certificate; it
+has no Docker socket. The host worker validates the artifact manifest,
+packages one file or a ZIP, and uploads it over verified TLS to Agent Manager
+using a run-scoped capability. Agent Manager stores the bytes in PostgreSQL and
+returns a signed download link; the temporary OMP workspace is removed after
+upload. The worker does not clone or push the configured Forgejo repository.
 
-- `mission` uses one model-backed planner, the requested coder count, and
-  independent model-backed reviewers with up to three revision attempts.
-  A mission requires a reachable `MODEL_BASE_URL` and a worker-scoped
-  `MODEL_API_KEY`. No hardcoded candidate artifacts or hello-only fallback.
-- `create-python-script` generates or accepts one Python script, then runs it
-  directly as the worker operating-system user. This operation is not sandboxed
-  and remains disabled unless explicitly enabled.
-
-The Manager stamps each queued event with an expiry. The worker rejects an
-expired delivery and acknowledges it without starting model calls.
-
-> **Worker safety:** keep `ALLOW_GENERATED_CODE=0`. Mission output is written as
-> text artifacts and is not executed. The separate `create-python-script`
-> operation is unsandboxed and should only be enabled on a disposable worker.
+The separate legacy `create-python-script` operation remains disabled by
+default. If explicitly enabled, it executes generated Python unsandboxed as the
+worker OS user. Keep `ALLOW_GENERATED_CODE=0`.
 
 ## Repository layout
 
@@ -69,21 +61,57 @@ worker_role     capability label, normally coder
 worker_consumer shared JetStream consumer, normally agent-workers-coder
 ```
 
-An available worker pulls the next event. The Open WebUI Pipe should not choose
-a worker for normal jobs. It should submit this metadata, not a top-level
-`worker_role` field:
+An available worker pulls the next event. For normal OMP jobs, the manager sends
+`operation: "mission"` with the planner/coder/reviewer counts in `metadata.crew`:
 
 ```json
 {
   "worker_role": "coder",
-  "operation": "create-python-script"
+  "operation": "mission",
+  "crew": {
+    "size": {"size": "small", "planners": 1, "coders": 1, "reviewers": 1}
+  }
 }
 ```
 
-That object belongs inside the run's `metadata`, together with a required
-`forgejo_repository`. Do not set `metadata.worker_id` on the shared consumer.
-A mismatch raises before publish or ack, and `main` does not catch it, so the
-worker process exits and JetStream redelivers the unacked message.
+That object belongs inside the run's `metadata`, alongside a required
+top-level `forgejo_repository`. The repository and base ref are context only;
+the worker image does not clone or push them. Do not set `metadata.worker_id` on
+the shared consumer.
+
+## Mission OMP image
+
+The NATS queue listener is `worker.py`; it launches the pinned OMP job image.
+Inside the image, OMP runs the planner and delegates to the requested coder
+and reviewer agents. Both agents block until their results are complete. The
+planner performs an initial review and up to nine correction rounds (ten review
+attempts total), but the worker's 600-second OMP timeout may stop the run sooner.
+It returns success only after explicit reviewer approval.
+
+The final JSON includes `reviewer_count`: the number of individual reviewer
+verdicts marked `changes_requested` (zero means the first review approved).
+Wrapper-generated failures use `null` when no valid final OMP result exists.
+The planner reports this count; the wrapper validates its type but does not
+independently reconstruct reviewer history.
+The Agent Manager mission-status JSON exposes the same field.
+The Agent Manager mission endpoint returns a signed artifact download link
+rather than embedding product source. One file downloads directly; multiple
+files are delivered as a ZIP. The worker removes its temporary workspace after
+upload. Artifacts are retained for 30 days by default; signed links expire
+after seven days.
+
+The image's `worker-litellm/luna` model metadata declares a 4,096-token context
+and a 2,048-token output limit, matching the repository's default llama.cpp
+`LLAMA_CONTEXT_SIZE`. This client-side metadata does not change the backend
+context size.
+
+Ansible copies the image sources to `~/agent-worker/omp-image/` and builds the
+image on each worker. Rebuild manually after changing that directory:
+
+```bash
+docker build --pull --tag local/omp-worker:18.12.5 \
+  "$HOME/agent-worker/omp-image"
+```
 
 ## NATS network
 
@@ -125,26 +153,30 @@ endpoint problem, not an empty JetStream queue.
 
 ## Install or update a worker
 
-The Ansible role is the preferred installer; it copies `worker.py`,
-`mission.py`, and requirements; installs the worker-scoped LiteLLM key and
-Caddy root certificate; writes `worker.env` and `start-worker.sh`; and starts
-the worker now and at reboot. For a manual install, copy the worker source:
+The Ansible role is the preferred installer. It copies `worker.py`, the
+requirements, and the OMP image build context; installs the worker-scoped
+LiteLLM key and Caddy root certificate; builds the pinned image; and manages
+`dark-factory-agent-worker` with systemd. Relevant source, environment,
+certificate, and image changes restart the service. The one-time cutover stops
+legacy cron-started workers. For a manual install, copy the worker and image
+build context through a trusted SSH channel:
 
 ```bash
 WORKER='<worker-id>@<tailnet-user-IP>'
 ssh "$WORKER" 'mkdir -p ~/agent-worker'
 scp "$REPO_ROOT/agent-worker/worker.py" \
-    "$REPO_ROOT/agent-worker/mission.py" \
-    "$REPO_ROOT/agent-worker/requirements.txt" \
-    "$WORKER:~/agent-worker/"
+    "$REPO_ROOT/agent-worker/requirements.txt" "$WORKER:~/agent-worker/"
+scp -r "$REPO_ROOT/agent-worker/omp-image" "$WORKER:~/agent-worker/omp-image"
+ssh "$WORKER" \
+    'docker build --pull --tag local/omp-worker:18.12.5 ~/agent-worker/omp-image'
 ```
 
-Create the Python environment on the worker:
+The worker user needs Docker access, and the image build needs internet access
+to download the pinned OMP binary. Create the Python environment on the worker:
 
 ```bash
-ssh "$WORKER" 'cd ~/agent-worker &&
-  python3 -m venv .venv &&
-  .venv/bin/python -m pip install -r requirements.txt'
+ssh "$WORKER" \
+    'cd ~/agent-worker && python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt'
 ```
 
 Do not copy `.env` files, private keys, LiteLLM master keys, or API tokens from
@@ -160,43 +192,63 @@ export NATS_URL='nats://100.94.49.45:4222'
 export WORKER_ID='<worker-id>'
 export WORKER_ROLE='coder'
 export WORKER_CONSUMER='agent-workers-coder'
+export AGENT_WORKSPACE="$HOME/agent-workspace"
 export ALLOW_GENERATED_CODE=0
-export MODEL_BASE_URL='https://infra-lab-services.tail494f6d.ts.net/litellm/v1'
 export MODEL_NAME='luna'
+export MODEL_BASE_URL='https://infra-lab-services.tail494f6d.ts.net/litellm/v1'
+export MODEL_CA_FILE="$HOME/.config/litellm/caddy-root.crt"
+export OMP_WORKER_IMAGE='local/omp-worker:18.12.5'
 export MODEL_API_KEY="$(tr -d '\r\n' < "$HOME/.config/litellm/worker-api-key")"
 ```
 
-Mission requests use the worker-scoped LiteLLM virtual key. Do not use
-`LITELLM_MASTER_KEY` or the LiteLLM backend key as `MODEL_API_KEY`. The model
-name is `luna`; `openai/luna` is a backend configuration value.
+Do not use `LITELLM_MASTER_KEY` or the LiteLLM backend key as
+`MODEL_API_KEY`. The public model name is `luna`; `openai/luna` is a LiteLLM
+backend/provider value. The Ansible start script loads the worker-scoped key
+from `~/.config/litellm/worker-api-key` into the host worker environment, and
+`worker.py` passes it to the OMP job container as `LITELLM_API_KEY`.
 
-For manual installs, trust the Caddy internal root certificate:
+The Tailnet-only Caddy endpoint is:
+
+```text
+https://infra-lab-services.tail494f6d.ts.net/litellm/v1
+```
+
+Ansible installs the public Caddy root certificate both in the worker's trust
+store and at `~/.config/litellm/caddy-root.crt`. The OMP image receives the
+latter as `NODE_EXTRA_CA_CERTS`; artifact upload uses the same CA explicitly.
+Keep `MODEL_TLS_INSECURE=0`. Never copy Caddy's `root.key`.
+
+For a manual install, trust the Caddy root certificate:
 
 ```bash
 sudo install -m 0644 root.crt /usr/local/share/ca-certificates/thegarden-caddy-root.crt
 sudo update-ca-certificates
 ```
 
-Never copy Caddy's `root.key`. Keep `MODEL_TLS_INSECURE=0`.
+The image emits sanitized `OMP_PROGRESS` lines for planner, coder, and reviewer
+activity. Docker bridge containers may not inherit Tailscale MagicDNS, so the
+worker maps `infra-lab-services.tail494f6d.ts.net` to the VM's Tailscale IP
+`100.94.49.45` with `--add-host`, preserving the URL hostname for TLS/SNI
+without host networking. Update the mapping if that IP changes.
 
-Mission artifacts are saved in the worker workspace and returned through
-Open WebUI. This implementation does not clone or push the configured
-Forgejo repository.
-
-## Start the worker
-
-The worker is long-running and should remain in the foreground while testing:
+Ansible-managed workers run as the `dark-factory-agent-worker` systemd service.
+Inspect the service and its logs with:
 
 ```bash
-cd ~/agent-worker
-.venv/bin/python -u worker.py 2>&1 | tee -a ~/agent-worker/worker.log
+sudo systemctl status dark-factory-agent-worker
+sudo journalctl -u dark-factory-agent-worker -f
 ```
 
-An idle worker should not print an error for an empty queue. The pull timeout is
-caught and the worker waits for the next event. A worker connection error is
-different and should be investigated rather than hidden.
+For a one-off manual test only, stop the service first to avoid launching a
+second queue consumer:
 
-Optional limits:
+```bash
+sudo systemctl stop dark-factory-agent-worker
+cd ~/agent-worker
+.venv/bin/python -u worker.py
+```
+
+Legacy `create-python-script` limits (not used by mission jobs):
 
 ```bash
 export MODEL_TIMEOUT=120
@@ -204,6 +256,12 @@ export SCRIPT_TIMEOUT=300
 export MAX_SCRIPT_CHARS=30000
 export MAX_OUTPUT_CHARS=12000
 ```
+
+## Legacy script workspace behavior
+
+The worker code and current Ansible group setting disable this operation
+(`allow_generated_code: false`). These workspace rules apply only if it is
+explicitly enabled.
 
 The UUID remains the internal run ID for queueing and status tracking. When a
 project name is supplied, its filesystem-safe slug replaces the run ID as the
@@ -223,10 +281,11 @@ If no script name is provided, the worker uses `generated_agent.py`. Existing
 scripts are not overwritten; duplicates get `_2`, `_3`, and so on. Scripts
 execute in that workspace directory, so their output artifacts are written there.
 
-## Generated-script contract
+## Legacy host-side execution contract
 
-Generated code is executed directly by the worker user. The model prompt
-requires scripts to:
+This applies only to legacy `create-python-script`. The current Ansible
+configuration disables it; if explicitly enabled, generated Python runs as the
+worker OS user without a sandbox. The model prompt requires scripts to:
 
 - use only the Python standard library already available on the worker;
 - operate only in the current workspace directory;
@@ -248,43 +307,12 @@ in the worker image or virtual environment through Ansible before running jobs.
 `python3-tk` and also requires a display for most GUI operations; it is not a
 suitable dependency for the current headless worker.
 
-## Submit a pooled run
+## Mission event flow
 
-
-The Pipe or a test client must include `forgejo_repository`. Omit
-`worker_id`. Put the role and operation in `metadata`:
-
-```json
-{
-  "goal": "Create a dependency-free Python script that writes a report.json file.",
-  "forgejo_repository": "owner/project",
-  "model": "luna",
-  "project_name": "quarterly-audit",
-  "script_name": "audit_report.py",
-  "metadata": {
-    "worker_role": "coder",
-    "operation": "create-python-script"
-  }
-}
-```
-
-For a deterministic test, provide a script string:
-
-```json
-{
-  "goal": "Run the supplied test script",
-  "forgejo_repository": "owner/project",
-  "metadata": {
-    "worker_role": "coder",
-    "operation": "create-python-script",
-    "script": "print('provided test script')"
-  }
-}
-```
-
-The Manager stores the run and publishes `agent.runs.created`. It consumes
-`agent.runs.status` (`status: running`) and `agent.runs.completed`
-(`metadata.result`).
+Open WebUI submits missions to the Agent Manager, which publishes
+`agent.runs.created`. The worker reports `agent.runs.status` and
+`agent.runs.completed`; the Manager updates the mission receipt polled by the
+Pipe. Do not publish a normal pooled mission with `metadata.worker_id`.
 
 ## Troubleshooting
 
