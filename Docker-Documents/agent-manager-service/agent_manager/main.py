@@ -30,6 +30,12 @@ from .models import ActivityRecord, RunRecord, UserRecord, WorkerRecord
 from .settings import settings
 from .tracking import router as tracking_router, scan_deadline_notifications
 from .omp import router as omp_router
+from .missions import (
+    CONTRACT_VERSION,
+    coding_mission_errors,
+    is_coding_mission,
+    normalized_coding_mission,
+)
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -718,6 +724,22 @@ async def create_run(
         raise HTTPException(status_code=422, detail="metadata.worker_role must be a simple worker role name")
     if target_worker is not None and (not isinstance(target_worker, str) or not target_worker):
         raise HTTPException(status_code=422, detail="metadata.worker_id must be a non-empty string")
+    if is_coding_mission(body.metadata):
+        errors = coding_mission_errors(
+            goal=body.goal,
+            repository=body.forgejo_repository,
+            base_ref=body.base_ref,
+            metadata=body.metadata,
+        )
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "INCOMPLETE_CODING_MISSION",
+                    "contract_version": CONTRACT_VERSION,
+                    "errors": errors,
+                },
+            )
     worker = await find_available_worker(request.app.state.nats, worker_role, target_worker)
     if worker is None:
         rejected = await record_activity(
@@ -748,6 +770,10 @@ async def create_run(
         metadata["project_name"] = body.project_name
     if body.script_name is not None:
         metadata["script_name"] = body.script_name
+    if is_coding_mission(body.metadata):
+        metadata.update(
+            normalized_coding_mission(metadata=body.metadata)
+        )
     if getattr(request.state, "auth_method", "") == "open-webui":
         metadata["source"] = "open-webui"
     record = RunRecord(
