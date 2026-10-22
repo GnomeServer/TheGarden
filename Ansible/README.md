@@ -119,10 +119,15 @@ ansible-playbook playbooks/site.yml --check --diff
 
 ## Worker laptops
 
-`playbooks/agent-workers.yml` installs the Python worker from `../agent-worker`,
-creates a virtualenv, writes `~/agent-worker/worker.env`, and starts
-`start-worker.sh` now and on reboot. It does not install Pi. A missing LiteLLM
-key is a warning, not a failure. Generated scripts run as the laptop user.
+`playbooks/agent-workers.yml` installs the Python queue consumer, writes
+`~/agent-worker/worker.env`, copies `agent-worker/omp-image/`, builds the pinned
+OMP job image, and manages the worker as the `dark-factory-agent-worker`
+systemd service. Source, environment, certificate, and image changes notify a
+single service restart; legacy cron-started workers are stopped during the
+one-time cutover. The job image contains the OMP CLI plus planner, coder, and
+reviewer definitions. The worker user needs Docker access; membership in the
+Docker group is root-equivalent. The legacy `create-python-script` operation
+still runs generated code unsandboxed as the worker OS user.
 
 Add a laptop by copying the commented `michelangelo` block in
 `inventory/hosts.yml`, filling the Tailscale address, SSH user, and worker id,
@@ -134,8 +139,8 @@ ansible agent_workers --limit michelangelo -m ansible.builtin.ping
 ansible-playbook playbooks/agent-workers.yml --limit michelangelo --ask-become-pass
 ```
 
-`--ask-become-pass` is only needed for `python3-venv` and `cron`. Place the
-virtual key on the controller at the host's `litellm_key_source` before the
-run if dynamic Open WebUI prompts should work. Set `worker_model_base_url` in
-`inventory/group_vars/agent_workers.yml` when a Tailscale-reachable `/v1` route
-exists. Do not commit key files.
+`--ask-become-pass` is needed for package installation and systemd management.
+Place the virtual key on the controller at the host's `litellm_key_source`
+before the run if dynamic Open WebUI prompts should work. Set
+`worker_model_base_url` in `inventory/group_vars/agent_workers.yml` when a
+Tailscale-reachable `/v1` route exists. Do not commit key files.

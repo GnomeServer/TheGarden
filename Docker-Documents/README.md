@@ -34,11 +34,11 @@ The VM has its own Tailscale identity, so other tailnet devices can use the Magi
 
 - [`caddy_service/caddy-setup.md`](caddy_service/caddy-setup.md) — VM networking, Caddy routes, TLS/SNI testing, Docker network checks, and Proxmox connectivity.
 - [`caddy_service/README.md`](caddy_service/README.md) — Caddy Compose deployment, persistent TLS volumes, network membership, and operations.
-- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — The checked-in routes: `/grafana/`, `/forgejo/`, and the Proxmox fallback. There is no `/litellm/`, `/llama/`, or Open WebUI route, and no listener on port `8443`.
+- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — The checked-in routes: `/grafana/`, `/forgejo/`, `/litellm/`, and the Proxmox fallback. There is no `/llama/` or Open WebUI route, and no listener on port `8443`.
 - [`grafana_services/README.md`](grafana_services/README.md) — Grafana, Prometheus, and Node Exporter deployment and the shared `caddy_proxy` network.
 - [`forgejo/README.md`](forgejo/README.md) — Forgejo with PostgreSQL, HTTPS Git access, SSH clone access, and first-run setup.
 - [`llama_services/README.md`](llama_services/README.md) — llama.cpp model serving. The API is Docker-network only; Caddy does not publish `/llama/`.
-- [`litellm-service/README.md`](litellm-service/README.md) — LiteLLM gateway, virtual keys, and the loopback/`caddy_proxy` endpoints that actually exist.
+- [`litellm-service/README.md`](litellm-service/README.md) — LiteLLM gateway, virtual keys, loopback/`caddy_proxy` endpoints, and the remote Caddy `/litellm/v1` endpoint.
 - [`open_webui_services/README.md`](open_webui_services/README.md) — Open WebUI and Ollama. The Compose file does not publish a host port, and the Caddyfile does not proxy Open WebUI.
 - [`agent-manager-service/README.md`](agent-manager-service/README.md) — Agent Manager, PostgreSQL, NATS JetStream, and API verification. Ansible deployment is in [`../Ansible/README.md`](../Ansible/README.md), not in that service README.
 - [`../agent-worker/README.md`](../agent-worker/README.md) — Remote worker installation, dynamic script prompts, and NATS configuration.

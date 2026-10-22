@@ -11,6 +11,9 @@ import httpx
 from pydantic import BaseModel, Field
 
 
+from pydantic import BaseModel, Field
+
+
 class Pipe:
     class Valves(BaseModel):
         AGENT_MANAGER_URL: str = Field(
@@ -120,6 +123,20 @@ class Pipe:
         ]
         stem = "_".join(words[:8]) or "generated_script"
         return f"{stem[:125].rstrip('_')}.py"
+
+    @staticmethod
+    def _format_artifacts(artifact: Any) -> str:
+        if not isinstance(artifact, dict):
+            return "The mission completed, but no downloadable artifact was reported."
+        filename = artifact.get("filename")
+        download_url = artifact.get("download_url")
+        size_bytes = artifact.get("size_bytes")
+        if not isinstance(filename, str) or not filename or not isinstance(download_url, str) or not download_url:
+            return "The mission completed, but no downloadable artifact was reported."
+        # Escape Markdown label metacharacters without modifying the signed URL.
+        safe_filename = filename.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+        size = f"{size_bytes:,} bytes" if isinstance(size_bytes, int) and size_bytes >= 0 else "size unknown"
+        return f"Download the completed work:\n- [{safe_filename}]({download_url}) ({size})"
 
     @staticmethod
     async def _emit_status(
@@ -311,9 +328,10 @@ class Pipe:
         summary: str,
         project_name: str | None,
     ) -> str:
-        deadline = time.monotonic() + min(self.valves.RUN_TIMEOUT_SECONDS, 180)
+        deadline = time.monotonic() + self.valves.RUN_TIMEOUT_SECONDS
         project = f" for `{project_name}`" if project_name else ""
         headers = {"Authorization": f"Bearer {token}"}
+        last_status = "unknown"
         url = f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}/v1/omp/missions/{mission_id}"
         while time.monotonic() < deadline:
             try:
@@ -326,17 +344,17 @@ class Pipe:
             if not isinstance(state, dict):
                 break
             status = state.get("status")
+            last_status = status if isinstance(status, str) else "unknown"
             if status == "bounced":
                 question = state.get("question") or state.get("summary") or summary
                 return question if isinstance(question, str) else summary
             if status == "completed":
                 done = state.get("summary") if isinstance(state.get("summary"), str) else summary
-                script = state.get("script") if isinstance(state.get("script"), str) else ""
                 body = f"{done}{project}. Mission `{mission_id}`."
-                return f"{body}\n\n```python\n{script.rstrip()}\n```" if script.strip() else body
+                return f"{body}\n\n{self._format_artifacts(state.get('artifact'))}"
             if status == "failed":
                 failed = state.get("summary") if isinstance(state.get("summary"), str) else "The crew stopped before finishing."
                 return f"{failed}{project}. Mission `{mission_id}`."
             await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
-        return f"{summary}{project}. Mission `{mission_id}`. The crew is still working."
+        return f"{summary}{project}. Mission `{mission_id}` (status: `{last_status}`). Polling timed out before completion."
 

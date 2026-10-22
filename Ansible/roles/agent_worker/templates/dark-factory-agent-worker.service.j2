@@ -1,0 +1,20 @@
+[Unit]
+Description=TheGarden agent worker ({{ worker_id }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ ansible_user_id }}
+WorkingDirectory={{ ansible_user_dir }}/agent-worker
+Environment=HOME={{ ansible_user_dir }}
+EnvironmentFile={{ ansible_user_dir }}/agent-worker/worker.env
+ExecStart={{ ansible_user_dir }}/agent-worker/start-worker.sh
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

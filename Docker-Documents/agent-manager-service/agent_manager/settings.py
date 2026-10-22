@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     crew_runtime: str = Field(default="auto", validation_alias="CREW_RUNTIME")
     crew_image: str = Field(default="python:3.12-slim", validation_alias="CREW_IMAGE")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+    artifact_retention_days: int = Field(
+        default=30, ge=1, le=365, validation_alias="ARTIFACT_RETENTION_DAYS"
+    )
+
     @model_validator(mode="after")
     def separate_service_credentials(self) -> "Settings":
         if self.openwebui_token and self.openwebui_token == self.api_token:

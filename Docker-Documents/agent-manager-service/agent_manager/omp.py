@@ -11,6 +11,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .artifacts import (
+    mission_artifact,
+    provision_upload_capability,
+    upload_event_metadata,
+)
 from .auth import require_run_submission
 from .dashboard import record_activity
 from .database import get_session
@@ -64,7 +69,7 @@ async def accept_or_bounce(
     request: Request,
     session: AsyncSession,
 ) -> dict[str, str]:
-    """Record one mission on the existing run ledger. Do not queue a worker."""
+    """Record one mission and queue it through the existing run ledger."""
     repository = body.forgejo_repository.strip()
     project = (body.project_name or "").strip()
     bounced = not REPO_PATTERN.match(repository)
@@ -140,6 +145,7 @@ async def accept_or_bounce(
         "Worker OMP: not heard from yet.",
     ]
     record.run_metadata = metadata
+    upload_token, upload_url = provision_upload_capability(record)
     record.status = "queued"
     await session.commit()
     event = {
@@ -150,7 +156,7 @@ async def accept_or_bounce(
         "forgejo_repository": record.forgejo_repository,
         "base_ref": "main",
         "model": body.model,
-        "metadata": metadata,
+        "metadata": upload_event_metadata(record, upload_token, upload_url),
     }
     try:
         await request.app.state.nats.jetstream().publish(
@@ -160,7 +166,7 @@ async def accept_or_bounce(
         )
     except Exception:
         return question("OMP sized the crew, but the orchestrator could not reach the worker computers.")
-    return question(f"{summary} Mission {mission_id}.")
+    return mission_reply(mission_id, "queued", summary)
 
 
 @router.post("/v1/omp/turns")
@@ -288,7 +294,9 @@ async def mission_status(
         raise HTTPException(status_code=404, detail="Mission not found")
     ledger = metadata.get("ledger") if isinstance(metadata.get("ledger"), dict) else {}
     result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
-    script = result.get("script") if isinstance(result.get("script"), str) else None
+    reviewer_count = result.get("reviewer_count")
+    if type(reviewer_count) is not int or reviewer_count < 0:
+        reviewer_count = None
     summary = ledger.get("result_summary") if isinstance(ledger.get("result_summary"), str) else ""
     bounce = ledger.get("bounce") if isinstance(ledger.get("bounce"), str) else None
     return {
@@ -297,6 +305,7 @@ async def mission_status(
         "status": record.status,
         "summary": summary[:200],
         "question": bounce if record.status == "bounced" else None,
-        "script": script[:8000] if record.status == "completed" and script else None,
+        "reviewer_count": reviewer_count,
         "crew": metadata.get("crew") if isinstance(metadata.get("crew"), dict) else None,
+        "artifact": mission_artifact(metadata, record.id),
     }

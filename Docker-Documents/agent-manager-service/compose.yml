@@ -108,6 +108,7 @@ services:
       REASONING_EFFORT: ${REASONING_EFFORT:-medium}
       CREW_RUNTIME: ${CREW_RUNTIME:-auto}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ARTIFACT_RETENTION_DAYS: ${ARTIFACT_RETENTION_DAYS:-30}
     group_add:
       - "986"
     volumes:

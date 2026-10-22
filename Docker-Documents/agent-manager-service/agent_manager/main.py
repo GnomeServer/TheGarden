@@ -22,6 +22,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .artifacts import (
+    cleanup_expired_artifacts,
+    router as artifacts_router,
+    provision_upload_capability,
+    upload_event_metadata,
+)
 from .auth import api_token_user, require_run_submission, run_client
 from .dashboard import activity_out, record_activity, router as dashboard_router, worker_out
 from .database import SessionLocal, engine, get_session, initialise_database
@@ -147,7 +153,16 @@ class RunOut(BaseModel):
             model=record.model,
             status=record.status,
             error=record.error,
-            metadata=record.run_metadata or {},
+            metadata={
+                key: value
+                for key, value in (record.run_metadata or {}).items()
+                if key not in {
+                    "artifact_upload_consumed",
+                    "artifact_upload_token_hash",
+                    "artifact_upload_token",
+                    "artifact_upload_url",
+                }
+            },
             created_at=record.created_at,
             updated_at=record.updated_at,
             worker_id=record.worker_id,
@@ -358,8 +373,17 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
             return
         previous_status = record.status
         metadata = dict(record.run_metadata or {})
+        metadata.pop("artifact_upload_token_hash", None)
+        metadata.pop("artifact_upload_token", None)
+        metadata.pop("artifact_upload_url", None)
         completion = dict(payload)
         completion.pop("run_id", None)
+        for secret_key in (
+            "artifact_upload_token",
+            "artifact_upload_token_hash",
+            "artifact_upload_url",
+        ):
+            completion.pop(secret_key, None)
         metadata["result"] = completion
         ledger = dict(metadata.get("ledger") or {})
         worker_summary = payload.get("summary")
@@ -605,6 +629,18 @@ async def deadline_notification_loop() -> None:
         await asyncio.sleep(settings.notification_scan_seconds)
 
 
+async def artifact_retention_loop() -> None:
+    while True:
+        try:
+            async with SessionLocal() as session:
+                removed = await cleanup_expired_artifacts(session)
+            if removed:
+                logger.info("removed %d expired artifacts", removed)
+        except Exception:
+            logger.exception("artifact retention cleanup failed")
+        await asyncio.sleep(24 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await initialise_database()
@@ -635,6 +671,7 @@ async def lifespan(app: FastAPI):
             )
         ),
         asyncio.create_task(refresh_operational_gauges()),
+        asyncio.create_task(artifact_retention_loop()),
         asyncio.create_task(deadline_notification_loop()),
     ]
     app.state.background_tasks = tasks
@@ -657,6 +694,7 @@ app = FastAPI(
 )
 app.include_router(dashboard_router)
 app.include_router(tracking_router)
+app.include_router(artifacts_router)
 app.include_router(omp_router)
 app.mount("/metrics", make_asgi_app())
 static_dir = Path(__file__).with_name("static")
@@ -776,6 +814,14 @@ async def create_run(
         )
     if getattr(request.state, "auth_method", "") == "open-webui":
         metadata["source"] = "open-webui"
+    for reserved_key in (
+        "artifact",
+        "artifact_upload_consumed",
+        "artifact_upload_token",
+        "artifact_upload_token_hash",
+        "artifact_upload_url",
+    ):
+        metadata.pop(reserved_key, None)
     record = RunRecord(
         id=run_id,
         goal=body.goal,
@@ -785,6 +831,9 @@ async def create_run(
         status="queued",
         run_metadata=metadata,
     )
+    upload_token = upload_url = None
+    if metadata.get("operation") == "mission":
+        upload_token, upload_url = provision_upload_capability(record)
     session.add(record)
     await session.flush()
     await record_activity(
@@ -799,6 +848,11 @@ async def create_run(
     )
     await session.commit()
     await session.refresh(record)
+    event_metadata = (
+        upload_event_metadata(record, upload_token, upload_url)
+        if upload_token is not None and upload_url is not None
+        else dict(record.run_metadata or {})
+    )
     event = {
         "event": "run.created",
         "event_id": str(uuid.uuid4()),
@@ -807,13 +861,16 @@ async def create_run(
         "forgejo_repository": body.forgejo_repository,
         "base_ref": body.base_ref,
         "model": body.model,
-        "metadata": metadata,
+        "metadata": event_metadata,
     }
     try:
         await publish_run_event(request, RUN_CREATED_SUBJECT, event)
         RUNS_CREATED.inc()
     except Exception as exc:
         logger.exception("failed to publish run %s", run_id)
+        failed_metadata = dict(record.run_metadata or {})
+        failed_metadata.pop("artifact_upload_token_hash", None)
+        record.run_metadata = failed_metadata
         record.status = "failed"
         record.error = f"failed to enqueue run: {exc}"[:4000]
         record.completed_at = datetime.now(timezone.utc)

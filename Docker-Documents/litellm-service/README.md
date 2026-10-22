@@ -17,24 +17,27 @@ are not committed to Git.
 
 ## Endpoints
 
-The checked-in Caddyfile does not route `/litellm/`. This URL is not served:
+The Caddyfile routes remote clients through:
 
 ```text
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
-Containers attached to `caddy_proxy` use:
+
+`handle_path /litellm/*` strips the prefix before proxying to `litellm:4000`, so LiteLLM receives `/v1/...`. Caddy and LiteLLM share `caddy_proxy`.
+
+Containers on `caddy_proxy` can use:
 
 ```text
 http://litellm:4000/v1
 ```
 
-The host-local gateway uses:
+The server VM itself can use:
 
 ```text
 http://127.0.0.1:4000/v1
 ```
 
-`litellm` is a Docker-only hostname. A remote worker cannot resolve it, and it cannot use the VM loopback address. Remote dynamic prompts have no routed model URL until a Caddy handle is added.
+Remote workers must use the Caddy hostname; `litellm` is Docker-only and the VM loopback address is not reachable from a worker. Caddy uses an internal CA, so remote worker containers must trust its root certificate.
 
 ## Configuration
 
@@ -134,10 +137,34 @@ curl -sS \
   }'
 ```
 
-A remote worker cannot use the Caddy hostname for LiteLLM until `/litellm` is added to `caddy_service/Caddyfile`. A `401` from loopback or from `http://litellm:4000` means LiteLLM is up and the key was rejected. A failure against the MagicDNS `/litellm/` URL is a missing route, not a model error.
+A remote worker uses `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
+The checked-in Caddyfile routes `/litellm/*` to `litellm:4000` and strips the
+prefix. The live Caddy container mounts `~/caddy-service/Caddyfile`; editing
+this repository copy does not update the deployed route until that copy is
+updated and Caddy is recreated. Test the unauthenticated health route from the
+worker:
 
-A `401` response confirms that TLS and routing work but authentication failed.
-A timeout or model error requires inspecting the LiteLLM and backend logs.
+```bash
+curl -i --cacert "$HOME/.config/litellm/caddy-root.crt" \
+  https://infra-lab-services.tail494f6d.ts.net/litellm/health/liveliness
+```
+
+Then test authentication without printing the worker key:
+
+```bash
+WORKER_KEY="$(tr -d '\r\n' < "$HOME/.config/litellm/worker-api-key")"
+curl -sS -i --cacert "$HOME/.config/litellm/caddy-root.crt" \
+  -H "Authorization: Bearer ${WORKER_KEY}" \
+  https://infra-lab-services.tail494f6d.ts.net/litellm/v1/models
+unset WORKER_KEY
+```
+
+A `401` from `/v1/models` means routing and TLS succeeded but LiteLLM rejected
+the key. A `404`, `502`, or unexpected Proxmox HTML response points to the
+active Caddy route or upstream network; DNS, TLS, and timeout errors point to
+tailnet access, CA trust, or service availability. If `/v1/models` succeeds but
+a completion reports context overflow, the API is reachable and the remaining
+issue is the model/backend.
 
 ## Open WebUI
 
@@ -168,7 +195,10 @@ ID. JetStream assigns each event to an available worker.
 
 ### LiteLLM health works but completions time out
 
-Test `chat/completions` locally first. If the local request times out, inspect the LiteLLM-to-backend route, `LUNA_API_BASE`, `LUNA_MODEL`, and the backend logs. If local `chat/completions` works but `https://infra-lab-services.tail494f6d.ts.net/litellm/v1` fails, that matches the repository: the Caddyfile has no `/litellm` route.
+Test `chat/completions` locally first. If local requests time out, inspect the
+LiteLLM-to-backend route, `LUNA_API_BASE`, `LUNA_MODEL`, and backend logs. If
+local completions work but the Caddy endpoint fails, check the active Caddyfile,
+the Caddy and LiteLLM logs, tailnet reachability, and the worker's Caddy CA.
 
 ### Certificate verification fails
 

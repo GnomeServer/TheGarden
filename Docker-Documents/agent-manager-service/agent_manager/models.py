@@ -6,11 +6,13 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     JSON,
     String,
     Text,
@@ -20,6 +22,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
+
+MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 
 
 class RunRecord(Base):
@@ -39,6 +43,31 @@ class RunRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ArtifactBlobRecord(Base):
+    __tablename__ = "mission_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            f"size_bytes >= 0 AND size_bytes <= {MAX_ARTIFACT_BYTES} "
+            f"AND length(content) <= {MAX_ARTIFACT_BYTES} AND length(content) = size_bytes",
+            name="ck_mission_artifacts_size",
+        ),
+        UniqueConstraint("run_id", name="uq_mission_artifacts_run"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("runs.id", ondelete="CASCADE")
+    )
+    filename: Mapped[str] = mapped_column(String(255))
+    content_type: Mapped[str] = mapped_column(String(255))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    content: Mapped[bytes] = mapped_column(LargeBinary(length=MAX_ARTIFACT_BYTES))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
     )
 
 

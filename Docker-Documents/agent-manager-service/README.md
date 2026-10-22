@@ -237,6 +237,20 @@ Bearer token required. A missing or wrong token is 401.
 
 `project_name` and `script_name` are stored inside `metadata`, not as columns. The same keys in the JSON body replace copies inside client `metadata`.
 
+## Mission artifacts
+
+Each queued mission receives a run-scoped upload capability in its
+`agent.runs.created` event metadata. The worker uploads one file or ZIP as a raw
+request body to `PUT /v1/omp/missions/{run_id}/artifact`, with
+`X-Artifact-Filename` and `Content-Type` headers. Uploads are limited to 50 MiB;
+the manager rejects unsafe filenames, allows same-content retries, and rejects
+a different second artifact. Artifact bytes are stored in the
+`mission_artifacts` PostgreSQL table, backed by the existing
+`manager_postgres_data` volume. Mission status exposes the artifact descriptor
+and a signed download URL that expires after seven days. Daily cleanup removes
+artifact rows after the default 30-day retention period; set
+`ARTIFACT_RETENTION_DAYS` to change the retention period.
+
 Compose and `.env.example` set `MODEL_BASE_URL` to `http://llama:8080/v1`. The Python fallback `http://litellm:4000/v1` is unused while Compose sets the variable. The API does not call Forgejo, llama.cpp, LiteLLM, or Ollama. Ollama is on `open-webui_internal` at `http://ollama:11434`.
 
 ## Caddy routes and metrics
@@ -319,14 +333,15 @@ ALLOW_GENERATED_CODE=1
 ```
 
 Inventory IDs are `worker-01` through `worker-04`, not hostnames. Do not set
-`MODEL_BASE_URL` to `http://litellm:4000/v1` on a laptop; that name is Docker
-DNS. Do not use `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`
-either: the checked-in Caddyfile has no `/litellm/` route. VM-local checks use
-`http://127.0.0.1:4000/v1`. A remote dynamic prompt has no routed model URL in
-this repository. `metadata.script` does not need one.
+`MODEL_BASE_URL` to `http://litellm:4000/v1` on a laptop; `litellm` is Docker
+DNS. Remote workers use `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`
+through Caddy. VM-local checks use `http://127.0.0.1:4000/v1`. The worker must
+trust Caddy's root CA. `metadata.script` does not need a model URL when it
+already contains the script.
 
 Do not use the LiteLLM master key as `MODEL_API_KEY`. Do not place any key in
-Git. `MODEL_TLS_INSECURE=1` is not a substitute for a missing Caddy route.
+Git. `MODEL_TLS_INSECURE=1` will not fix DNS, routing, or authentication errors;
+keep TLS verification enabled and install the Caddy root CA.
 
 ### Duplicate completion events
 

@@ -7,8 +7,11 @@ TheGarden/Docker-Documents/litellm-service
 ```
 
 Use [`README.md`](README.md) for the current configuration and operational
-commands. The Compose project uses the public model alias `luna`, a LiteLLM
-virtual key. The checked-in Caddyfile does not expose this URL:
+commands. The public model alias is `luna`; workers authenticate with a
+LiteLLM virtual key.
+
+The checked-in Caddyfile exposes this remote endpoint with `handle_path
+/litellm/*`, which strips the prefix before proxying to LiteLLM:
 
 ```text
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
@@ -33,14 +36,16 @@ Open WebUI container
   → configured Luna backend
 ```
 
-Remote workers do not have a Caddy path to LiteLLM. VM-local checks use `http://127.0.0.1:4000/v1`. Do not treat a Caddy `/litellm` test as a current success criterion.
+Remote workers use the Caddy endpoint above and must trust Caddy's root CA.
+VM-local checks use `http://127.0.0.1:4000/v1`; containers on `caddy_proxy` use
+`http://litellm:4000/v1`.
 
 ## Validation order
 
 1. Check LiteLLM health.
 2. Test `/v1/models` with the worker virtual key.
 3. Test `/v1/chat/completions` locally through LiteLLM.
-4. Do not expect the Caddy `/litellm` request to succeed. That route is absent.
+4. Test the Caddy endpoint from a tailnet device with the Caddy root CA.
 5. Test from the worker with its CA bundle.
 6. Inspect LiteLLM, Caddy, and backend logs for timeouts.
 

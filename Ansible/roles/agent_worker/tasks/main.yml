@@ -8,12 +8,13 @@
       - worker_role | length > 0
     fail_msg: "Set worker_id and worker_role for {{ inventory_hostname }} before running this playbook."
 
-- name: Install Python, venv, and cron
+- name: Install Python, cron, and worker process-management packages
   ansible.builtin.apt:
     name:
       - python3
       - python3-venv
       - cron
+      - procps
     state: present
   become: true
 
@@ -29,6 +30,29 @@
     - "{{ ansible_user_dir }}/.config"
     - "{{ ansible_user_dir }}/.config/litellm"
 
+- name: Check Caddy root CA on the controller
+  ansible.builtin.stat:
+    path: "{{ caddy_root_ca_source }}"
+  delegate_to: localhost
+  register: caddy_root_ca_source_stat
+
+- name: Require the Caddy root CA for HTTPS worker model access
+  ansible.builtin.assert:
+    that:
+      - caddy_root_ca_source_stat.stat.exists
+      - caddy_root_ca_source_stat.stat.isreg
+    fail_msg: >-
+      Export the active Caddy root certificate to {{ caddy_root_ca_source }}
+      with scripts/export_caddy_root_ca.sh before deploying the worker.
+
+- name: Install the Caddy root CA for worker model requests
+  ansible.builtin.copy:
+    src: "{{ caddy_root_ca_source }}"
+    dest: "{{ ansible_user_dir }}/.config/litellm/caddy-root.crt"
+    owner: "{{ ansible_user_id }}"
+    mode: "0644"
+  notify: Restart agent worker
+
 - name: Install worker source
   ansible.builtin.copy:
     src: "{{ playbook_dir }}/../../agent-worker/{{ item }}"
@@ -38,15 +62,46 @@
   loop:
     - worker.py
     - requirements.txt
+  notify: Restart agent worker
 
-- name: Create the worker virtualenv
+- name: Install OMP job image build context
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../agent-worker/omp-image/"
+    dest: "{{ ansible_user_dir }}/agent-worker/omp-image/"
+    owner: "{{ ansible_user_id }}"
+    mode: preserve
+  register: omp_image_source_copy
+  notify: Restart agent worker
+
+- name: Check whether the OMP job image exists
   ansible.builtin.command:
-    cmd: python3 -m venv {{ ansible_user_dir }}/agent-worker/.venv
-    creates: "{{ ansible_user_dir }}/agent-worker/.venv/bin/python"
+    argv:
+      - docker
+      - image
+      - inspect
+      - "{{ worker_omp_image }}"
+  register: omp_worker_image_info
+  changed_when: false
+  failed_when: false
+
+- name: Build the OMP job image
+  ansible.builtin.command:
+    argv:
+      - docker
+      - build
+      - --pull
+      - --tag
+      - "{{ worker_omp_image }}"
+      - "{{ ansible_user_dir }}/agent-worker/omp-image"
+  when: omp_image_source_copy.changed or omp_worker_image_info.rc != 0
+  notify: Restart agent worker
+
 
 - name: Install worker Python dependencies
-  ansible.builtin.command:
-    cmd: "{{ ansible_user_dir }}/agent-worker/.venv/bin/python -m pip install -r {{ ansible_user_dir }}/agent-worker/requirements.txt"
+  ansible.builtin.pip:
+    requirements: "{{ ansible_user_dir }}/agent-worker/requirements.txt"
+    virtualenv: "{{ ansible_user_dir }}/agent-worker/.venv"
+    virtualenv_command: python3 -m venv
 
 - name: Install worker environment
   ansible.builtin.template:
@@ -54,6 +109,7 @@
     dest: "{{ ansible_user_dir }}/agent-worker/worker.env"
     owner: "{{ ansible_user_id }}"
     mode: "0600"
+  notify: Restart agent worker
 
 - name: Install worker start script
   ansible.builtin.template:
@@ -61,6 +117,7 @@
     dest: "{{ ansible_user_dir }}/agent-worker/start-worker.sh"
     owner: "{{ ansible_user_id }}"
     mode: "0700"
+  notify: Restart agent worker
 
 - name: Check for a LiteLLM key on the controller
   ansible.builtin.stat:
@@ -80,6 +137,7 @@
     - litellm_key_source | length > 0
     - litellm_key_source_stat.stat.exists
     - litellm_key_source_stat.stat.isreg
+  notify: Restart agent worker
 
 - name: Warn when the LiteLLM key was not copied
   ansible.builtin.debug:
@@ -89,15 +147,70 @@
       controller file and this playbook is run again.
   when: not (litellm_key_source_stat.stat.exists and litellm_key_source_stat.stat.isreg)
 
-- name: Start the worker after reboot
+- name: Remove the legacy worker reboot cron job
   ansible.builtin.cron:
     name: thegarden-agent-worker
     special_time: reboot
     job: "{{ ansible_user_dir }}/agent-worker/start-worker.sh"
+    state: absent
 
-- name: Start the worker now
+- name: Check whether the systemd worker service is active
   ansible.builtin.command:
-    cmd: "{{ ansible_user_dir }}/agent-worker/start-worker.sh"
-  async: 10
-  poll: 0
+    argv:
+      - systemctl
+      - is-active
+      - --quiet
+      - dark-factory-agent-worker
+  register: worker_service_active
   changed_when: false
+  failed_when: false
+
+- name: Stop a legacy worker process before systemd takes over
+  ansible.builtin.command:
+    argv:
+      - pkill
+      - --signal
+      - TERM
+      - --uid
+      - "{{ ansible_user_id }}"
+      - --full
+      - --
+      - "{{ ansible_user_dir }}/agent-worker/(start-worker\\.sh|worker\\.py)"
+  register: legacy_worker_stop
+  changed_when: legacy_worker_stop.rc == 0
+  failed_when: legacy_worker_stop.rc not in [0, 1]
+  when: worker_service_active.rc != 0
+
+- name: Wait for legacy worker processes to exit
+  ansible.builtin.command:
+    argv:
+      - pgrep
+      - --uid
+      - "{{ ansible_user_id }}"
+      - --full
+      - "{{ ansible_user_dir }}/agent-worker/(start-worker\\.sh|worker\\.py)"
+  register: legacy_worker_processes
+  retries: 10
+  delay: 1
+  until: legacy_worker_processes.rc == 1
+  changed_when: false
+  failed_when: legacy_worker_processes.rc not in [0, 1]
+  when: worker_service_active.rc != 0
+
+- name: Install the worker systemd service
+  ansible.builtin.template:
+    src: dark-factory-agent-worker.service.j2
+    dest: /etc/systemd/system/dark-factory-agent-worker.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Restart agent worker
+
+- name: Enable and start the worker service
+  ansible.builtin.systemd:
+    name: dark-factory-agent-worker
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
