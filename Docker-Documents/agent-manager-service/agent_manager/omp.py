@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +28,56 @@ REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 GREETING = re.compile(r"^(hi|hello|hey|yo|thanks|thank you|ok|okay)[.!?\s]*$", re.IGNORECASE)
 PENDING: dict[str, tuple[float, str]] = {}
 PENDING_SECONDS = 600.0
+
+SECRET_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"),
+    re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"),
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])"),
+    re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
+)
+
+
+def redact_credentials(value: str, configured_key: str) -> tuple[str, str | None]:
+    reason = None
+    if configured_key and configured_key in value:
+        value = value.replace(configured_key, "[REDACTED API KEY]")
+        reason = "configured_credential_echo"
+    for pattern in SECRET_PATTERNS:
+        value, replacements = pattern.subn("[REDACTED API KEY]", value)
+        if replacements and reason is None:
+            reason = "credential_pattern_in_output"
+    return value, reason
+
+
+async def report_credential_exposure(reason: str, *, configured_key: bool) -> bool:
+    from .settings import settings
+
+    if not settings.exposure_webhook_url or not settings.exposure_webhook_secret:
+        return False
+    event = {
+        "event_id": str(uuid.uuid4()),
+        "key_id": (settings.model_api_key_id or None) if configured_key else None,
+        "key_alias": settings.model_api_key_alias if configured_key else "unmapped",
+        "source": "omp",
+        "reason": reason,
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+    }
+    body = json.dumps(event, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(settings.exposure_webhook_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.post(
+                settings.exposure_webhook_url,
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Darkfactory-Signature": f"sha256={signature}",
+                },
+            )
+            response.raise_for_status()
+            return True
+    except httpx.HTTPError:
+        return False
 
 class OmpTurn(BaseModel):
     goal: str = Field(default="", max_length=20000)
@@ -218,16 +273,31 @@ async def answer_chat(
     title = chat_title(goal, project_name)
     if not settings.model_api_key:
         return question("OMP cannot answer yet. The manager has no model key.")
+    alert_delivery_failed = False
+    safe_goal, prompt_reason = redact_credentials(goal, settings.model_api_key)
+    if prompt_reason:
+        alert_delivery_failed |= not await report_credential_exposure(
+            prompt_reason,
+            configured_key=prompt_reason == "configured_credential_echo",
+        )
     try:
         text = await ask_model(
             "You are Luna, answering through OMP. Answer in a few sentences. Do not ask for a project name.",
-            goal,
+            safe_goal,
         )
     except Exception as exc:
         await record_chat(session, actor, request, title, "Luna did not answer.")
         return question(f"OMP could not reach Luna ({type(exc).__name__}).")
+    safe_text, output_reason = redact_credentials(text, settings.model_api_key)
+    if output_reason:
+        alert_delivery_failed |= not await report_credential_exposure(
+            output_reason,
+            configured_key=output_reason == "configured_credential_echo",
+        )
     await record_chat(session, actor, request, title, "Luna answered through OMP.")
-    return question(text.strip()[:4000])
+    if alert_delivery_failed:
+        safe_text = f"{safe_text.strip()}\n\n[Credential text was redacted, but API Guard alert delivery failed or is unconfigured. Notify an administrator.]"
+    return question(safe_text.strip()[:4000])
 
 
 async def record_chat(

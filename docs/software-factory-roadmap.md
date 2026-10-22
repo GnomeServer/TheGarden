@@ -111,7 +111,7 @@ Unchecked means not verified in the lab. It does not mean the repository has no 
 - [ ] A real coding worker that checks out a disposable Forgejo repository, creates a branch, and submits a PR.
 - [ ] A fresh-checkout reviewer and deterministic execution of approved project checks.
 - [ ] A browser or user-journey validator.
-- [ ] Per-task model routing across multiple configured models; the current gateway exposes one public model alias (`luna`), and Jev routing is not integrated.
+- [ ] Per-task model routing across multiple configured models; the current gateway exposes one public model alias (`luna`), and JEV routing for agent missions is not integrated. The separate API Guard has a JEV budget/security advisor, not mission routing.
 - [ ] Preview, staging, release, and rollback workflows.
 - [ ] Production signals automatically becoming new missions.
 - [ ] A continuous-learning process that turns repeated failures into tests, skills, or documentation.

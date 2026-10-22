@@ -25,13 +25,14 @@ The repository Caddyfile is `Caddyfile` in this directory, mounted by `compose.y
 - TLS: Caddy's internal CA
 - Grafana: `grafana:3000` under `/grafana/`
 - Forgejo: `forgejo:3000` under `/forgejo/`, with the `/forgejo` prefix stripped
+- API Guard: the standalone security/budget service at `/api-guard/`, restricted to Tailscale source addresses and authenticated separately through Forgejo OAuth
 - Agent Manager dashboard and APIs: `/dashboard/`, `/v1/*`, `/auth/*`, `/healthz`, and `/readyz`
 - LiteLLM: `/litellm/v1`, reverse-proxied to `litellm:4000` for Tailscale source addresses only
-- Untrusted requests to `/litellm/*` receive HTTP 403
+- Requests outside Tailscale to `/api-guard/*` and `/litellm/*` receive HTTP 403
 - Proxmox fallback: `https://10.1.10.156:8006` for other paths on port 443
 
 This project creates the `caddy_proxy` network. Grafana, Forgejo, Open WebUI,
-LiteLLM, and Agent Manager join it as an external network. Do not mark this
+LiteLLM, Agent Manager, and API Guard join that external network. Do not mark this
 project's network `external: true`.
 
 ## Deploy

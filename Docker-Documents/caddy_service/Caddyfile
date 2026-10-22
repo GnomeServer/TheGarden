@@ -18,6 +18,20 @@ infra-lab-services.tail494f6d.ts.net {
 		reverse_proxy forgejo:3000
 	}
 
+	@api_guard_tailnet {
+		path /api-guard /api-guard/*
+		remote_ip 100.64.0.0/10
+	}
+
+	handle @api_guard_tailnet {
+		reverse_proxy api-guard:8000
+	}
+
+	@api_guard_path path /api-guard /api-guard/*
+	handle @api_guard_path {
+		respond "Forbidden" 403
+	}
+
 	@agent_manager {
 		path /dashboard /dashboard/* /v1/* /auth/* /healthz /readyz /metrics
 	}

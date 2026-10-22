@@ -66,8 +66,9 @@ ansible-galaxy collection install -r requirements.yml
 4. `llama` at `/home/infra-lab-user/llama-service`
 5. `grafana` at `/home/infra-lab-user/grafana-service`
 6. `agent-manager` at `/home/infra-lab-user/agent-manager-service` (`build: always`)
+7. `api-guard-dashboard` at `/home/infra-lab-user/TheGarden/Docker-Documents/api-guard-dashboard` (`build: always`)
 
-Those are VM checkout paths, not `Docker-Documents/` paths. The playbook does not copy the repository tree, does not deploy `litellm-service`, and does not add `compose.worker-test.yml`. Because `infra-lab-services` is a local connection, the playbook runs on the controller. It does not SSH to `10.1.10.2`.
+These are VM paths. Most Compose projects are separate deployment directories; API Guard uses the existing `TheGarden` checkout path shown above. The playbook does not copy source files, does not deploy `litellm-service`, and does not add `compose.worker-test.yml`. Keep API Guard's private `.env` in its checkout. Because `infra-lab-services` is a local connection, the playbook runs on the controller. It does not SSH to `10.1.10.2`.
 
 Repository source directories:
 
@@ -79,6 +80,7 @@ TheGarden/Docker-Documents/llama_services
 TheGarden/Docker-Documents/grafana_services
 TheGarden/Docker-Documents/litellm-service
 TheGarden/Docker-Documents/agent-manager-service
+TheGarden/Docker-Documents/api-guard-dashboard
 ```
 
 Each project keeps its local `.env` file outside Git. Those files contain

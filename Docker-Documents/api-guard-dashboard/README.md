@@ -1,0 +1,59 @@
+# Dark Factory API Guard
+
+API Guard is a separate web service and URL, not a section of Agent Manager's team dashboard. It authenticates its own Forgejo OAuth application, has its own administrator allowlist and session secret, keeps exposure-event state in its own SQLite volume, and calls LiteLLM over the private Docker network. Its browser never receives LiteLLM's master key.
+
+## What it does
+
+- Shows LiteLLM rolling-365-day and current-month spend, prompt/completion/total tokens, per-key monthly token totals, key-level spend, budget caps, and key age using LiteLLM's paginated spend-log API.
+- Uses the default $25,000 shared hard ceiling in `litellm-service/config.yaml`; this applies to calls through LiteLLM. The dashboard's monthly pacing target is `$25,000 / 12 = $2,083.33`, a warning target, not a second hard stop.
+- Issues budgeted, model-scoped LiteLLM virtual keys. A new raw key is sent once to the authenticated browser with `Cache-Control: no-store`; it is never saved by API Guard. Keys expire after twice the rotation interval. Existing unlimited keys are not silently changed.
+- Flags HMAC-signed OMP exposure reports. Events contain an alias and optional LiteLLM key identifier only; unknown key material, prompt text, and model output are never accepted or stored.
+- Rotates a key by issuing a replacement with its model/team scope and budget. Legacy model-unrestricted keys are narrowed to `luna`. Routine rotation keeps the old key active until the consumer has been updated and verified. For a known exposed key, the UI offers immediate revoke after issuing the replacement; this may interrupt a consumer until its secret is updated.
+- Offers JEV a sanitized, advisory-only review. JEV cannot mint/revoke keys, change budgets, or override LiteLLM policy.
+
+The default rotation interval is 14 days (biweekly). Set `API_GUARD_ROTATION_DAYS=7` for a weekly cadence. The dashboard flags aged keys and gives an administrator a replacement workflow; it does not silently rewrite worker secret files or revoke a key before its consumer can be updated. Configure provider-account spend limits as well: LiteLLM cost estimates and provider invoices can differ.
+
+## Install and configure
+
+1. Create a separate Forgejo OAuth application for API Guard. Callback URL:
+
+   ```text
+   https://infra-lab-services.tail494f6d.ts.net/api-guard/auth/callback
+   ```
+
+2. Copy `.env.example` to a deployment-only `.env` with mode `0600`. Set an independent random `API_GUARD_SESSION_SECRET`, `API_GUARD_ADMINS`, the OAuth credentials, a separate `API_GUARD_EXPOSURE_WEBHOOK_SECRET`, and the LiteLLM master key. Keep the master key only in the service environment; never commit `.env`.
+3. Match the annual ceiling in `litellm-service/config.yaml` and `API_GUARD_ANNUAL_BUDGET_USD`. LiteLLM needs PostgreSQL for global budget enforcement. Dashboard usage is rolling-365-day; monthly spend is compared with the pacing target.
+4. In `agent-manager-service/.env`, set `API_GUARD_EXPOSURE_WEBHOOK_URL` to `http://api-guard:8000/api-guard/api/v1/webhooks/exposure`, use the same HMAC secret, and set `MODEL_API_KEY_ALIAS` to the matching LiteLLM virtual-key alias. `MODEL_API_KEY_ID` is optional and must be a LiteLLM token identifier, never the raw key. OMP scans inbound chat text and model responses, redacts common key formats before forwarding/displaying them, and submits a signed event with no secret content.
+5. Use a restricted LiteLLM virtual key for JEV and set `API_GUARD_JEV_API_KEY`; configure the `jev` model alias in LiteLLM first. The checked-in LiteLLM model list contains only `luna`, so JEV review stays unavailable until an operator configures a real JEV route and key. Never use the LiteLLM master key for JEV calls.
+
+6. Start the service after Caddy and LiteLLM are attached to `caddy_proxy`:
+
+   ```bash
+   cd /home/infra-lab-user/TheGarden/Docker-Documents/api-guard-dashboard
+   sudo docker compose up -d --build
+   ```
+
+   Open `https://infra-lab-services.tail494f6d.ts.net/api-guard/` from a Tailscale device. Caddy rejects non-tailnet requests before they reach API Guard; Forgejo OAuth and the `API_GUARD_ADMINS` allowlist are also required.
+
+The checked-in Caddyfile adds the route, but editing the checkout does not deploy it. The API Guard Compose project and `.env` use the existing `/home/infra-lab-user/TheGarden/Docker-Documents/api-guard-dashboard` checkout path. Reload Caddy only after the route is present in `/home/infra-lab-user/caddy-service/Caddyfile`.
+
+## Key exposure and rotation
+
+The webhook signs the exact JSON body with HMAC-SHA256 in `X-Darkfactory-Signature: sha256=<hex>`. The receiver rejects unsigned/invalid JSON, oversized payloads, and extra fields such as `key`, `token`, or `secret`. Event IDs are deduplicated. For known key matches, the dashboard links an alert to the LiteLLM key alias/identifier. A generic detected key format is marked `unmapped`; an admin must identify the affected credential before resolution.
+
+LiteLLM pagination is bounded to 10,000 log rows per dashboard refresh. If the proxy reports more than that, API Guard marks the displayed totals as lower bounds rather than presenting a partial result as complete.
+
+OMP redacts only key values it can positively identify: its configured model key by exact match, plus recognized OpenRouter/OpenAI/Anthropic/Google key formats. This is a safety net, not a secret scanner for arbitrary credential formats. Never place provider master keys in OMP prompts or model context. Ensure every paid request goes through LiteLLM and use separate keys per consumer. If the webhook is unavailable or unconfigured, OMP still redacts the value and tells the user to notify an administrator, but no dashboard event can be recorded.
+
+Routine rotation sequence: issue replacement → copy it directly to the consumer's secret store → restart/reload that consumer → confirm successful requests → revoke the old key. Exposure sequence: issue replacement and revoke the known exposed key immediately → update its consumer. Unknown alerts remain flagged until the key is identified and the incident is handled.
+
+## Budget semantics
+
+`litellm_settings.max_budget: 25000` with `budget_duration: 365d` is the shared hard limit for all requests through this LiteLLM proxy. LiteLLM must have its database available for the limit to be enforced. API Guard's `$2,083.33` monthly target indicates pacing toward the annual allowance; it does not block requests. Each newly issued key also receives a required per-key budget and reset period. Existing keys without per-key budgets remain clearly labeled and must be migrated/managed separately.
+
+This does not limit unrelated provider keys or direct provider calls that bypass LiteLLM. Configure a hard provider-account limit and alerts at OpenRouter (or the actual upstream) as a second boundary. Confirm provider-side invoices against LiteLLM because model-price metadata can be incomplete or stale.
+API Guard tracks usage and spend estimates, not purchased-credit balances; it does not query OpenRouter/provider billing APIs. Treat the $25,000 figure as a shared LiteLLM proxy ceiling over each 365-day window, not $25,000 per month.
+
+## JEV role
+
+JEV reviews sanitized aggregate spend, safe key aliases/models, rotation age, and exposure count through a dedicated model-restricted virtual key. It is not trusted to classify secrets, authorize operations, or initiate rotations. The dashboard's deterministic webhook signature checks, age rules, LiteLLM budgets, and administrator confirmations remain authoritative.

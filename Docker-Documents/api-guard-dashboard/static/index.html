@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#11151c">
+  <title>Dark Factory — API Guard</title>
+  <link rel="stylesheet" href="/api-guard/static/styles.css?v=1">
+  <script src="/api-guard/static/app.js?v=1" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/api-guard/" aria-label="Dark Factory API Guard home"><span class="mark">DF</span><span><strong>Dark Factory</strong><small>API Guard</small></span></a>
+      <div class="top-actions"><span id="connection" role="status">Connecting</span><span id="identity"></span><button id="refresh" class="button secondary hidden" type="button">Refresh</button><button id="logout" class="button ghost hidden" type="button">Sign out</button></div>
+    </header>
+
+    <section id="login" class="login-card hidden" aria-labelledby="login-title">
+      <p class="eyebrow">SEPARATE CONTROL SURFACE</p>
+      <h1 id="login-title">API keys. Budget. Exposure.</h1>
+      <p class="muted">An administrator-only dashboard for LiteLLM spend, virtual-key rotation, and OMP exposure alerts. This is separate from the team work dashboard.</p>
+      <a id="login-link" class="button primary" href="/api-guard/auth/start">Continue with Forgejo</a>
+      <p id="login-error" class="error" role="alert"></p>
+    </section>
+
+    <section id="dashboard" class="hidden" aria-label="API Guard dashboard">
+      <div class="page-heading"><div><p class="eyebrow">PROVIDER USAGE / VIRTUAL CREDENTIALS</p><h1>Security &amp; budget</h1><p class="muted">Spend is reported by LiteLLM, not a provider's prepaid-credit balance. API key values are never listed or stored here; newly issued keys appear once.</p></div><span id="as-of" class="muted"></span></div>
+      <div id="status-banner" class="notice hidden" role="status"></div>
+
+      <section class="metrics" aria-label="Spend summary">
+        <article class="metric"><span>Rolling 365-day spend</span><strong id="annual-spend">—</strong><small id="annual-detail">365-day hard limit —</small><div class="progress"><span id="annual-bar"></span></div></article>
+        <article class="metric"><span>This month</span><strong id="monthly-spend">—</strong><small id="monthly-detail">Monthly planning target —</small><div class="progress"><span id="monthly-bar"></span></div></article>
+        <article class="metric"><span>Tokens this month</span><strong id="monthly-tokens">—</strong><small id="token-detail">Prompt + completion tokens</small></article>
+        <article class="metric"><span>Credentials needing review</span><strong id="key-alert-count">—</strong><small id="key-alert-detail">Exposure flags and rotation age</small></article>
+      </section>
+
+      <div class="two-column">
+        <section class="panel" aria-labelledby="key-title">
+          <div class="section-heading"><div><p class="eyebrow">LITELLM VIRTUAL KEYS</p><h2 id="key-title">Key inventory</h2></div><button id="show-create" class="button primary" type="button">＋ Issue key</button></div>
+          <p class="section-note">Rotation age is a warning, not an automatic worker update. Rotate on a 14-day cycle by default; set <code>API_GUARD_ROTATION_DAYS=7</code> for weekly checks.</p>
+          <div id="keys" class="table-wrap" aria-live="polite"><p class="loading">Loading keys…</p></div>
+        </section>
+        <section class="panel" aria-labelledby="exposure-title">
+          <div class="section-heading"><div><p class="eyebrow">SIGNED OMP WEBHOOKS</p><h2 id="exposure-title">Exposure alerts</h2></div></div>
+          <p class="section-note">OMP sends only an event ID and key alias/identifier. The raw key, model output, and prompt are not sent or saved.</p>
+          <div id="exposures" class="event-list" aria-live="polite"><p class="loading">Loading exposure events…</p></div>
+        </section>
+      </div>
+
+      <section class="panel advisor" aria-labelledby="jev-title">
+        <div class="section-heading"><div><p class="eyebrow">ADVISORY ONLY</p><h2 id="jev-title">JEV decision review</h2></div><button id="ask-jev" class="button secondary" type="button" disabled>Review sanitized status</button></div>
+        <p class="section-note">JEV receives aggregate spend, key aliases, ages, budgets, and alert counts only. It cannot revoke keys or override deterministic limits.</p>
+        <div id="jev-status" class="notice">JEV configuration is checked at load.</div>
+        <pre id="jev-review" class="review-output hidden" aria-live="polite"></pre>
+      </section>
+      <footer><p>Dashboard access is limited to configured Forgejo administrators and the Caddy Tailscale route. Keep LiteLLM master and webhook secrets server-side.</p></footer>
+    </section>
+  </main>
+
+  <dialog id="create-dialog" aria-labelledby="create-title">
+    <form id="create-form">
+      <header class="dialog-heading"><div><p class="eyebrow">SCOPED CREDENTIAL</p><h2 id="create-title">Issue LiteLLM key</h2></div><button id="close-create" class="icon-button" type="button" aria-label="Close">×</button></header>
+      <label>Alias<input id="key-alias" maxlength="100" autocomplete="off" required placeholder="fable-worker-01"></label>
+      <label>Allowed model aliases<input id="key-models" value="luna" maxlength="256" required aria-describedby="model-help"><small id="model-help">Comma-separated; must match LiteLLM model aliases.</small></label>
+      <div class="form-grid"><label>Spend cap (USD)<input id="key-budget" type="number" min="0.01" step="0.01" required value="100"></label><label>Budget reset<select id="key-budget-duration"><option value="30d">30 days</option><option value="7d">7 days</option><option value="1d">1 day</option></select></label></div>
+      <p class="notice">New key expires after <strong id="key-expiry-days">28</strong> days. Save the returned key directly to its consumer's secret store; it is not retrievable later.</p>
+      <p id="create-error" class="error" role="alert"></p>
+      <footer><button id="cancel-create" class="button secondary" type="button">Cancel</button><button id="submit-create" class="button primary" type="submit">Create key</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="secret-dialog" aria-labelledby="secret-title">
+    <div class="secret-card"><header class="dialog-heading"><div><p class="eyebrow">ONE-TIME DISPLAY</p><h2 id="secret-title">Copy new key to its secret store</h2></div></header>
+      <p id="secret-note" class="notice">The key is shown once. Do not paste it into chat, logs, tickets, or source control.</p>
+      <label>New LiteLLM key<textarea id="new-secret" readonly rows="3" spellcheck="false"></textarea></label>
+      <div class="inline-actions"><button id="copy-secret" class="button secondary" type="button">Copy key</button><span id="secret-copy-status" role="status"></span></div>
+      <footer><button id="close-secret" class="button primary" type="button">Done — I saved it</button></footer>
+    </div>
+  </dialog>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+</body>
+</html>

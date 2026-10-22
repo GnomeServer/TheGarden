@@ -54,6 +54,21 @@ LUNA_BACKEND_API_KEY=<key-accepted-by-the-inference-backend>
 `LUNA_MODEL` and `LUNA_API_BASE` describe the backend route. The public model
 name presented to clients remains `luna`.
 
+The gateway config enforces a shared `$25,000` spend ceiling over `365d` across
+all LiteLLM traffic. Budget enforcement depends on the PostgreSQL database being
+available. The separate
+[`API Guard dashboard`](../api-guard-dashboard/README.md) compares rolling
+365-day spend with that limit and shows `$2,083.33` per month as a pacing
+target; monthly pacing is not an additional hard cap. Keep the matching
+`API_GUARD_ANNUAL_BUDGET_USD` value at `25000` unless the LiteLLM config changes
+with it.
+
+The ceiling only covers calls sent through this proxy. Set an independent
+upstream provider spend limit and alert (for example, on OpenRouter) and do not
+give the upstream provider key to workers or OMP. API Guard manages LiteLLM
+virtual keys; upstream provider credentials remain in LiteLLM's private
+deployment environment and must be rotated there.
+
 The worker reads `MODEL_API_KEY` from the environment. Ansible loads each
 worker-specific virtual key from `litellm_key_source`, installs it at
 `~/.config/litellm/worker-api-key`, and exports it when the worker starts.

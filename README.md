@@ -194,15 +194,23 @@ Repository Compose projects for the `infra-lab-services` VM:
 - LiteLLM and its PostgreSQL database (`Docker-Documents/litellm-service`)
 - Grafana, Prometheus, and Node Exporter (`Docker-Documents/grafana_services`)
 - Agent Manager, its PostgreSQL database, and NATS JetStream (`Docker-Documents/agent-manager-service`)
+- Separate API Guard budget and credential dashboard (`Docker-Documents/api-guard-dashboard`)
 
-The checked-in Caddyfile listens on ports 80 and 443, plus HTTPS port 8443 for Open WebUI. It routes `/dashboard/`, `/v1/*`, and `/auth/*` to Agent Manager; `/grafana/` to Grafana; `/forgejo/` to Forgejo; and `/litellm/` to LiteLLM for Tailscale source addresses only, requiring a worker-scoped virtual key. Unmatched paths on port 443 fall back to the Proxmox UI at `https://10.1.10.156:8006`; `/llama/` is not routed.
+The standalone API Guard service at `/api-guard/` uses its own Forgejo OAuth
+application and allowlist. It reads LiteLLM spend and virtual-key metadata,
+accepts signed OMP exposure alerts, and issues budgeted replacement keys. JEV
+can provide an advisory review after a dedicated `jev` model route and virtual
+key are configured. See
+[`Docker-Documents/api-guard-dashboard/README.md`](Docker-Documents/api-guard-dashboard/README.md).
 
-`Ansible/playbooks/docker-services.yml` deploys every project above except LiteLLM. LiteLLM is started from its own Compose directory. The base Agent Manager Compose file does not publish NATS; remote workers need `compose.worker-test.yml`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) and [`Ansible/README.md`](Ansible/README.md).
+The checked-in Caddyfile listens on ports 80 and 443, plus HTTPS port 8443 for Open WebUI. It routes `/dashboard/`, `/v1/*`, and `/auth/*` to Agent Manager; `/api-guard/` to the separate Tailscale-only API Guard service; `/grafana/` to Grafana; `/forgejo/` to Forgejo; and `/litellm/` to LiteLLM for Tailscale source addresses only, requiring a worker-scoped virtual key. Unmatched paths on port 443 fall back to the Proxmox UI at `https://10.1.10.156:8006`; `/llama/` is not routed.
+
+`Ansible/playbooks/docker-services.yml` deploys every project above except LiteLLM. LiteLLM is started from its own Compose directory. The separate API Guard Compose project path must be installed and contain its private `.env` before Ansible deploys it. The base Agent Manager Compose file does not publish NATS; remote workers need `compose.worker-test.yml`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) and [`Ansible/README.md`](Ansible/README.md).
 
 ## Not managed yet
 
 - SSH private keys, credentials, or vault passwords
-- Forgejo checkout, branch/PR creation, generated-code execution, browser validation, and JEV model routing remain to be implemented.
+- Forgejo checkout, branch/PR creation, generated-code execution, browser validation, and JEV routing for agent missions remain to be implemented; the separate API Guard JEV advisor is a budget/security review only.
 - Firewall rules
 - Tailscale ACLs, routes, or DNS settings
 - A complete package or service desired-state policy

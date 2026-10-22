@@ -87,6 +87,10 @@ class Settings(BaseSettings):
         default="http://litellm:4000/v1", validation_alias="MODEL_BASE_URL"
     )
     model_api_key: str = Field(default="", validation_alias="MODEL_API_KEY")
+    model_api_key_alias: str = Field(default="agent-manager-model", validation_alias="MODEL_API_KEY_ALIAS")
+    model_api_key_id: str = Field(default="", validation_alias="MODEL_API_KEY_ID")
+    exposure_webhook_url: str = Field(default="", validation_alias="API_GUARD_EXPOSURE_WEBHOOK_URL")
+    exposure_webhook_secret: str = Field(default="", validation_alias="API_GUARD_EXPOSURE_WEBHOOK_SECRET")
     model_name: str = Field(default="gpt-5.6-luna", validation_alias="MODEL_NAME")
     reasoning_effort: str = Field(default="medium", validation_alias="REASONING_EFFORT")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")

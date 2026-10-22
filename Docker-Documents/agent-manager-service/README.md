@@ -27,6 +27,18 @@ instead of creating another run. The dashboard shows the current run phase and
 worker, refreshing every 30 seconds; per-agent model calls are summarized after
 the crew finishes rather than streamed live.
 
+OMP chat sanitizes inbound text and model replies before forwarding them to the
+model or user. It redacts the configured model credential by exact match and
+recognized OpenRouter/OpenAI/Anthropic/Google key formats. When a match is
+found, OMP sends a signed event containing only the configured key alias or
+`unmapped`, an optional LiteLLM key identifier, and a reason code. Configure
+`API_GUARD_EXPOSURE_WEBHOOK_URL` and the shared
+`API_GUARD_EXPOSURE_WEBHOOK_SECRET` to deliver alerts to the separate
+[`API Guard dashboard`](../api-guard-dashboard/README.md). This is not a
+general-purpose scanner; keep provider master keys out of prompts and model
+context.
+
+
 The dashboard's worker runtime view aggregates `RunRecord` start and completion
 timestamps by worker and UTC day. The
 `/v1/dashboard/worker-execution?from=YYYY-MM-DD&to=YYYY-MM-DD` endpoint returns
@@ -49,13 +61,15 @@ window to allow redelivery before finalization.
 
 The human control surface is available at `/dashboard/` through Caddy. It
 tracks runs, deadline-aware tasks, Forgejo users and activity, worker presence,
-and audit history. Complete deployment, OAuth, webhook, task, worker, backup,
-and troubleshooting procedures are in
-[`../../docs/dark-factory-dashboard.md`](../../docs/dark-factory-dashboard.md).
-For an **existing central VM**, use the guarded manager-only
-[`central deployment procedure`](../../docs/central-dashboard-deployment.md), not
-the new-install commands below. It preserves live credentials, the NATS override,
-database volumes, Caddy routes, and the current manager image for recovery.
+and audit history. This README covers the manager's dashboard, OAuth, webhook,
+task, and worker behavior. The Ansible
+[`Docker Compose deployment guide`](../../Ansible/README.md#docker-compose-deployment)
+covers deployment paths and operations.
+
+For an **existing central VM**, preserve its live credentials, NATS overrides,
+database volumes, Caddy routes, and manager image when applying manager-only
+changes. The Ansible playbook deploys existing project directories; it does not
+copy source files or create secret `.env` files.
 Open WebUI integration is [opt-in](../open_webui_services/README.md#agent-manager-coder-function-manual-opt-in);
 `create-python-script` executes generated Python as the worker user and is not sandboxed; restrict it to disposable workers. The `mission` demo container has no network and retains no candidate files after exit.
 
@@ -279,15 +293,19 @@ Compose and `.env.example` set `MODEL_BASE_URL` to `http://llama:8080/v1`. The P
 
 ## Caddy routes and metrics
 
-The tracked Caddy configuration routes `/`, `/dashboard`, `/dashboard/*`,
-`/auth/*`, `/v1/*`, `/docs`, `/docs/*`, and `/openapi.json` to
+The tracked Caddy configuration routes Agent Manager pages and APIs to
 `agent-manager:8000` without stripping their prefixes. Human dashboard sessions
 use Forgejo OAuth; machine run and administrator APIs use bearer tokens. Keep
 tokens secret and prefer the internal `http://agent-manager:8000` endpoint for
 containers on `caddy_proxy`.
 
-These manager routes coexist with the captured `/llama/` and `/litellm/` model
-routes, `/grafana/`, `/forgejo/`, and the Proxmox fallback. Open WebUI remains
+The distinct API Guard application is served by `api-guard:8000` at
+`/api-guard/`; it has its own Forgejo OAuth application and allowlist. Caddy
+limits that path to Tailscale source addresses. It reads LiteLLM key/spend data
+server-side; it is not an Agent Manager route or part of its dashboard.
+
+These manager routes coexist with `/api-guard/`, `/llama/`, and `/litellm/`,
+`/grafana/`, `/forgejo/`, and the Proxmox fallback. Open WebUI remains
 available at `https://infra-lab-services.tail494f6d.ts.net:8443` through Caddy.
 The manager defaults to LiteLLM's internal URL rather than taking this external
 proxy path; an existing `.env` override must be changed deliberately to use the
