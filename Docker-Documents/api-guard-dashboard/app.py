@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     litellm_base_url: str = Field(default="http://litellm:4000", validation_alias="API_GUARD_LITELLM_BASE_URL")
     litellm_master_key: str = Field(default="", validation_alias="API_GUARD_LITELLM_MASTER_KEY")
     exposure_webhook_secret: str = Field(default="", validation_alias="API_GUARD_EXPOSURE_WEBHOOK_SECRET")
+    openai_admin_api_key: str = Field(default="", validation_alias="API_GUARD_OPENAI_ADMIN_API_KEY")
+    openai_project_id: str = Field(default="", validation_alias="API_GUARD_OPENAI_PROJECT_ID")
     annual_budget_usd: float = Field(default=25000.0, gt=0, validation_alias="API_GUARD_ANNUAL_BUDGET_USD")
     rotation_days: int = Field(default=14, ge=7, le=30, validation_alias="API_GUARD_ROTATION_DAYS")
     jev_model: str = Field(default="jev", validation_alias="API_GUARD_JEV_MODEL")
@@ -62,6 +64,7 @@ OAUTH_STATE_COOKIE = "api_guard_oauth_state"
 KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
 MAX_SPEND_LOG_PAGES = 10
+MAX_OPENAI_COST_PAGES = 4
 
 
 def utcnow() -> datetime:
@@ -311,6 +314,111 @@ async def fetch_spend_logs(start: datetime, end: datetime) -> tuple[list[dict[st
     return rows, truncated
 
 
+async def openai_cost_report(
+    rolling_start: datetime,
+    month_start: datetime,
+    end: datetime,
+) -> dict[str, Any]:
+    project_id = settings.openai_project_id.strip()
+    result: dict[str, Any] = {
+        "configured": bool(settings.openai_admin_api_key),
+        "available": False,
+        "scope": f"project {project_id}" if project_id else "organization",
+        "rolling_365d_usd": None,
+        "month_to_date_usd": None,
+        "truncated": False,
+        "as_of": end.isoformat(),
+        "message": "",
+    }
+    if not settings.openai_admin_api_key:
+        result["message"] = "Optional OpenAI organization billing connection is not configured."
+        return result
+
+    headers = {"Authorization": f"Bearer {settings.openai_admin_api_key}"}
+    rolling_total = 0.0
+    monthly_total = 0.0
+    currencies: set[str] = set()
+    cursor: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            for page_index in range(MAX_OPENAI_COST_PAGES):
+                params: list[tuple[str, str | int]] = [
+                    ("start_time", int(rolling_start.timestamp())),
+                    ("end_time", int(end.timestamp())),
+                    ("bucket_width", "1d"),
+                    ("limit", 180),
+                    ("group_by", "project_id"),
+                ]
+                if project_id:
+                    params.append(("project_ids[]", project_id))
+                if cursor:
+                    params.append(("page", cursor))
+                response = await client.get(
+                    "https://api.openai.com/v1/organization/costs",
+                    headers=headers,
+                    params=params,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                buckets = payload.get("data") if isinstance(payload, dict) else None
+                if not isinstance(buckets, list):
+                    result["message"] = "OpenAI returned an invalid cost report."
+                    return result
+                for bucket in buckets:
+                    if not isinstance(bucket, dict):
+                        continue
+                    bucket_start = _number(bucket.get("start_time"))
+                    raw_results = bucket.get("results")
+                    if not isinstance(raw_results, list):
+                        continue
+                    for item in raw_results:
+                        if not isinstance(item, dict):
+                            continue
+                        amount = item.get("amount")
+                        if not isinstance(amount, dict):
+                            continue
+                        currency = str(amount.get("currency") or "").casefold()
+                        currencies.add(currency or "unknown")
+                        if currency != "usd":
+                            continue
+                        value = _number(amount.get("value"))
+                        rolling_total += value
+                        if bucket_start >= month_start.timestamp():
+                            monthly_total += value
+                has_more = bool(payload.get("has_more"))
+                cursor = payload.get("next_page")
+                if not has_more:
+                    break
+                if not isinstance(cursor, str) or not cursor:
+                    result["truncated"] = True
+                    break
+                if page_index == MAX_OPENAI_COST_PAGES - 1:
+                    result["truncated"] = True
+    except httpx.HTTPStatusError as exc:
+        result["message"] = (
+            "OpenAI rejected the billing request; configure an organization Admin API key "
+            "with Usage Read access."
+            if exc.response.status_code in {401, 403}
+            else "OpenAI cost data is temporarily unavailable."
+        )
+        return result
+    except (httpx.HTTPError, ValueError):
+        result["message"] = "OpenAI cost data is temporarily unavailable."
+        return result
+
+    if currencies and currencies != {"usd"}:
+        result["message"] = "OpenAI returned non-USD or mixed-currency costs; no converted total is shown."
+        return result
+    result.update({
+        "available": True,
+        "rolling_365d_usd": round(rolling_total, 6),
+        "month_to_date_usd": round(monthly_total, 6),
+        "currency": "USD",
+        "message": "Reported by the OpenAI organization Costs API; daily buckets may be delayed.",
+    })
+    return result
+
+
 def log_started_at(row: dict[str, Any]) -> datetime | None:
     value = row.get("startTime")
     if isinstance(value, datetime):
@@ -333,8 +441,14 @@ def aggregate_spend_logs(
     month_start: datetime,
     now: datetime,
 ) -> tuple[dict[str, float | int], dict[str, float | int], dict[str, dict[str, float | int]]]:
-    rolling = {"spend_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    monthly = {"spend_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    rolling = {
+        "spend_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "zero_cost_requests": 0, "zero_cost_tokens": 0,
+    }
+    monthly = {
+        "spend_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "zero_cost_requests": 0, "zero_cost_tokens": 0,
+    }
     by_key: dict[str, dict[str, float | int]] = {}
     for row in rows:
         started = log_started_at(row)
@@ -348,11 +462,17 @@ def aggregate_spend_logs(
         rolling["prompt_tokens"] += prompt
         rolling["completion_tokens"] += completion
         rolling["total_tokens"] += total
+        if spend == 0 and total > 0:
+            rolling["zero_cost_requests"] += 1
+            rolling["zero_cost_tokens"] += total
         if started < month_start:
             continue
         monthly["spend_usd"] += spend
         monthly["prompt_tokens"] += prompt
         monthly["completion_tokens"] += completion
+        if spend == 0 and total > 0:
+            monthly["zero_cost_requests"] += 1
+            monthly["zero_cost_tokens"] += total
         monthly["total_tokens"] += total
         key_id = row.get("api_key")
         if isinstance(key_id, str) and KEY_ID_PATTERN.fullmatch(key_id) and not key_id.startswith("sk-"):
@@ -499,9 +619,12 @@ async def overview(request: Request) -> dict[str, Any]:
     rolling_start = now - timedelta(days=365)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     log_rows, usage_truncated = await fetch_spend_logs(rolling_start, now)
+    provider_costs = await openai_cost_report(rolling_start, month_start, now)
     annual, monthly, per_key = aggregate_spend_logs(log_rows, rolling_start, month_start, now)
     month_target = settings.annual_budget_usd / 12
     keys = [safe_key_out(row, now) for row in rows]
+    active_key_ids = {key["key_id"] for key in keys if key["key_id"]}
+    unmatched_usage_key_count = sum(1 for key_id in per_key if key_id not in active_key_ids)
     for key in keys:
         usage = per_key.get(key["key_id"] or "", {})
         key["tokens_monthly"] = usage.get("tokens_monthly", 0)
@@ -524,9 +647,14 @@ async def overview(request: Request) -> dict[str, Any]:
             "annual_tokens": annual["total_tokens"],
             "prompt_tokens_monthly": monthly["prompt_tokens"],
             "completion_tokens_monthly": monthly["completion_tokens"],
+            "zero_cost_requests_monthly": monthly["zero_cost_requests"],
+            "zero_cost_tokens_monthly": monthly["zero_cost_tokens"],
+            "zero_cost_requests_rolling": annual["zero_cost_requests"],
         },
+        "openai_costs": provider_costs,
         "rotation_days": settings.rotation_days,
         "usage_truncated": usage_truncated,
+        "unmatched_usage_key_count": unmatched_usage_key_count,
         "keys": keys,
         "exposure_events": events,
         "jev_configured": bool(settings.jev_api_key),
@@ -687,6 +815,14 @@ async def decision_review(request: Request, response: Response) -> dict[str, Any
         ],
         "open_exposure_count": sum(1 for event in overview_data["exposure_events"] if event["status"] == "flagged"),
         "rotation_days": settings.rotation_days,
+    }
+    provider_costs = overview_data["openai_costs"]
+    safe_input["openai_costs"] = {
+        field: provider_costs.get(field)
+        for field in (
+            "configured", "available", "scope", "rolling_365d_usd",
+            "month_to_date_usd", "truncated",
+        )
     }
     try:
         async with httpx.AsyncClient(timeout=45) as client:

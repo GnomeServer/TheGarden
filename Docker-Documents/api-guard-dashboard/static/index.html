@@ -24,14 +24,20 @@
     </section>
 
     <section id="dashboard" class="hidden" aria-label="API Guard dashboard">
-      <div class="page-heading"><div><p class="eyebrow">PROVIDER USAGE / VIRTUAL CREDENTIALS</p><h1>Security &amp; budget</h1><p class="muted">Spend is reported by LiteLLM, not a provider's prepaid-credit balance. API key values are never listed or stored here; newly issued keys appear once.</p></div><span id="as-of" class="muted"></span></div>
+      <div class="page-heading"><div><p class="eyebrow">PROVIDER USAGE / VIRTUAL CREDENTIALS</p><h1>Security &amp; budget</h1><p class="muted">Spend is estimated by LiteLLM from logged usage and model pricing—not a provider invoice or prepaid-credit balance. API key values are never listed or stored here; newly issued keys appear once.</p></div><span id="as-of" class="muted"></span></div>
       <div id="status-banner" class="notice hidden" role="status"></div>
 
       <section class="metrics" aria-label="Spend summary">
-        <article class="metric"><span>Rolling 365-day spend</span><strong id="annual-spend">—</strong><small id="annual-detail">365-day hard limit —</small><div class="progress"><span id="annual-bar"></span></div></article>
-        <article class="metric"><span>This month</span><strong id="monthly-spend">—</strong><small id="monthly-detail">Monthly planning target —</small><div class="progress"><span id="monthly-bar"></span></div></article>
+        <article class="metric"><span>Rolling 365-day estimated spend</span><strong id="annual-spend">—</strong><small id="annual-detail">365-day LiteLLM limit —</small><div class="progress"><span id="annual-bar"></span></div></article>
+        <article class="metric"><span>This month’s estimated spend</span><strong id="monthly-spend">—</strong><small id="monthly-detail">Monthly pacing target —</small><div class="progress"><span id="monthly-bar"></span></div></article>
         <article class="metric"><span>Tokens this month</span><strong id="monthly-tokens">—</strong><small id="token-detail">Prompt + completion tokens</small></article>
         <article class="metric"><span>Credentials needing review</span><strong id="key-alert-count">—</strong><small id="key-alert-detail">Exposure flags and rotation age</small></article>
+      </section>
+
+      <section class="panel provider-panel" aria-labelledby="openai-costs-title">
+        <div class="section-heading"><div><p class="eyebrow">PROVIDER BILLING CROSS-CHECK</p><h2 id="openai-costs-title">OpenAI reported costs</h2></div></div>
+        <p class="section-note">Optional OpenAI organization Costs API data. Requires an organization Admin API key with Usage Read access—not the project key LiteLLM uses for inference. A project ID filter is recommended.</p>
+        <div id="openai-costs" class="provider-costs" role="status">Checking OpenAI billing configuration…</div>
       </section>
 
       <div class="two-column">

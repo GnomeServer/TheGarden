@@ -35,15 +35,48 @@
 
   function renderBudget(budget) {
     text("annual-spend", money(budget.annual_spend_usd));
-    text("annual-detail", `${money(budget.annual_limit_usd)} annual hard-limit target`);
+    text("annual-detail", `${money(budget.annual_limit_usd)} shared LiteLLM hard limit`);
     text("monthly-spend", money(budget.monthly_spend_usd));
-    text("monthly-detail", `${money(budget.monthly_target_usd)} monthly pacing target`);
+    text("monthly-detail", `${money(budget.monthly_target_usd)} pacing target, not a separate cap`);
     text("monthly-tokens", number(budget.monthly_tokens));
     text("token-detail", `${number(budget.prompt_tokens_monthly)} prompt · ${number(budget.completion_tokens_monthly)} completion`);
     $("annual-bar").style.width = `${Math.min(100, Number(budget.annual_percent || 0))}%`;
     $("monthly-bar").style.width = `${Math.min(100, Number(budget.monthly_target_percent || 0))}%`;
     $("annual-bar").classList.toggle("warning", budget.annual_percent >= 80);
     $("monthly-bar").classList.toggle("warning", budget.monthly_target_percent >= 100);
+  }
+
+  function renderOpenAICosts(costs) {
+    const root = $("openai-costs");
+    root.replaceChildren();
+    if (!costs?.configured) {
+      root.textContent = "Not configured. Add an organization Admin API key with Usage Read access to show OpenAI-reported costs.";
+      return;
+    }
+    if (!costs.available) {
+      root.textContent = costs.message || "OpenAI-reported costs are unavailable.";
+      return;
+    }
+    const grid = document.createElement("div");
+    grid.className = "provider-cost-grid";
+    for (const [label, value] of [
+      ["OpenAI reported costs · rolling 365 days", costs.rolling_365d_usd],
+      ["OpenAI reported costs · month to date", costs.month_to_date_usd],
+    ]) {
+      const item = document.createElement("div");
+      item.className = "provider-cost-item";
+      const title = document.createElement("span");
+      title.textContent = label;
+      const amount = document.createElement("strong");
+      amount.textContent = money(value);
+      item.append(title, amount);
+      grid.append(item);
+    }
+    root.append(grid);
+    const note = document.createElement("p");
+    note.className = "provider-cost-note";
+    note.textContent = `${costs.scope} · ${costs.message}${costs.truncated ? " Results are incomplete due to pagination limits." : ""}`;
+    root.append(note);
   }
 
   function renderKeys(keys, rotationDays, events) {
@@ -141,11 +174,20 @@
       if (sequence !== state.loadSequence) return;
       state.data = data;
       renderBudget(data.budget);
+      renderOpenAICosts(data.openai_costs);
       renderKeys(data.keys, data.rotation_days, data.exposure_events);
       renderExposures(data.exposure_events);
       text("as-of", `Updated ${new Date(data.as_of).toLocaleTimeString()}`);
-      if (data.usage_truncated) {
-        $("status-banner").textContent = "Spend logs reached LiteLLM's 10,000-row limit; displayed usage totals are lower bounds.";
+      const notices = [];
+      if (data.usage_truncated) notices.push("Spend logs reached LiteLLM's 10,000-row limit; displayed usage totals are lower bounds.");
+      if (data.budget.zero_cost_requests_monthly > 0) {
+        notices.push(`${number(data.budget.zero_cost_requests_monthly)} token-bearing requests were priced at $0 by LiteLLM; they may be free or unpriced. Check provider pricing and billing.`);
+      }
+      if (data.unmatched_usage_key_count > 0) {
+        notices.push(`${number(data.unmatched_usage_key_count)} key IDs in spend logs have no active LiteLLM key record; they may be historical or from a different LiteLLM database. Overall totals include them, but per-key inventory may be incomplete.`);
+      }
+      if (notices.length) {
+        $("status-banner").textContent = notices.join(" ");
         $("status-banner").classList.remove("hidden");
       } else {
         $("status-banner").classList.add("hidden");

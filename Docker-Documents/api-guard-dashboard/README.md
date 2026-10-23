@@ -43,6 +43,9 @@ The webhook signs the exact JSON body with HMAC-SHA256 in `X-Darkfactory-Signatu
 
 LiteLLM pagination is bounded to 10,000 log rows per dashboard refresh. If the proxy reports more than that, API Guard marks the displayed totals as lower bounds rather than presenting a partial result as complete.
 
+Dollar totals are LiteLLM estimates from its model pricing data, not provider invoices. The dashboard flags token-bearing requests priced at `$0`; those may be free-model calls or missing pricing data, so check the provider bill before treating the estimate as complete.
+Spend-log key hashes that do not match an active LiteLLM key are included in the overall totals and flagged; they may be from expired/revoked keys or a different LiteLLM database, so per-key attribution is incomplete until reconciled.
+
 OMP redacts only key values it can positively identify: its configured model key by exact match, plus recognized OpenRouter/OpenAI/Anthropic/Google key formats. This is a safety net, not a secret scanner for arbitrary credential formats. Never place provider master keys in OMP prompts or model context. Ensure every paid request goes through LiteLLM and use separate keys per consumer. If the webhook is unavailable or unconfigured, OMP still redacts the value and tells the user to notify an administrator, but no dashboard event can be recorded.
 
 Routine rotation sequence: issue replacement → copy it directly to the consumer's secret store → restart/reload that consumer → confirm successful requests → revoke the old key. Exposure sequence: issue replacement and revoke the known exposed key immediately → update its consumer. Unknown alerts remain flagged until the key is identified and the incident is handled.
@@ -50,9 +53,10 @@ Routine rotation sequence: issue replacement → copy it directly to the consume
 ## Budget semantics
 
 `litellm_settings.max_budget: 25000` with `budget_duration: 365d` is the shared hard limit for all requests through this LiteLLM proxy. LiteLLM must have its database available for the limit to be enforced. API Guard's `$2,083.33` monthly target indicates pacing toward the annual allowance; it does not block requests. Each newly issued key also receives a required per-key budget and reset period. Existing keys without per-key budgets remain clearly labeled and must be migrated/managed separately.
+For a provider-side OpenAI comparison, optionally set `API_GUARD_OPENAI_ADMIN_API_KEY` to an organization Admin API key with **Usage Read** access, and set `API_GUARD_OPENAI_PROJECT_ID` to the project LiteLLM uses. This is separate from the project API key used for inference and remains server-side. Without a project ID, the costs panel reports organization-wide spend, which may include other workloads. See the [OpenAI Costs API](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs).
 
 This does not limit unrelated provider keys or direct provider calls that bypass LiteLLM. Configure a hard provider-account limit and alerts at OpenRouter (or the actual upstream) as a second boundary. Confirm provider-side invoices against LiteLLM because model-price metadata can be incomplete or stale.
-API Guard tracks usage and spend estimates, not purchased-credit balances; it does not query OpenRouter/provider billing APIs. Treat the $25,000 figure as a shared LiteLLM proxy ceiling over each 365-day window, not $25,000 per month.
+API Guard does not query OpenRouter or prepaid-credit balances. OpenAI costs are optional daily billing data, not a real-time balance; treat the provider invoice and provider-side spending limits as authoritative.
 
 ## JEV role
 

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -24,6 +25,8 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
             "exposure_webhook_secret": api_guard.settings.exposure_webhook_secret,
             "litellm_master_key": api_guard.settings.litellm_master_key,
             "annual_budget_usd": api_guard.settings.annual_budget_usd,
+            "openai_admin_api_key": api_guard.settings.openai_admin_api_key,
+            "openai_project_id": api_guard.settings.openai_project_id,
         }
         api_guard.settings.state_db = str(Path(self.temp.name) / "guard.sqlite3")
         api_guard.settings.session_secret = "test-session-secret-that-is-long-enough"
@@ -31,6 +34,8 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         api_guard.settings.exposure_webhook_secret = "test-webhook-secret"
         api_guard.settings.litellm_master_key = "server-only-master-key"
         api_guard.settings.annual_budget_usd = 25_000.0
+        api_guard.settings.openai_admin_api_key = ""
+        api_guard.settings.openai_project_id = ""
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=api_guard.app),
             base_url="http://api-guard.test",
@@ -52,6 +57,67 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
             api_guard.settings.exposure_webhook_secret.encode(), body, hashlib.sha256
         ).hexdigest()
         return {"Content-Type": "application/json", "X-Darkfactory-Signature": f"sha256={signature}"}
+
+    async def test_openai_cost_report_uses_scoped_admin_billing_api(self) -> None:
+        api_guard.settings.openai_admin_api_key = "organization-admin-read-key"
+        api_guard.settings.openai_project_id = "proj-darkfactory"
+        now = api_guard.utcnow()
+        captured: list[dict[str, Any]] = []
+
+        class FakeResponse:
+            def __init__(self, payload: dict[str, Any]) -> None:
+                self.payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return self.payload
+
+        class FakeClient:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url, *, headers, params):
+                captured.append({"url": url, "headers": headers, "params": params})
+                if len(captured) == 1:
+                    return FakeResponse({
+                        "data": [{
+                            "start_time": int((now - timedelta(days=60)).timestamp()),
+                            "results": [{"amount": {"value": 3.25, "currency": "usd"}}],
+                        }],
+                        "has_more": True,
+                        "next_page": "page-2",
+                    })
+                return FakeResponse({
+                    "data": [{
+                        "start_time": int((now - timedelta(days=5)).timestamp()),
+                        "results": [{"amount": {"value": 1.25, "currency": "usd"}}],
+                    }],
+                    "has_more": False,
+                    "next_page": None,
+                })
+
+        with patch("app.httpx.AsyncClient", FakeClient):
+            result = await api_guard.openai_cost_report(
+                now - timedelta(days=365),
+                now.replace(day=1, hour=0, minute=0, second=0, microsecond=0),
+                now,
+            )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["scope"], "project proj-darkfactory")
+        self.assertEqual(result["rolling_365d_usd"], 4.5)
+        self.assertEqual(result["month_to_date_usd"], 1.25)
+        self.assertEqual(captured[0]["headers"]["Authorization"], "Bearer organization-admin-read-key")
+        self.assertIn(("project_ids[]", "proj-darkfactory"), captured[0]["params"])
+        self.assertIn(("page", "page-2"), captured[1]["params"])
 
     async def test_exposure_webhook_requires_signature_and_rejects_secret_values(self) -> None:
         event = {
@@ -114,20 +180,37 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
                 }]}
             if path == "/spend/logs/v2":
                 page = params["page"]
-                entry = {
-                    "api_key": "abcdef0123456789",
-                    "spend": 12.5 if page == 1 else 5,
-                    "prompt_tokens": 100 if page == 1 else 20,
-                    "completion_tokens": 23 if page == 1 else 10,
-                    "total_tokens": 123 if page == 1 else 30,
-                    "startTime": (
-                        (api_guard.utcnow() - timedelta(seconds=5)).isoformat()
-                        if page == 1
-                        else (api_guard.utcnow() - timedelta(days=60)).isoformat()
-                    ),
-                    "messages": "sk-request-secret-must-not-reach-the-browser",
-                }
-                return {"data": [entry], "total_pages": 2, "total_is_capped": False}
+                now = api_guard.utcnow()
+                if page == 1:
+                    entries = [
+                        {
+                            "api_key": "abcdef0123456789",
+                            "spend": 12.5,
+                            "prompt_tokens": 100,
+                            "completion_tokens": 23,
+                            "total_tokens": 123,
+                            "startTime": (now - timedelta(seconds=5)).isoformat(),
+                            "messages": "sk-request-secret-must-not-reach-the-browser",
+                        },
+                        {
+                            "api_key": "abcdef0123456789",
+                            "spend": 5,
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                            "total_tokens": 30,
+                            "startTime": (now - timedelta(days=60)).isoformat(),
+                        },
+                    ]
+                else:
+                    entries = [{
+                        "api_key": "retired-key-hash",
+                        "spend": 0,
+                        "prompt_tokens": 40,
+                        "completion_tokens": 10,
+                        "total_tokens": 50,
+                        "startTime": (now - timedelta(seconds=10)).isoformat(),
+                    }]
+                return {"data": entries, "total_pages": 2, "total_is_capped": False}
             raise AssertionError(f"Unexpected LiteLLM endpoint: {path}")
 
         with patch.object(api_guard, "litellm_request", new=AsyncMock(side_effect=fake_litellm)):
@@ -139,10 +222,14 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["budget"]["monthly_spend_usd"], 12.5)
         self.assertEqual(result["budget"]["monthly_target_usd"], 2_083.33)
         self.assertEqual(result["keys"][0]["key_id"], "abcdef0123456789")
-        self.assertEqual(result["budget"]["monthly_tokens"], 123)
-        self.assertEqual(result["budget"]["annual_tokens"], 153)
+        self.assertEqual(result["budget"]["monthly_tokens"], 173)
+        self.assertEqual(result["budget"]["annual_tokens"], 203)
+        self.assertEqual(result["budget"]["zero_cost_requests_monthly"], 1)
+        self.assertEqual(result["budget"]["zero_cost_tokens_monthly"], 50)
         self.assertEqual(result["keys"][0]["tokens_monthly"], 123)
+        self.assertEqual(result["unmatched_usage_key_count"], 1)
         self.assertFalse(result["usage_truncated"])
+        self.assertFalse(result["openai_costs"]["configured"])
 
         self.assertNotIn("sk-masked-secret-must-not-leave-server", response.text)
         self.assertNotIn("sk-request-secret-must-not-reach-the-browser", response.text)
