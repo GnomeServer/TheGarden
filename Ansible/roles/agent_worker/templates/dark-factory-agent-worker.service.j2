@@ -1,0 +1,24 @@
+[Unit]
+Description=Dark Factory remote agent worker ({{ worker_id }})
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User={{ ansible_user_id }}
+WorkingDirectory={{ ansible_user_dir }}/agent-worker
+ExecStart={{ ansible_user_dir }}/agent-worker/start-worker.sh
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths={{ ansible_user_dir }}/agent-worker {{ ansible_user_dir }}/agent-workspace
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
