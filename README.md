@@ -142,11 +142,11 @@ The role does not install Proxmox or modify networking. The staged installation 
 
 ### `Ansible/playbooks/agent-workers.yml`
 
-`playbooks/agent-workers.yml` installs the dynamic worker runtime, Python environment, Caddy CA trust, and worker-scoped LiteLLM key; copies `worker.py` and `mission.py`; writes `worker.env`; and starts `start-worker.sh` now and at reboot. Generated mission artifacts are returned to OpenWebUI and stored on the worker; they do not modify Forgejo. The separate `create-python-script` operation remains disabled by default because it executes unsandboxed code.
+`playbooks/agent-workers.yml` installs the dynamic worker runtime, Python environment, Caddy CA trust, and Keybroker endpoint. Each run receives a model-scoped, budget-limited LiteLLM virtual key that is revoked at completion or TTL expiry. Ansible stops legacy worker processes, removes their local static key file, and supervises the replacement with systemd; an administrator must separately revoke the old LiteLLM key after verifying the new path. Generated mission artifacts are returned to OpenWebUI and stored on the worker; they do not modify Forgejo. The separate `create-python-script` operation remains disabled by default because it executes unsandboxed code.
 
 ## Inventory and Tailscale
 
-`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and worker hosts in `agent_workers`. The worker role installs the runtime and model connection; verify each laptop can reach the configured NATS and LiteLLM endpoints over Tailscale. `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated work and is not loaded separately by default. Remote Tailscale peers are a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`.
+`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and four enrolled worker hosts in `agent_workers`. The worker role installs the runtime and Keybroker connection; verify each laptop can reach NATS, Keybroker, and LiteLLM over Tailscale. `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated work and is not loaded separately by default. Remote Tailscale peers are a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`.
 
 Observed Tailscale nodes:
 
@@ -193,8 +193,19 @@ Repository Compose projects for the `infra-lab-services` VM:
 - llama.cpp (`Docker-Documents/llama_services`)
 - LiteLLM and its PostgreSQL database (`Docker-Documents/litellm-service`)
 - Grafana, Prometheus, and Node Exporter (`Docker-Documents/grafana_services`)
+- Keybroker and its private PostgreSQL database (`Docker-Documents/keybroker-service`)
 - Agent Manager, its PostgreSQL database, and NATS JetStream (`Docker-Documents/agent-manager-service`)
 - Separate API Guard budget and credential dashboard (`Docker-Documents/api-guard-dashboard`)
+
+Keybroker issues enrolled remote workers a model-scoped, budget-limited LiteLLM
+virtual key for each run and revokes it at completion or TTL expiry. It holds
+the LiteLLM master key; the upstream OpenAI provider key remains in LiteLLM.
+API Guard is a separate Tailscale-only administrator dashboard for usage,
+budgeting, key rotation, and signed exposure alerts. Its optional notification
+webhook needs an external Forge/paging relay for 24/7 human escalation; it does
+not send email or run an on-call schedule. See
+[`docs/dark-factory-security-boundaries.md`](docs/dark-factory-security-boundaries.md)
+for implemented controls and remaining model-escape risks.
 
 The standalone API Guard service at `/api-guard/` uses its own Forgejo OAuth
 application and allowlist. It reads LiteLLM spend and virtual-key metadata,
@@ -203,9 +214,9 @@ can provide an advisory review after a dedicated `jev` model route and virtual
 key are configured. See
 [`Docker-Documents/api-guard-dashboard/README.md`](Docker-Documents/api-guard-dashboard/README.md).
 
-The checked-in Caddyfile listens on ports 80 and 443, plus HTTPS port 8443 for Open WebUI. It routes `/dashboard/`, `/v1/*`, and `/auth/*` to Agent Manager; `/api-guard/` to the separate Tailscale-only API Guard service; `/grafana/` to Grafana; `/forgejo/` to Forgejo; and `/litellm/` to LiteLLM for Tailscale source addresses only, requiring a worker-scoped virtual key. Unmatched paths on port 443 fall back to the Proxmox UI at `https://10.1.10.156:8006`; `/llama/` is not routed.
+The checked-in Caddyfile listens on ports 80 and 443, plus HTTPS port 8443 for Open WebUI. It routes `/dashboard/`, `/v1/*`, and `/auth/*` to Agent Manager; `/keybroker/` to the Tailscale-only Keybroker worker API; `/api-guard/` to the separate Tailscale-only API Guard service; `/grafana/` to Grafana; `/forgejo/` to Forgejo; and `/litellm/` to LiteLLM for Tailscale source addresses only. Remote workers use short-lived Keybroker-issued virtual keys. Unmatched paths on port 443 fall back to the Proxmox UI at `https://10.1.10.156:8006`; `/llama/` is not routed.
 
-`Ansible/playbooks/docker-services.yml` deploys every project above except LiteLLM. LiteLLM is started from its own Compose directory. The separate API Guard Compose project path must be installed and contain its private `.env` before Ansible deploys it. The base Agent Manager Compose file does not publish NATS; remote workers need `compose.worker-test.yml`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) and [`Ansible/README.md`](Ansible/README.md).
+`Ansible/playbooks/docker-services.yml` deploys every project above except LiteLLM. LiteLLM is started from its own Compose directory. Keybroker, API Guard, and Caddy each require their private deployment `.env` before Ansible runs. The base Agent Manager Compose file does not publish NATS; remote workers need `compose.worker-test.yml`. See [`Docker-Documents/README.md`](Docker-Documents/README.md), [`Ansible/README.md`](Ansible/README.md), and the [security-boundary guide](docs/dark-factory-security-boundaries.md).
 
 ## Not managed yet
 

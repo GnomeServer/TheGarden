@@ -30,13 +30,16 @@ the crew finishes rather than streamed live.
 OMP chat sanitizes inbound text and model replies before forwarding them to the
 model or user. It redacts the configured model credential by exact match and
 recognized OpenRouter/OpenAI/Anthropic/Google key formats. When a match is
-found, OMP sends a signed event containing only the configured key alias or
-`unmapped`, an optional LiteLLM key identifier, and a reason code. Configure
+found, OMP stores a signed, secret-free event in the manager database outbox
+and attempts delivery to the separate
+[`API Guard dashboard`](../api-guard-dashboard/README.md). Pending events retry
+with backoff if API Guard is unavailable. Configure
 `API_GUARD_EXPOSURE_WEBHOOK_URL` and the shared
-`API_GUARD_EXPOSURE_WEBHOOK_SECRET` to deliver alerts to the separate
-[`API Guard dashboard`](../api-guard-dashboard/README.md). This is not a
-general-purpose scanner; keep provider master keys out of prompts and model
-context.
+`API_GUARD_EXPOSURE_WEBHOOK_SECRET`; the raw key, prompt, and model output are
+never placed in the event. The manager's configured `MODEL_API_KEY` remains a
+longer-lived LiteLLM virtual key and requires manual rotation in API Guard.
+Pattern matching is not a general-purpose secret scanner; keep provider master
+keys out of prompts and model context.
 
 
 The dashboard's worker runtime view aggregates `RunRecord` start and completion
@@ -364,26 +367,36 @@ The worker pool should use one shared durable consumer per role, such as
 The worker process must receive its variables in the same shell or service
 unit that starts it:
 
-Ansible provisions each worker with its unique NATS identity, model URL, and
-worker-scoped LiteLLM key. The runtime environment is:
+Ansible configures each worker's NATS identity and Keybroker HTTPS endpoint;
+workers no longer receive a static LiteLLM virtual key. Keybroker returns the
+approved model alias and LiteLLM URL with each run session. For example:
 
 ```text
 NATS_URL=nats://100.94.49.45:4222
 WORKER_ID=worker-03
 WORKER_ROLE=coder
 WORKER_CONSUMER=agent-workers-coder
-MODEL_BASE_URL=https://infra-lab-services.tail494f6d.ts.net/litellm/v1
-MODEL_NAME=luna
-MODEL_API_KEY=<worker-scoped-LiteLLM-key>
+KEYBROKER_URL=https://infra-lab-services.tail494f6d.ts.net/keybroker
 MODEL_TLS_INSECURE=0
 ALLOW_GENERATED_CODE=0
 ```
 
-The worker uses the installed Caddy root CA to validate TLS. Do not use the
-LiteLLM master key or backend key as `MODEL_API_KEY`. Mission artifacts are
-returned to OpenWebUI and stored on the worker; they do not modify Forgejo.
-The separate `create-python-script` operation remains disabled because it runs
+Ansible supervises the process with `dark-factory-agent-worker.service`. At run
+start, the worker obtains a model-scoped, budget-limited LiteLLM key from
+Keybroker, uses it only for that run, and revokes it in cleanup. Keybroker uses
+the worker's Tailnet identity; no provider or LiteLLM master key is sent to the
+worker or persisted in its environment. A TTL reaper handles crashed workers.
+The worker redacts recognized credential patterns, stops the run on exposure,
+and returns a sanitized security notice. Keybroker persists exposure events
+before forwarding them to API Guard; API Guard's optional notification outbox
+retries downstream delivery.
+
+The worker uses the installed Caddy root CA to validate Keybroker and LiteLLM
+TLS. Mission artifacts are saved on the worker and returned to OpenWebUI;
+mission-generated artifacts are not executed. The separate
+`create-python-script` operation remains disabled by default because it runs
 generated Python unsandboxed.
+
 
 ### Duplicate completion events
 

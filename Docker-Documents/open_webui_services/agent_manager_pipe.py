@@ -302,6 +302,9 @@ class Pipe:
         else:
             prefix = f"Mission `{mission_id}` has status `{status or 'unknown'}`."
         reply = f"{prefix} {summary}".strip()
+        security_notice = state.get("security_notice")
+        if isinstance(security_notice, str) and security_notice.strip():
+            reply += f"\n\nSecurity notice: {security_notice.strip()[:500]}"
         return reply + cls._format_artifacts(state.get("artifacts"))
 
     @staticmethod

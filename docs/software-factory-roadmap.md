@@ -94,14 +94,14 @@ Suggested task format:
 
 Unchecked means not verified in the lab. It does not mean the repository has no code.
 
-- [ ] A worker can consume a run from NATS and report its result. — `agent-worker/worker.py` consumes mission events, calls the worker-scoped LiteLLM endpoint for planner/coder/reviewer roles, and returns generated artifacts. Not verified as a live worker run.
+- [ ] A worker can consume a run from NATS and report its result. — `agent-worker/worker.py` consumes mission events, obtains a per-run budget-limited LiteLLM virtual key from Keybroker, and returns generated artifacts. Not verified as a live worker run on each enrolled host.
 - [ ] Agent Manager consumes worker status events and updates PostgreSQL. — durable status and completion consumers are implemented; stale queued/running runs are reconciled when no fresh worker heartbeat owns them. Live recovery remains unverified.
 - [ ] The run state machine rejects every invalid transition. — late status/completion events are ignored for terminal runs; other transition rules remain incomplete.
 - [ ] A deterministic product validator independently checks generated artifacts. — model reviewers inspect acceptance criteria and files; generated code is not executed and no browser journey is run.
 - [ ] Evidence is stored and linked to a run. — planner criteria, reviewer findings, artifact paths, and bounded file contents are stored in `metadata.result`; artifact files remain in the worker workspace. Live retention is unverified.
 - [ ] A worker laptop can join through a documented, secure connection process.
 - [ ] The tracked Agent Manager source and the live deployment checkout are kept in sync.
-- [ ] Ansible can configure a standard worker laptop. — the role installs the dynamic mission runner, worker-scoped LiteLLM key, and Caddy CA trust. End-to-end NATS/model reachability is not verified on each host.
+- [ ] Ansible can configure a standard worker laptop. — the role installs the mission runner, systemd supervision, Keybroker endpoint, and Caddy CA trust; the one-time migration removes the local static key file. End-to-end NATS/model reachability and legacy-key revocation are not verified on each host.
 - [ ] Machine secrets are deployed reproducibly without putting plaintext secrets in Git.
 
 ### Not built yet

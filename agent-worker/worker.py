@@ -33,11 +33,11 @@ WORKER_CONSUMER = os.getenv(
     "WORKER_CONSUMER", f"agent-workers-{WORKER_ROLE}"
 )
 
-# MODEL_BASE_URL should include the OpenAI-compatible /v1 path, for example:
-# https://infra-lab-services.tail494f6d.ts.net/litellm/v1
-MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "").rstrip("/")
-MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
-MODEL_NAME = os.getenv("MODEL_NAME", "luna")
+KEYBROKER_URL = os.getenv(
+    "KEYBROKER_URL",
+    "https://infra-lab-services.tail494f6d.ts.net/keybroker",
+).rstrip("/")
+KEYBROKER_TIMEOUT = float(os.getenv("KEYBROKER_TIMEOUT", "15"))
 MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "120"))
 SCRIPT_TIMEOUT = float(os.getenv("SCRIPT_TIMEOUT", "300"))
 MAX_SCRIPT_CHARS = int(os.getenv("MAX_SCRIPT_CHARS", "30000"))
@@ -48,13 +48,195 @@ ALLOW_GENERATED_CODE = os.getenv("ALLOW_GENERATED_CODE", "0").lower() in {
     "yes",
 }
 MODEL_TLS_INSECURE = os.getenv("MODEL_TLS_INSECURE", "0").lower() in {
-    "1",
     "true",
     "yes",
 }
 WORKER_VERSION = "0.5.0"
 HEARTBEAT_SECONDS = 15
 _presence = {"status": "idle", "run_id": None}
+
+REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]"
+CREDENTIAL_PATTERN = re.compile(
+    r"sk-or-v1-[A-Fa-f0-9]{20,}|"
+    r"sk-ant-[A-Za-z0-9_-]{20,}|"
+    r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}|"
+    r"AIza[0-9A-Za-z_-]{35,}"
+)
+
+
+class CredentialExposure(RuntimeError):
+    """Raised after a credential-like value is detected in run text."""
+
+
+def redact_credentials(text: str, session_key: str | None = None) -> tuple[str, bool, bool]:
+    """Redact known credential forms and report whether the session key matched."""
+    session_key_match = bool(session_key and session_key in text)
+    found = session_key_match or CREDENTIAL_PATTERN.search(text) is not None
+    if session_key:
+        text = text.replace(session_key, REDACTED_CREDENTIAL)
+    return CREDENTIAL_PATTERN.sub(REDACTED_CREDENTIAL, text), found, session_key_match
+
+
+def keybroker_request(
+    method: str, path: str, payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    url = f"{KEYBROKER_URL}{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=KEYBROKER_TIMEOUT) as response:
+            response_body = response.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Keybroker returned HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("could not reach Keybroker") from None
+    if not response_body:
+        return {}
+    try:
+        response_data = json.loads(response_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("Keybroker returned an invalid response") from None
+    if not isinstance(response_data, dict):
+        raise RuntimeError("Keybroker returned an invalid response")
+    return response_data
+
+
+async def request_keybroker_session(run_id: str, operation: str) -> dict[str, str]:
+    response = await asyncio.to_thread(
+        keybroker_request,
+        "POST",
+        "/v1/sessions",
+        {"run_id": run_id, "operation": operation},
+    )
+    required = (
+        "session_id",
+        "key",
+        "key_id",
+        "key_alias",
+        "expires_at",
+        "model_base_url",
+        "model",
+    )
+    if any(not isinstance(response.get(name), str) or not response[name] for name in required):
+        session_id = response.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            try:
+                await revoke_keybroker_session(session_id)
+            except Exception:
+                pass
+        raise RuntimeError("Keybroker returned an incomplete session")
+    session = {name: response[name] for name in required}
+    session["model_base_url"] = session["model_base_url"].rstrip("/")
+    return session
+
+
+async def revoke_keybroker_session(session_id: str) -> bool:
+    response = await asyncio.to_thread(
+        keybroker_request, "DELETE", f"/v1/sessions/{session_id}"
+    )
+    return response.get("revoked") is not False
+
+
+async def report_key_exposure(
+    session_id: str, *, session_key_match: bool
+) -> tuple[bool, bool | None]:
+    reason = (
+        "session_key_echo_detected"
+        if session_key_match
+        else "credential_pattern_detected"
+    )
+    response = await asyncio.to_thread(
+        keybroker_request,
+        "POST",
+        f"/v1/sessions/{session_id}/exposure",
+        {
+            "event_id": str(uuid.uuid4()),
+            "reason": reason,
+            "session_key_match": session_key_match,
+        },
+    )
+    revoked = response.get("revoked")
+    return (
+        response.get("stop_run") is True,
+        revoked if isinstance(revoked, bool) else None,
+    )
+
+
+async def inspect_value(value: Any, inspect_text: Any) -> None:
+    if isinstance(value, str):
+        await inspect_text(value)
+    elif isinstance(value, list):
+        for item in value:
+            await inspect_value(item, inspect_text)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str):
+                await inspect_text(key)
+            await inspect_value(item, inspect_text)
+
+
+def make_session_model_call(
+    session: dict[str, str],
+) -> tuple[Any, Any, dict[str, bool | None]]:
+    lock = asyncio.Lock()
+    exposure_detected = False
+    alert_state = {"reported": False, "revoked": None}
+    session_key = session.pop("key")
+
+    async def flag_exposure(session_key_match: bool) -> None:
+        nonlocal exposure_detected
+        exposure_detected = True
+        try:
+            stop_run, revoked = await report_key_exposure(
+                session["session_id"], session_key_match=session_key_match
+            )
+            alert_state["reported"] = stop_run
+            alert_state["revoked"] = revoked
+        except Exception:
+            # The session is also revoked by the caller's finally block.
+            pass
+        raise CredentialExposure("credential exposure detected")
+
+    async def inspect_text(text: str) -> str:
+        async with lock:
+            if exposure_detected:
+                raise CredentialExposure("credential exposure detected")
+            cleaned, found, session_key_match = redact_credentials(text, session_key)
+            if found:
+                await flag_exposure(session_key_match)
+            return cleaned
+
+    async def model_call(
+        system_prompt: str, user: str, max_tokens: int = 4000
+    ) -> str:
+        async with lock:
+            if exposure_detected:
+                raise CredentialExposure("credential exposure detected")
+            clean_system, system_found, system_match = redact_credentials(
+                system_prompt, session_key
+            )
+            clean_user, user_found, user_match = redact_credentials(user, session_key)
+            if system_found or user_found:
+                await flag_exposure(system_match or user_match)
+            response = await model_chat(
+                clean_system,
+                clean_user,
+                max_tokens,
+                api_key=session_key,
+                model_base_url=session["model_base_url"],
+                model=session["model"],
+            )
+            clean_response, found, session_key_match = redact_credentials(
+                response, session_key
+            )
+            if found:
+                await flag_exposure(session_key_match)
+            return clean_response
+
+    return model_call, inspect_text, alert_state
 
 
 def heartbeat_payload() -> dict[str, Any]:
@@ -121,12 +303,10 @@ artifacts in the current working directory.
 """
 
 
-def completions_url() -> str:
-    if not MODEL_BASE_URL:
-        raise RuntimeError("MODEL_BASE_URL is required for dynamic prompts")
-    if not MODEL_API_KEY:
-        raise RuntimeError("MODEL_API_KEY is required for dynamic prompts")
-    return f"{MODEL_BASE_URL}/chat/completions"
+def completions_url(model_base_url: str) -> str:
+    if not model_base_url:
+        raise RuntimeError("Keybroker session omitted the model endpoint")
+    return f"{model_base_url.rstrip('/')}/chat/completions"
 
 
 def extract_source(content: str) -> str:
@@ -148,10 +328,18 @@ def extract_source(content: str) -> str:
     return content + ("\n" if not content.endswith("\n") else "")
 
 
-def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> str:
-    url = completions_url()
+def model_chat_sync(
+    system_prompt: str,
+    user: str,
+    max_tokens: int,
+    *,
+    api_key: str,
+    model_base_url: str,
+    model: str,
+) -> str:
+    url = completions_url(model_base_url)
     payload = {
-        "model": MODEL_NAME,
+        "model": model,
         "temperature": 0.2,
         "max_tokens": max_tokens,
         "messages": [
@@ -164,7 +352,7 @@ def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> st
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Accept": "application/json",
-            "Authorization": f"Bearer {MODEL_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -178,16 +366,15 @@ def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> st
         ) as response:
             response_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        raise RuntimeError(f"model API returned HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"could not reach model API: {exc.reason}") from exc
+        raise RuntimeError(f"model API returned HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("could not reach model API") from None
 
     try:
         completion = json.loads(response_body)
         content = completion["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("model API returned an unexpected response") from exc
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        raise RuntimeError("model API returned an unexpected response") from None
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("model response content was empty or not text")
     if len(content) > MAX_SCRIPT_CHARS * 2:
@@ -195,15 +382,31 @@ def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> st
     return content.strip()
 
 
-async def model_chat(system_prompt: str, user: str, max_tokens: int = 4000) -> str:
-    return await asyncio.to_thread(model_chat_sync, system_prompt, user, max_tokens)
+async def model_chat(
+    system_prompt: str,
+    user: str,
+    max_tokens: int = 4000,
+    *,
+    api_key: str,
+    model_base_url: str,
+    model: str,
+) -> str:
+    return await asyncio.to_thread(
+        model_chat_sync,
+        system_prompt,
+        user,
+        max_tokens,
+        api_key=api_key,
+        model_base_url=model_base_url,
+        model=model,
+    )
 
 
-def generate_source_sync(goal: str) -> str:
-    return extract_source(model_chat_sync(SYSTEM_PROMPT, goal, 5000))
-
-
-async def generate_source(goal: str, metadata: dict[str, Any]) -> tuple[str, str]:
+async def generate_source(
+    goal: str,
+    metadata: dict[str, Any],
+    model_call: Any,
+) -> tuple[str, str]:
     # A supplied script is useful for deterministic pipeline tests. Dynamic
     # prompts use the model when metadata does not contain script content.
     supplied_script = metadata.get("script")
@@ -212,7 +415,7 @@ async def generate_source(goal: str, metadata: dict[str, Any]) -> tuple[str, str
             raise RuntimeError("metadata.script must be a non-empty string")
         return extract_source(supplied_script), "provided"
 
-    source = await asyncio.to_thread(generate_source_sync, goal)
+    source = extract_source(await model_call(SYSTEM_PROMPT, goal, 5000))
     return source, "model"
 
 
@@ -291,9 +494,7 @@ async def process_message(js: Any, message: Any) -> None:
     # consumer. A worker_id is still honored for explicitly targeted jobs.
     target_worker = metadata.get("worker_id")
     if target_worker and target_worker != WORKER_ID:
-        raise RuntimeError(
-            f"task is for {target_worker!r}, not {WORKER_ID!r}"
-        )
+        raise RuntimeError(f"task is for {target_worker!r}, not {WORKER_ID!r}")
 
     target_role = metadata.get("worker_role", WORKER_ROLE)
     if target_role != WORKER_ROLE:
@@ -316,7 +517,6 @@ async def process_message(js: Any, message: Any) -> None:
     }
     if run_event_expired(event):
         result.update({
-            "status": "failed",
             "summary": "The run expired before a worker could start it.",
             "error": "run delivery expired before worker pickup",
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -327,6 +527,12 @@ async def process_message(js: Any, message: Any) -> None:
         return
     result["started_at"] = datetime.now(timezone.utc).isoformat()
 
+    session: dict[str, str] | None = None
+    inspect_text = None
+    alert_state: dict[str, bool | None] = {"reported": False, "revoked": None}
+    security_exposed = False
+    revoke_failed = False
+    operation = metadata.get("operation")
 
     try:
         _presence["status"] = "busy"
@@ -336,28 +542,30 @@ async def process_message(js: Any, message: Any) -> None:
         await js.publish("agent.runs.status", encoded_status)
         await js.publish("agent.runs.started", encoded_status)
 
-        if metadata.get("operation") == "mission":
+        if operation not in {"mission", "create-python-script"}:
+            raise RuntimeError("unsupported worker operation")
+        if operation == "create-python-script" and not ALLOW_GENERATED_CODE:
+            raise RuntimeError(
+                "refusing to execute generated code; set ALLOW_GENERATED_CODE=1 "
+                "only on a disposable/test worker"
+            )
+
+        session = dict(await request_keybroker_session(run_id, operation))
+        model_call, inspect_text, alert_state = make_session_model_call(session)
+
+        if operation == "mission":
             result.update(
                 await execute_mission(
                     event,
                     metadata,
-                    model_call=model_chat,
+                    model_call=model_call,
                     workspace=WORKSPACE,
                 )
             )
-        elif metadata.get("operation") != "create-python-script":
-            raise RuntimeError("unsupported worker operation")
         else:
-            goal = event.get("goal")
-        if metadata.get("operation") != "mission":
             goal = event.get("goal")
             if not isinstance(goal, str) or not goal.strip():
                 raise RuntimeError("event is missing a non-empty goal")
-            if not ALLOW_GENERATED_CODE:
-                raise RuntimeError(
-                    "refusing to execute generated code; set ALLOW_GENERATED_CODE=1 "
-                    "only on a disposable/test worker"
-                )
             project_component = project_directory_name(metadata.get("project_name"))
             script_filename = python_script_filename(metadata.get("script_name"))
             execution_dir = (
@@ -369,7 +577,8 @@ async def process_message(js: Any, message: Any) -> None:
                 parents=True,
                 exist_ok=project_component is not None,
             )
-            source, source_origin = await generate_source(goal, metadata)
+            source, source_origin = await generate_source(goal, metadata, model_call)
+            source = await inspect_text(source)
             compile(source, str(execution_dir / script_filename), "exec")
             script_path = write_script_without_overwrite(
                 execution_dir, script_filename, source
@@ -386,33 +595,119 @@ async def process_message(js: Any, message: Any) -> None:
                     timeout=SCRIPT_TIMEOUT,
                     check=False,
                 )
+                stdout = await inspect_text(completed.stdout)
+                stderr = await inspect_text(completed.stderr)
                 result.update(
                     {
                         "status": "completed" if completed.returncode == 0 else "failed",
                         "returncode": completed.returncode,
-                        "stdout": completed.stdout[:MAX_OUTPUT_CHARS],
-                        "stderr": completed.stderr[:MAX_OUTPUT_CHARS],
+                        "stdout": stdout[:MAX_OUTPUT_CHARS],
+                        "stderr": stderr[:MAX_OUTPUT_CHARS],
                     }
                 )
             except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                stdout = await inspect_text(stdout)
+                stderr = await inspect_text(stderr)
                 result.update(
                     {
                         "status": "failed",
                         "returncode": None,
                         "error": f"script exceeded {SCRIPT_TIMEOUT:g} seconds",
-                        "stdout": str(exc.stdout or "")[:MAX_OUTPUT_CHARS],
-                        "stderr": str(exc.stderr or "")[:MAX_OUTPUT_CHARS],
+                        "stdout": stdout[:MAX_OUTPUT_CHARS],
+                        "stderr": stderr[:MAX_OUTPUT_CHARS],
                     }
                 )
             result["source"] = source_origin
+    except CredentialExposure:
+        security_exposed = True
+        result.update({
+            "status": "failed",
+            "script": None,
+            "summary": "Run stopped because a potential credential exposure was detected.",
+        })
+        for field in ("artifacts", "evidence", "stdout", "stderr", "source", "error"):
+            result.pop(field, None)
     except Exception as exc:
-        # Model, validation, and workspace failures must be terminal and visible.
-        detail = str(exc)[:1000]
-        result["error"] = detail
-        if metadata.get("operation") == "mission":
-            result["summary"] = f"Worker mission failed: {detail[:500]}"
-    result.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
+        detail = str(exc)
+        found = False
+        if inspect_text:
+            try:
+                detail = await inspect_text(detail)
+            except CredentialExposure:
+                found = True
+        else:
+            detail, found, _ = redact_credentials(detail)
+        if found:
+            security_exposed = True
+            result.update({
+                "status": "failed",
+                "script": None,
+                "summary": "Run stopped because a potential credential exposure was detected.",
+            })
+            for field in ("artifacts", "evidence", "stdout", "stderr", "source", "error"):
+                result.pop(field, None)
+        else:
+            result["error"] = detail[:1000]
+            if operation == "mission":
+                result["summary"] = f"Worker mission failed: {detail[:500]}"
 
+    finally:
+        if session:
+            if not security_exposed and inspect_text:
+                try:
+                    await inspect_value(result, inspect_text)
+                except CredentialExposure:
+                    security_exposed = True
+                    run_id_text, _, _ = redact_credentials(run_id)
+                    result = {
+                        "event": "run.completed",
+                        "run_id": run_id_text,
+                        "worker_id": WORKER_ID,
+                        "hostname": socket.gethostname(),
+                        "status": "failed",
+                        "script": None,
+                        "started_at": result.get("started_at"),
+                        "summary": "Run stopped because a potential credential exposure was detected.",
+                    }
+
+            try:
+                delete_confirmed = await revoke_keybroker_session(
+                    session["session_id"]
+                )
+                alert_state["revoked"] = (
+                    delete_confirmed or alert_state["revoked"] is True
+                )
+                revoke_failed = alert_state["revoked"] is not True
+            except Exception:
+                revoke_failed = alert_state["revoked"] is not True
+
+    if security_exposed:
+        notice = (
+            "Potential credential exposure detected. Further model calls were stopped."
+        )
+        if revoke_failed:
+            notice += " Session-key revocation could not be confirmed; an administrator must revoke it."
+        elif session:
+            notice += " The session key was revoked."
+        else:
+            notice += " No session key was issued."
+        if not alert_state["reported"]:
+            notice += " Administrator alert delivery could not be confirmed."
+        result["security_notice"] = notice
+    elif revoke_failed:
+        result.update({
+            "status": "failed",
+            "summary": "The run ended, but session-key revocation could not be confirmed.",
+            "security_notice": "An administrator must revoke the worker session key.",
+        })
+
+    result.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
     try:
         await js.publish("agent.runs.completed", json.dumps(result).encode("utf-8"))
         print(json.dumps(result, indent=2), flush=True)

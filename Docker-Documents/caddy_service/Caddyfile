@@ -18,6 +18,25 @@ infra-lab-services.tail494f6d.ts.net {
 		reverse_proxy forgejo:3000
 	}
 
+	@keybroker_tailnet {
+		path /keybroker /keybroker/*
+		remote_ip 100.64.0.0/10
+	}
+
+	handle @keybroker_tailnet {
+		uri strip_prefix /keybroker
+		reverse_proxy keybroker:8000 {
+			header_up X-Darkfactory-Proxy-Token {$KEYBROKER_PROXY_TOKEN}
+			header_up X-Darkfactory-Client-IP {http.request.remote.host}
+		}
+	}
+
+	@keybroker_path path /keybroker /keybroker/*
+	handle @keybroker_path {
+		respond "Forbidden" 403
+	}
+
+
 	@api_guard_tailnet {
 		path /api-guard /api-guard/*
 		remote_ip 100.64.0.0/10

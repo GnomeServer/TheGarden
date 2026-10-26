@@ -4,5 +4,4 @@ worker_role: coder
 worker_consumer: "agent-workers-{{ worker_role }}"
 # `create-python-script` executes as the laptop user; keep disabled by default.
 allow_generated_code: false
-worker_model_name: luna
-worker_model_base_url: ""
+worker_keybroker_base_url: "https://infra-lab-services.tail494f6d.ts.net/keybroker"

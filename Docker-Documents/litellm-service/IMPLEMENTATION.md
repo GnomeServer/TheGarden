@@ -14,17 +14,26 @@ virtual key. The checked-in Caddyfile exposes the worker URL at
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
 
-The route is restricted to Tailscale source addresses and authenticates through
-worker-scoped LiteLLM virtual keys. Workers trust Caddy's internal CA.
+The route is restricted to Tailscale source addresses. Enrolled remote agent
+workers use Keybroker to obtain a short-lived, model-scoped LiteLLM virtual key
+per run; they do not store a static virtual key. Keybroker holds the LiteLLM
+master key. Workers trust Caddy's internal CA.
 
 ## Credential boundaries
 
 - `LITELLM_MASTER_KEY` is for LiteLLM administration only.
 - `LUNA_BACKEND_API_KEY` is used by LiteLLM to call the configured inference
   backend.
-`create-luna-key.sh` defaults to one generic worker key. Set `KEY_ALIAS`,
-`WORKER_ID`, and `KEY_FILE` to create one `luna`-restricted key for each worker;
-Ansible inventory points `litellm_key_source` at those private files.
+
+Ansible-managed worker inventory no longer provisions `litellm_key_source`.
+The role removes each legacy local key file after Keybroker readiness and
+stops the old worker process. It does **not** revoke the old LiteLLM virtual
+key; an administrator must revoke that key after verifying the worker's new
+session-key flow.
+
+`create-luna-key.sh` remains for manual clients outside the enrolled worker
+role. Use one restricted key per client, never commit it, and do not treat that
+manual workflow as Keybroker-backed rotation.
 
 None of these secret values belong in Git. The local `.env` and generated key
 file remain deployment-only files.
@@ -38,11 +47,11 @@ Open WebUI container
   → configured Luna backend
 ```
 
-Remote workers use the Caddy endpoint with their own virtual key. Validate
-LiteLLM readiness, then test `/v1/models` and `/v1/chat/completions` from each
-worker using the installed Caddy root certificate. Do not use Caddy's internal
-root key on workers, and do not disable TLS verification in persistent
-configuration.
+Remote worker requests reach the Caddy endpoint with a per-run virtual key
+returned by Keybroker. Validate Keybroker health and a low-budget model run
+from each enrolled worker using the installed Caddy root certificate. Do not
+use Caddy's internal root key on workers, and do not disable TLS verification
+in persistent configuration.
 
 Do not create a second CA, copy `root.key`, expose PostgreSQL, or give the
 LiteLLM master key to a worker.

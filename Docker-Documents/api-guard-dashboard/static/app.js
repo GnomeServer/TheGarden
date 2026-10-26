@@ -141,14 +141,25 @@
     list.className = "events";
     for (const event of events) {
       const item = document.createElement("article");
-      item.className = "event";
+      item.className = `event${event.worker_id || event.session_id ? " worker-exposure" : ""}`;
       const title = document.createElement("strong");
       title.textContent = event.status === "flagged" ? "Credential exposure reported" : `Exposure ${event.status}`;
       const detail = document.createElement("p");
-      detail.textContent = `${event.key_alias}${event.matched_alias ? ` · matched: ${event.matched_alias}` : " · no key matched"} · ${event.reason.replaceAll("_", " ")}`;
+      const identifiers = [];
+      if (event.worker_id) identifiers.push(`worker: ${event.worker_id}`);
+      if (event.session_id) identifiers.push(`session: ${event.session_id}`);
+      const workerDetails = identifiers.length ? ` · ${identifiers.join(" · ")}` : "";
+      detail.textContent = `${event.key_alias}${event.matched_alias ? ` · matched: ${event.matched_alias}` : " · no key matched"}${workerDetails} · ${event.reason.replaceAll("_", " ")}`;
       const date = document.createElement("small");
       date.textContent = new Date(event.received_at).toLocaleString();
-      item.append(title, detail, date);
+      const delivery = document.createElement("small");
+      const tries = number(event.notification_attempts || 0);
+      delivery.textContent = event.notification_status === "sent"
+        ? "External receiver accepted alert"
+        : event.notification_status === "pending"
+          ? `External alert queued/retrying · ${tries} attempt${tries === 1 ? "" : "s"}`
+          : "External notification route not configured";
+      item.append(title, detail, date, delivery);
       if (event.status === "flagged" && !event.matched_key_id) {
         const resolve = document.createElement("button");
         resolve.className = "button small secondary";
@@ -179,6 +190,24 @@
       renderExposures(data.exposure_events);
       text("as-of", `Updated ${new Date(data.as_of).toLocaleTimeString()}`);
       const notices = [];
+      const workerAlerts = data.exposure_events.filter(
+        (event) => event.status === "flagged" && (event.worker_id || event.session_id),
+      );
+      if (workerAlerts.length) {
+        notices.push(`URGENT: ${workerAlerts.length} worker/session credential exposure alert${workerAlerts.length === 1 ? "" : "s"} require review. The affected run is stopped; inspect the identifiers below. Keybroker revokes only exact current-session matches; unassociated patterns need human investigation and do not revoke unrelated keys.`);
+      }
+      const visiblePendingNotifications = data.exposure_events.filter(
+        (event) => event.notification_status === "pending",
+      ).length;
+      const pendingNotifications = Math.max(
+        Number(data.alert_notification_pending_count || 0),
+        visiblePendingNotifications,
+      );
+      if (!data.alert_notifications_configured) {
+        notices.push("24/7 external notification is not configured; alerts are only visible in API Guard and the worker run result.");
+      } else if (pendingNotifications) {
+        notices.push(`${pendingNotifications} external alert notification${pendingNotifications === 1 ? " is" : "s are"} queued/retrying; confirm delivery in the dashboard and check the configured receiver.`);
+      }
       if (data.usage_truncated) notices.push("Spend logs reached LiteLLM's 10,000-row limit; displayed usage totals are lower bounds.");
       if (data.budget.zero_cost_requests_monthly > 0) {
         notices.push(`${number(data.budget.zero_cost_requests_monthly)} token-bearing requests were priced at $0 by LiteLLM; they may be free or unpriced. Check provider pricing and billing.`);
@@ -192,6 +221,7 @@
       } else {
         $("status-banner").classList.add("hidden");
       }
+      $("status-banner").classList.toggle("urgent", workerAlerts.length > 0 || pendingNotifications > 0);
       $("jev-status").textContent = data.jev_configured ? `JEV advisor ready: ${data.jev_model}. Its output is advisory only.` : `JEV is not configured. Set a dedicated, restricted API_GUARD_JEV_API_KEY and route the ${data.jev_model} model alias through LiteLLM.`;
       $("ask-jev").disabled = !data.jev_configured;
       $("key-expiry-days").textContent = String(data.rotation_days * 2);
@@ -201,6 +231,7 @@
       text("connection", "Unavailable");
       $("status-banner").textContent = error.message;
       $("status-banner").classList.remove("hidden");
+      $("status-banner").classList.remove("urgent");
     }
   }
 

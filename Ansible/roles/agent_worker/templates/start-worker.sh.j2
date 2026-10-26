@@ -1,16 +1,7 @@
 #!/bin/sh
 set -eu
-cd "$HOME/agent-worker"
-exec 9>"$HOME/agent-worker/worker.lock"
-flock -n 9 || exit 0
+cd "{{ ansible_user_dir }}/agent-worker"
 set -a
 . ./worker.env
 set +a
-if [ -f "$HOME/.config/litellm/worker-api-key" ]; then
-  MODEL_API_KEY=$(tr -d '\r\n' < "$HOME/.config/litellm/worker-api-key")
-  export MODEL_API_KEY
-fi
-while true; do
-  "$HOME/agent-worker/.venv/bin/python" -u "$HOME/agent-worker/worker.py" || true
-  sleep 5
-done
+exec "{{ ansible_user_dir }}/agent-worker/.venv/bin/python" -u "{{ ansible_user_dir }}/agent-worker/worker.py"

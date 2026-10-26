@@ -2,24 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import re
 import time
 import uuid
 from datetime import datetime, timezone
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import require_run_submission
+from .crew_rules import attach_project_reply, crew_label, crew_size, is_chat_turn, missing_requirements
 from .dashboard import record_activity
 from .database import get_session
+from .exposure_delivery import queue_omp_exposure_event
 from .models import RunRecord, UserRecord
-from .crew_rules import attach_project_reply, crew_label, crew_size, is_chat_turn, missing_requirements
 from .orchestrator import ask_model, dispatch_to_worker
 
 router = APIRouter()
@@ -35,6 +32,8 @@ SECRET_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])"),
     re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
 )
+SAFE_EXPOSURE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
+SAFE_EXPOSURE_KEY_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
 def redact_credentials(value: str, configured_key: str) -> tuple[str, str | None]:
@@ -52,31 +51,32 @@ def redact_credentials(value: str, configured_key: str) -> tuple[str, str | None
 async def report_credential_exposure(reason: str, *, configured_key: bool) -> bool:
     from .settings import settings
 
-    if not settings.exposure_webhook_url or not settings.exposure_webhook_secret:
-        return False
+    configured_credential = settings.model_api_key
+    key_alias = settings.model_api_key_alias if configured_key else "unmapped"
+    key_id = settings.model_api_key_id or None if configured_key else None
+    if (
+        not SAFE_EXPOSURE_ALIAS.fullmatch(key_alias)
+        or any(pattern.search(key_alias) for pattern in SECRET_PATTERNS)
+        or (configured_credential and configured_credential in key_alias)
+    ):
+        key_alias = "unmapped"
+    if key_id and (
+        not SAFE_EXPOSURE_KEY_ID.fullmatch(key_id)
+        or any(pattern.search(key_id) for pattern in SECRET_PATTERNS)
+        or (configured_credential and configured_credential in key_id)
+    ):
+        key_id = None
     event = {
         "event_id": str(uuid.uuid4()),
-        "key_id": (settings.model_api_key_id or None) if configured_key else None,
-        "key_alias": settings.model_api_key_alias if configured_key else "unmapped",
+        "key_id": key_id,
+        "key_alias": key_alias,
         "source": "omp",
         "reason": reason,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
     }
-    body = json.dumps(event, separators=(",", ":")).encode("utf-8")
-    signature = hmac.new(settings.exposure_webhook_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(
-                settings.exposure_webhook_url,
-                content=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Darkfactory-Signature": f"sha256={signature}",
-                },
-            )
-            response.raise_for_status()
-            return True
-    except httpx.HTTPError:
+        return await queue_omp_exposure_event(event)
+    except Exception:
         return False
 
 class OmpTurn(BaseModel):
@@ -275,6 +275,7 @@ async def answer_chat(
         return question("OMP cannot answer yet. The manager has no model key.")
     alert_delivery_failed = False
     safe_goal, prompt_reason = redact_credentials(goal, settings.model_api_key)
+    exposure_detected = prompt_reason is not None
     if prompt_reason:
         alert_delivery_failed |= not await report_credential_exposure(
             prompt_reason,
@@ -287,16 +288,29 @@ async def answer_chat(
         )
     except Exception as exc:
         await record_chat(session, actor, request, title, "Luna did not answer.")
-        return question(f"OMP could not reach Luna ({type(exc).__name__}).")
+        notice = (
+            "\n\n[Credential text was redacted. API Guard receipt is unconfirmed; notify an administrator now.]"
+            if exposure_detected and alert_delivery_failed
+            else "\n\n[Credential text was redacted; API Guard accepted the alert.]"
+            if exposure_detected
+            else ""
+        )
+        return question(f"OMP could not reach Luna ({type(exc).__name__}).{notice}")
     safe_text, output_reason = redact_credentials(text, settings.model_api_key)
     if output_reason:
+        exposure_detected = True
         alert_delivery_failed |= not await report_credential_exposure(
             output_reason,
             configured_key=output_reason == "configured_credential_echo",
         )
     await record_chat(session, actor, request, title, "Luna answered through OMP.")
-    if alert_delivery_failed:
-        safe_text = f"{safe_text.strip()}\n\n[Credential text was redacted, but API Guard alert delivery failed or is unconfigured. Notify an administrator.]"
+    if exposure_detected:
+        notice = (
+            "[Credential text was redacted. API Guard receipt is unconfirmed; notify an administrator now.]"
+            if alert_delivery_failed
+            else "[Credential text was redacted; API Guard accepted the alert.]"
+        )
+        safe_text = f"{safe_text.strip()}\n\n{notice}"
     return question(safe_text.strip()[:4000])
 
 
@@ -376,4 +390,9 @@ async def mission_status(
         "crew_outcome": result.get("crew_outcome"),
         "worker_id": record.worker_id,
         "artifacts": result.get("artifacts") if isinstance(result.get("artifacts"), list) else [],
+        "security_notice": (
+            result.get("security_notice")
+            if isinstance(result.get("security_notice"), str)
+            else None
+        ),
     }

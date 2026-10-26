@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import unittest
 from types import SimpleNamespace
@@ -126,7 +124,7 @@ class OmpCredentialExposureTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(state=SimpleNamespace(auth_method="open-webui"))
         session = SimpleNamespace()
         model = AsyncMock(return_value=f"The credential is {secret}.")
-        exposure = AsyncMock()
+        exposure = AsyncMock(return_value=True)
         with patch.object(settings, "model_api_key", secret), patch(
             "agent_manager.omp.ask_model", new=model
         ), patch("agent_manager.omp.report_credential_exposure", new=exposure), patch(
@@ -143,52 +141,49 @@ class OmpCredentialExposureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret, model.await_args.args[1])
         self.assertNotIn(secret, reply["text"])
         self.assertEqual(reply["text"].count("[REDACTED API KEY]"), 1)
+        self.assertIn("API Guard accepted the alert", reply["text"])
         self.assertEqual(exposure.await_count, 2)
         self.assertTrue(all(call.kwargs["configured_key"] for call in exposure.await_args_list))
 
-    async def test_exposure_webhook_contains_no_raw_credential(self) -> None:
+    async def test_omp_exposure_event_contains_only_safe_metadata(self) -> None:
         captured: dict[str, object] = {}
 
-        class CapturingResponse:
-            def raise_for_status(self) -> None:
-                return None
-
-        class CapturingClient:
-            def __init__(self, **_kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def post(self, url, *, content, headers):
-                captured.update(url=url, content=content, headers=headers)
-                return CapturingResponse()
+        async def queue_event(event):
+            captured.update(event)
+            return True
 
         from agent_manager.settings import settings
 
         configured_key = "manager-secret-key-1234567890"
-        with patch.object(settings, "exposure_webhook_url", "http://api-guard.test/webhook"), patch.object(
-            settings, "exposure_webhook_secret", "shared-webhook-secret"
-        ), patch.object(settings, "model_api_key", configured_key), patch.object(
+        with patch.object(settings, "model_api_key", configured_key), patch.object(
             settings, "model_api_key_alias", "agent-manager-model"
         ), patch.object(settings, "model_api_key_id", "hashed-key-id"), patch(
-            "agent_manager.omp.httpx.AsyncClient", CapturingClient
+            "agent_manager.omp.queue_omp_exposure_event", new=queue_event
         ):
-            accepted = await report_credential_exposure("configured_credential_echo", configured_key=True)
+            accepted = await report_credential_exposure(
+                "configured_credential_echo", configured_key=True
+            )
         self.assertTrue(accepted)
+        self.assertNotIn(configured_key, repr(captured))
+        self.assertEqual(captured["key_alias"], "agent-manager-model")
+        self.assertEqual(captured["key_id"], "hashed-key-id")
+        self.assertNotIn("prompt", captured)
+        self.assertNotIn("output", captured)
+        self.assertNotIn("key", captured)
 
-        body = captured["content"]
-        signature = captured["headers"]["X-Darkfactory-Signature"]
-        self.assertNotIn(configured_key, body.decode())
-        expected = hmac.new(b"shared-webhook-secret", body, hashlib.sha256).hexdigest()
-        self.assertEqual(signature, f"sha256={expected}")
-        payload = json.loads(body)
-        self.assertEqual(payload["key_alias"], "agent-manager-model")
-        self.assertEqual(payload["key_id"], "hashed-key-id")
-        self.assertNotIn("secret", repr(payload).casefold())
+        with patch.object(settings, "model_api_key", configured_key), patch.object(
+            settings, "model_api_key_alias", configured_key
+        ), patch.object(settings, "model_api_key_id", configured_key), patch(
+            "agent_manager.omp.queue_omp_exposure_event", new=queue_event
+        ):
+            self.assertTrue(
+                await report_credential_exposure(
+                    "configured_credential_echo", configured_key=True
+                )
+            )
+        self.assertNotIn(configured_key, repr(captured))
+        self.assertEqual(captured["key_alias"], "unmapped")
+        self.assertIsNone(captured["key_id"])
 
 
 if __name__ == "__main__":

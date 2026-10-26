@@ -79,7 +79,11 @@ ansible-playbook playbooks/docker-services.yml --syntax-check
 ansible-playbook playbooks/agent-workers.yml --syntax-check
 ```
 
-The worker role installs the dynamic model-backed mission runner, a worker-scoped
-LiteLLM key, and Caddy's internal CA certificate. It configures the Tailnet
-LiteLLM route and starts the worker now and at reboot. See
-`TheGarden/agent-worker/README.md` for the mission artifact and status behavior.
+The worker role installs the dynamic mission runner, Caddy's public root CA,
+Keybroker endpoint, and a systemd service. Each mission run receives a
+model-scoped, budget-limited virtual key; the worker revokes it at completion,
+with TTL/reaper cleanup as a backstop. The role verifies Keybroker health and
+the host's authenticated worker identity before removing the local legacy key
+file. It does not revoke the old LiteLLM key; an administrator must do that
+after verifying the new path. See `TheGarden/agent-worker/README.md` for the
+mission and exposure-notification behavior.

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import math
 import re
 import secrets
@@ -25,6 +27,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+logger = logging.getLogger("api_guard")
 
 
 class Settings(BaseSettings):
@@ -40,7 +43,10 @@ class Settings(BaseSettings):
     forgejo_client_id: str = Field(default="", validation_alias="API_GUARD_FORGEJO_CLIENT_ID")
     forgejo_client_secret: str = Field(default="", validation_alias="API_GUARD_FORGEJO_CLIENT_SECRET")
     litellm_base_url: str = Field(default="http://litellm:4000", validation_alias="API_GUARD_LITELLM_BASE_URL")
-    litellm_master_key: str = Field(default="", validation_alias="API_GUARD_LITELLM_MASTER_KEY")
+    keybroker_base_url: str = Field(default="http://keybroker:8000", validation_alias="API_GUARD_KEYBROKER_BASE_URL")
+    keybroker_dashboard_token: str = Field(default="", validation_alias="KEYBROKER_DASHBOARD_TOKEN")
+    alert_webhook_url: str = Field(default="", validation_alias="API_GUARD_ALERT_WEBHOOK_URL")
+    alert_webhook_secret: str = Field(default="", validation_alias="API_GUARD_ALERT_WEBHOOK_SECRET")
     exposure_webhook_secret: str = Field(default="", validation_alias="API_GUARD_EXPOSURE_WEBHOOK_SECRET")
     openai_admin_api_key: str = Field(default="", validation_alias="API_GUARD_OPENAI_ADMIN_API_KEY")
     openai_project_id: str = Field(default="", validation_alias="API_GUARD_OPENAI_PROJECT_ID")
@@ -63,6 +69,9 @@ SESSION_COOKIE = "api_guard_session"
 OAUTH_STATE_COOKIE = "api_guard_oauth_state"
 KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
+KNOWN_CREDENTIAL_PATTERN = re.compile(
+    r"(?:sk-(?:proj-|live-|or-v1-)?[A-Za-z0-9_-]{20,}|sk-ant-api\d{2}-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{30,})"
+)
 MAX_SPEND_LOG_PAGES = 10
 MAX_OPENAI_COST_PAGES = 4
 
@@ -82,9 +91,27 @@ def db_connect():
             "CREATE TABLE IF NOT EXISTS exposure_events ("
             "event_id TEXT PRIMARY KEY, key_id TEXT, key_alias TEXT NOT NULL, "
             "source TEXT NOT NULL, reason TEXT NOT NULL, occurred_at TEXT NOT NULL, "
-            "received_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'flagged')"
+            "received_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'flagged', "
+            "worker_id TEXT, session_id TEXT)"
         )
-        connection.execute("CREATE INDEX IF NOT EXISTS ix_exposure_status_received ON exposure_events(status, received_at)")
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(exposure_events)")}
+        if "worker_id" not in columns:
+            connection.execute("ALTER TABLE exposure_events ADD COLUMN worker_id TEXT")
+        if "session_id" not in columns:
+            connection.execute("ALTER TABLE exposure_events ADD COLUMN session_id TEXT")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_exposure_status_received ON exposure_events(status, received_at)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS alert_deliveries ("
+            "event_id TEXT PRIMARY KEY, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+            "attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, delivered_at TEXT, last_error TEXT)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_alert_deliveries_due "
+            "ON alert_deliveries(status, next_attempt_at)"
+        )
         yield connection
         connection.commit()
     finally:
@@ -143,23 +170,30 @@ class ExposureEvent(BaseModel):
     event_id: str = Field(min_length=1, max_length=128)
     key_id: str | None = Field(default=None, max_length=128)
     key_alias: str = Field(min_length=1, max_length=100)
+    worker_id: str | None = Field(default=None, max_length=128)
+    session_id: str | None = Field(default=None, max_length=128)
     source: str = Field(default="omp", min_length=1, max_length=32)
     reason: Literal["configured_credential_echo", "credential_pattern_in_output"]
     occurred_at: datetime | None = None
 
-    @field_validator("key_id")
+    @field_validator("event_id", "key_id", "worker_id", "session_id")
     @classmethod
-    def validate_key_id(cls, value: str | None) -> str | None:
-        if value is not None and not KEY_ID_PATTERN.fullmatch(value):
-            raise ValueError("key_id must be a safe LiteLLM key identifier")
+    def validate_identifiers(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not KEY_ID_PATTERN.fullmatch(value) or KNOWN_CREDENTIAL_PATTERN.search(value)
+        ):
+            raise ValueError("identifier must be safe and contain no secret material")
         return value
 
     @field_validator("key_alias", "source")
     @classmethod
     def validate_labels(cls, value: str) -> str:
+        value = value.strip()
         if not value.isprintable() or any(character in value for character in "\r\n"):
             raise ValueError("label contains unsupported characters")
-        return value.strip()
+        if KNOWN_CREDENTIAL_PATTERN.search(value):
+            raise ValueError("credential material must never be sent")
+        return value
 
 
 class KeyCreate(BaseModel):
@@ -200,27 +234,36 @@ class ResolveEvent(BaseModel):
     event_id: str = Field(min_length=1, max_length=128)
 
 
-async def litellm_request(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
-    if not settings.litellm_master_key:
-        raise HTTPException(status_code=503, detail="LiteLLM administration is not configured")
-    headers = {"Authorization": f"Bearer {settings.litellm_master_key}", "Accept": "application/json"}
+async def keybroker_request(
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+) -> Any:
+    if not settings.keybroker_dashboard_token:
+        raise HTTPException(status_code=503, detail="Keybroker administration is not configured")
+    headers = {
+        "Authorization": f"Bearer {settings.keybroker_dashboard_token}",
+        "Accept": "application/json",
+    }
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.request(
                 method,
-                f"{settings.litellm_base_url.rstrip('/')}{path}",
+                f"{settings.keybroker_base_url.rstrip('/')}{path}",
                 headers=headers,
                 params=params,
                 json=body,
             )
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail="LiteLLM is unavailable") from exc
+        raise HTTPException(status_code=502, detail="Keybroker is unavailable") from exc
     if response.status_code >= 400:
-        raise HTTPException(status_code=502, detail="LiteLLM rejected the dashboard request")
+        raise HTTPException(status_code=502, detail="Keybroker rejected the dashboard request")
     try:
         return response.json()
     except ValueError as exc:
-        raise HTTPException(status_code=502, detail="LiteLLM returned an invalid response") from exc
+        raise HTTPException(status_code=502, detail="Keybroker returned an invalid response") from exc
 
 
 def key_rows(payload: Any) -> list[dict[str, Any]]:
@@ -232,10 +275,21 @@ def key_rows(payload: Any) -> list[dict[str, Any]]:
 
 
 def key_id_for(row: dict[str, Any]) -> str | None:
-    value = row.get("token_id") or row.get("token_hash") or row.get("token")
-    if not isinstance(value, str) or not KEY_ID_PATTERN.fullmatch(value) or value.startswith("sk-"):
+    value = row.get("key_id") or row.get("token_id") or row.get("token_hash") or row.get("token")
+    if (
+        not isinstance(value, str)
+        or not KEY_ID_PATTERN.fullmatch(value)
+        or value.startswith("sk-")
+        or KNOWN_CREDENTIAL_PATTERN.search(value)
+    ):
         return None
     return value
+
+def safe_key_alias(row: dict[str, Any]) -> str:
+    alias = row.get("alias") or row.get("key_alias") or row.get("key_name") or "Unnamed key"
+    if not isinstance(alias, str) or KNOWN_CREDENTIAL_PATTERN.search(alias):
+        return "Restricted key alias"
+    return alias[:100]
 
 
 def safe_key_out(row: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -250,16 +304,14 @@ def safe_key_out(row: dict[str, Any], now: datetime) -> dict[str, Any]:
             age_days = max(0, (now - parsed.astimezone(timezone.utc)).days)
         except ValueError:
             created = None
-    alias = row.get("key_alias") or row.get("key_name") or "Unnamed key"
-    if not isinstance(alias, str):
-        alias = "Unnamed key"
+    alias = safe_key_alias(row)
     models = row.get("models") if isinstance(row.get("models"), list) else []
     return {
         "key_id": key_id_for(row),
-        "alias": alias[:100],
+        "alias": alias,
         "models": [model for model in models if isinstance(model, str)][:10],
-        "spend_usd": _number(row.get("spend")),
-        "max_budget_usd": _optional_number(row.get("max_budget")),
+        "spend_usd": _number(row.get("spend_usd", row.get("spend"))),
+        "max_budget_usd": _optional_number(row.get("max_budget_usd", row.get("max_budget"))),
         "budget_duration": row.get("budget_duration") if isinstance(row.get("budget_duration"), str) else None,
         "created_at": created,
         "age_days": age_days,
@@ -290,21 +342,18 @@ async def fetch_spend_logs(start: datetime, end: datetime) -> tuple[list[dict[st
     total_pages = 1
     truncated = False
     while page <= MAX_SPEND_LOG_PAGES:
-        payload = await litellm_request(
+        payload = await keybroker_request(
             "GET",
-            "/spend/logs/v2",
+            "/v1/admin/spend-logs",
             params={
-                "start_date": start.strftime("%Y-%m-%d %H:%M:%S"),
-                "end_date": end.strftime("%Y-%m-%d %H:%M:%S"),
+                "start": start.strftime("%Y-%m-%d %H:%M:%S"),
+                "end": end.strftime("%Y-%m-%d %H:%M:%S"),
                 "page": page,
                 "page_size": 1000,
-                "sort_by": "startTime",
-                "sort_order": "desc",
-                "exclude_internal_health_checks": "true",
             },
         )
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-            raise HTTPException(status_code=502, detail="LiteLLM returned invalid spend logs")
+            raise HTTPException(status_code=502, detail="Keybroker returned invalid spend logs")
         rows.extend(row for row in payload["data"] if isinstance(row, dict))
         total_pages = max(1, int(_number(payload.get("total_pages"))))
         truncated |= bool(payload.get("total_is_capped")) or total_pages > MAX_SPEND_LOG_PAGES
@@ -489,30 +538,111 @@ def aggregate_spend_logs(
 def event_rows() -> list[dict[str, Any]]:
     with db_connect() as connection:
         rows = connection.execute(
-            "SELECT event_id, key_id, key_alias, source, reason, occurred_at, received_at, status "
-            "FROM exposure_events ORDER BY received_at DESC LIMIT 100"
+            "SELECT e.event_id, e.key_id, e.key_alias, e.source, e.reason, e.occurred_at, "
+            "e.received_at, e.status, e.worker_id, e.session_id, "
+            "COALESCE(a.status, 'not_configured') AS notification_status, "
+            "COALESCE(a.attempts, 0) AS notification_attempts "
+            "FROM exposure_events AS e LEFT JOIN alert_deliveries AS a ON a.event_id=e.event_id "
+            "ORDER BY e.received_at DESC LIMIT 100"
         ).fetchall()
     return [dict(row) for row in rows]
 
+
+def pending_alert_count() -> int:
+    with db_connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM alert_deliveries WHERE status='pending'"
+        ).fetchone()
+    return int(row["count"])
 
 def find_key(rows: list[dict[str, Any]], key_id: str | None, alias: str | None = None) -> dict[str, Any] | None:
     for row in rows:
         if key_id and key_id_for(row) == key_id:
             return row
     if alias:
-        matches = [row for row in rows if (row.get("key_alias") or row.get("key_name")) == alias]
+        matches = [row for row in rows if (row.get("alias") or row.get("key_alias") or row.get("key_name")) == alias]
         if len(matches) == 1:
             return matches[0]
     return None
+
+
+async def send_alert_notification(payload: bytes) -> None:
+    if not settings.alert_webhook_url or not settings.alert_webhook_secret:
+        raise RuntimeError("alert endpoint or signing secret is not configured")
+    signature = hmac.new(
+        settings.alert_webhook_secret.encode(), payload, hashlib.sha256
+    ).hexdigest()
+    headers = {
+        "Content-Type": "application/json",
+        "X-Darkfactory-Signature": f"sha256={signature}",
+    }
+    async with httpx.AsyncClient(timeout=5) as client:
+        response = await client.post(
+            settings.alert_webhook_url,
+            content=payload,
+            headers=headers,
+        )
+        response.raise_for_status()
+
+
+async def deliver_pending_alerts() -> int:
+    if not settings.alert_webhook_url or not settings.alert_webhook_secret:
+        return 0
+    now = utcnow()
+    with db_connect() as connection:
+        rows = connection.execute(
+            "SELECT event_id, payload, attempts FROM alert_deliveries "
+            "WHERE status='pending' AND next_attempt_at<=? ORDER BY created_at LIMIT 25",
+            (now.isoformat(),),
+        ).fetchall()
+    delivered = 0
+    for row in rows:
+        try:
+            await send_alert_notification(row["payload"].encode("utf-8"))
+        except (httpx.HTTPError, RuntimeError, ValueError):
+            attempts = row["attempts"] + 1
+            delay_seconds = min(60 * (2 ** min(attempts - 1, 6)), 3600)
+            retry_at = (utcnow() + timedelta(seconds=delay_seconds)).isoformat()
+            with db_connect() as connection:
+                connection.execute(
+                    "UPDATE alert_deliveries SET attempts=?, next_attempt_at=?, "
+                    "last_error='delivery_failed' WHERE event_id=? AND status='pending'",
+                    (attempts, retry_at, row["event_id"]),
+                )
+        else:
+            with db_connect() as connection:
+                connection.execute(
+                    "UPDATE alert_deliveries SET status='sent', attempts=attempts+1, "
+                    "delivered_at=?, last_error=NULL WHERE event_id=? AND status='pending'",
+                    (utcnow().isoformat(), row["event_id"]),
+                )
+            delivered += 1
+    return delivered
+
+
+async def alert_delivery_loop() -> None:
+    while True:
+        try:
+            await deliver_pending_alerts()
+        except Exception:
+            # The durable outbox remains pending; the next loop retries it.
+            logger.warning("API Guard alert outbox pass failed; pending events will retry")
+        await asyncio.sleep(5)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     with db_connect():
         pass
-    yield
-
-
+    delivery_task = asyncio.create_task(alert_delivery_loop())
+    try:
+        yield
+    finally:
+        delivery_task.cancel()
+        try:
+            await delivery_task
+        except asyncio.CancelledError:
+            pass
 app = FastAPI(title="Dark Factory API Guard", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount("/api-guard/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -614,7 +744,7 @@ async def logout(request: Request) -> Response:
 async def overview(request: Request) -> dict[str, Any]:
     require_admin(request)
     now = utcnow()
-    keys_payload = await litellm_request("GET", "/key/list")
+    keys_payload = await keybroker_request("GET", "/v1/admin/keys")
     rows = key_rows(keys_payload)
     rolling_start = now - timedelta(days=365)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -631,9 +761,13 @@ async def overview(request: Request) -> dict[str, Any]:
         key["spend_monthly_usd"] = usage.get("spend_usd", 0.0)
     events = event_rows()
     for event in events:
-        matched = find_key(rows, event.get("key_id"), event.get("key_alias"))
+        has_session_identity = event.get("worker_id") or event.get("session_id")
+        if has_session_identity:
+            matched = find_key(rows, event.get("key_id")) if event.get("key_id") else None
+        else:
+            matched = find_key(rows, event.get("key_id"), event.get("key_alias"))
         event["matched_key_id"] = key_id_for(matched) if matched else None
-        event["matched_alias"] = (matched.get("key_alias") or matched.get("key_name")) if matched else None
+        event["matched_alias"] = safe_key_alias(matched) if matched else None
     return {
         "as_of": now.isoformat(),
         "budget": {
@@ -657,6 +791,8 @@ async def overview(request: Request) -> dict[str, Any]:
         "unmatched_usage_key_count": unmatched_usage_key_count,
         "keys": keys,
         "exposure_events": events,
+        "alert_notifications_configured": bool(settings.alert_webhook_url and settings.alert_webhook_secret),
+        "alert_notification_pending_count": pending_alert_count(),
         "jev_configured": bool(settings.jev_api_key),
         "jev_model": settings.jev_model,
     }
@@ -665,7 +801,7 @@ async def overview(request: Request) -> dict[str, Any]:
 @app.get("/api-guard/api/v1/keys")
 async def list_keys(request: Request) -> list[dict[str, Any]]:
     require_admin(request)
-    return [safe_key_out(row, utcnow()) for row in key_rows(await litellm_request("GET", "/key/list"))]
+    return [safe_key_out(row, utcnow()) for row in key_rows(await keybroker_request("GET", "/v1/admin/keys"))]
 
 
 @app.post("/api-guard/api/v1/keys")
@@ -674,17 +810,16 @@ async def create_key(body: KeyCreate, request: Request, response: Response) -> d
     require_csrf(request, user)
     if body.max_budget_usd > settings.annual_budget_usd:
         raise HTTPException(status_code=422, detail="Per-key budget cannot exceed the configured annual budget")
-    result = await litellm_request("POST", "/key/generate", body={
-        "key_alias": body.alias,
+    result = await keybroker_request("POST", "/v1/admin/keys/generate", body={
+        "alias": body.alias,
         "models": body.models,
-        "max_budget": body.max_budget_usd,
+        "max_budget_usd": body.max_budget_usd,
         "budget_duration": body.budget_duration,
         "duration": f"{settings.rotation_days * 2}d",
-        "metadata": {"managed_by": "darkfactory-api-guard"},
     })
     key = result.get("key") if isinstance(result, dict) else None
     if not isinstance(key, str) or not key:
-        raise HTTPException(status_code=502, detail="LiteLLM did not return a new key")
+        raise HTTPException(status_code=502, detail="Keybroker did not return a new key")
     response.headers["Cache-Control"] = "no-store"
     return {"key": key, "alias": body.alias, "expires_after_days": settings.rotation_days * 2, "rotate_after_days": settings.rotation_days}
 
@@ -693,35 +828,34 @@ async def create_key(body: KeyCreate, request: Request, response: Response) -> d
 async def rotate_key(body: KeyReference, request: Request, response: Response) -> dict[str, Any]:
     user = require_admin(request)
     require_csrf(request, user)
-    rows = key_rows(await litellm_request("GET", "/key/list"))
+    rows = key_rows(await keybroker_request("GET", "/v1/admin/keys"))
     old = find_key(rows, body.key_id)
     if old is None:
-        raise HTTPException(status_code=404, detail="LiteLLM key not found; refresh the inventory")
-    alias = old.get("key_alias") or old.get("key_name") or "key"
+        raise HTTPException(status_code=404, detail="Keybroker key not found; refresh the inventory")
+    alias = safe_key_alias(old)
     safe_alias = re.sub(r"[^A-Za-z0-9_.:-]", "-", str(alias))[:72]
     stored_models = old.get("models")
     scope_narrowed = not isinstance(stored_models, list) or not stored_models
     models = stored_models if not scope_narrowed else ["luna"]
-    max_budget = _optional_number(old.get("max_budget"))
+    max_budget = _optional_number(old.get("max_budget_usd", old.get("max_budget")))
     if max_budget is None:
         raise HTTPException(status_code=409, detail="This key has no budget. Set a per-key budget before rotating it.")
     duration = old.get("budget_duration") if old.get("budget_duration") in {"1d", "7d", "30d"} else "30d"
-    result = await litellm_request("POST", "/key/generate", body={
-        "key_alias": f"{safe_alias}-rotated-{utcnow().strftime('%Y%m%d%H%M%S')}",
+    rotated_alias = f"{safe_alias}-rotated-{utcnow().strftime('%Y%m%d%H%M%S')}"
+    result = await keybroker_request("POST", "/v1/admin/keys/generate", body={
+        "alias": rotated_alias,
         "models": models,
-        "max_budget": max_budget,
+        "max_budget_usd": max_budget,
         "budget_duration": duration,
         "duration": f"{settings.rotation_days * 2}d",
-        "team_id": old.get("team_id"),
-        "metadata": {"managed_by": "darkfactory-api-guard", "rotated_from": body.key_id},
     })
     key = result.get("key") if isinstance(result, dict) else None
     if not isinstance(key, str) or not key:
-        raise HTTPException(status_code=502, detail="LiteLLM did not return a replacement key")
+        raise HTTPException(status_code=502, detail="Keybroker did not return a replacement key")
     response.headers["Cache-Control"] = "no-store"
     return {
         "key": key,
-        "alias": f"{safe_alias}-rotated",
+        "alias": rotated_alias,
         "old_key_id": body.key_id,
         "old_key_revoked": False,
         "models_narrowed_to": ["luna"] if scope_narrowed else [],
@@ -734,12 +868,12 @@ async def rotate_key(body: KeyReference, request: Request, response: Response) -
 async def revoke_key(body: KeyReference, request: Request) -> dict[str, Any]:
     user = require_admin(request)
     require_csrf(request, user)
-    rows = key_rows(await litellm_request("GET", "/key/list"))
+    rows = key_rows(await keybroker_request("GET", "/v1/admin/keys"))
     old = find_key(rows, body.key_id)
     if old is None:
-        raise HTTPException(status_code=404, detail="LiteLLM key not found; refresh the inventory")
-    key_alias = old.get("key_alias") or old.get("key_name") or ""
-    await litellm_request("POST", "/key/delete", body={"keys": [body.key_id]})
+        raise HTTPException(status_code=404, detail="Keybroker key not found; refresh the inventory")
+    key_alias = old.get("alias") or old.get("key_alias") or old.get("key_name") or ""
+    await keybroker_request("POST", "/v1/admin/keys/revoke", body={"key_id": body.key_id})
     with db_connect() as connection:
         connection.execute(
             "UPDATE exposure_events SET status='revoked' "
@@ -782,14 +916,48 @@ async def exposure_webhook(request: Request) -> dict[str, Any]:
     occurred = event.occurred_at or utcnow()
     if occurred.tzinfo is None:
         raise HTTPException(status_code=422, detail="occurred_at must include a timezone")
+    received_at = utcnow().isoformat()
+    notification = {
+        "event_id": event.event_id,
+        "worker_id": event.worker_id,
+        "session_id": event.session_id,
+        "key_alias": event.key_alias,
+        "reason": event.reason,
+        "occurred_at": occurred.astimezone(timezone.utc).isoformat(),
+    }
+    notification_payload = json.dumps(notification, separators=(",", ":"), ensure_ascii=False)
     with db_connect() as connection:
-        connection.execute(
+        inserted = connection.execute(
             "INSERT OR IGNORE INTO exposure_events "
-            "(event_id,key_id,key_alias,source,reason,occurred_at,received_at,status) "
-            "VALUES (?,?,?,?,?,?,?,'flagged')",
-            (event.event_id, event.key_id, event.key_alias, event.source, event.reason, occurred.astimezone(timezone.utc).isoformat(), utcnow().isoformat()),
-        )
-    return {"accepted": True, "event_id": event.event_id, "flagged": True}
+            "(event_id,key_id,key_alias,source,reason,occurred_at,received_at,status,worker_id,session_id) "
+            "VALUES (?,?,?,?,?,?,?,'flagged',?,?)",
+            (
+                event.event_id,
+                event.key_id,
+                event.key_alias,
+                event.source,
+                event.reason,
+                occurred.astimezone(timezone.utc).isoformat(),
+                received_at,
+                event.worker_id,
+                event.session_id,
+            ),
+        ).rowcount
+        if inserted and settings.alert_webhook_url and settings.alert_webhook_secret:
+            connection.execute(
+                "INSERT INTO alert_deliveries "
+                "(event_id,payload,status,attempts,next_attempt_at,created_at) "
+                "VALUES (?,?,'pending',0,?,?)",
+                (event.event_id, notification_payload, received_at, received_at),
+            )
+    return {
+        "accepted": True,
+        "event_id": event.event_id,
+        "flagged": True,
+        "notification_queued": bool(
+            inserted and settings.alert_webhook_url and settings.alert_webhook_secret
+        ),
+    }
 
 
 @app.post("/api-guard/api/v1/decision-review")

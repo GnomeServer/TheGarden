@@ -25,14 +25,15 @@ The repository Caddyfile is `Caddyfile` in this directory, mounted by `compose.y
 - TLS: Caddy's internal CA
 - Grafana: `grafana:3000` under `/grafana/`
 - Forgejo: `forgejo:3000` under `/forgejo/`, with the `/forgejo` prefix stripped
+- Keybroker: `/keybroker/`, Tailscale-only; Caddy injects the configured proxy token and the remote Tailscale source IP before proxying to `keybroker:8000`
 - API Guard: the standalone security/budget service at `/api-guard/`, restricted to Tailscale source addresses and authenticated separately through Forgejo OAuth
 - Agent Manager dashboard and APIs: `/dashboard/`, `/v1/*`, `/auth/*`, `/healthz`, and `/readyz`
 - LiteLLM: `/litellm/v1`, reverse-proxied to `litellm:4000` for Tailscale source addresses only
-- Requests outside Tailscale to `/api-guard/*` and `/litellm/*` receive HTTP 403
+- Requests outside Tailscale to `/keybroker/*`, `/api-guard/*`, and `/litellm/*` receive HTTP 403
 - Proxmox fallback: `https://10.1.10.156:8006` for other paths on port 443
 
 This project creates the `caddy_proxy` network. Grafana, Forgejo, Open WebUI,
-LiteLLM, Agent Manager, and API Guard join that external network. Do not mark this
+LiteLLM, Agent Manager, API Guard, and Keybroker join that external network. Do not mark this
 project's network `external: true`.
 
 ## Deploy
@@ -41,6 +42,15 @@ The Compose file fixes the project name so deploying from a worktree does not
 create new Caddy data volumes. The Caddyfile and site directory are bind-mounted,
 so deploy from a persistent checkout (not `/tmp`) to keep the configuration
 available after reboot. From the checked-out repository:
+
+Set a high-entropy `KEYBROKER_PROXY_TOKEN` in the Caddy deployment `.env` and
+the Keybroker `.env`; the values must match. The checked-in `.env.example`
+contains a placeholder, not a usable token. For a new deployment, copy it to
+`.env`, replace the placeholder, and set mode `0600`. For an existing Caddy
+deployment, add the variable to its existing `.env` without replacing other
+live settings. Caddy uses this token only on the internal reverse-proxy
+request; remote agents do not receive it. Compose refuses to start if the
+variable is missing.
 
 ```bash
 cd Docker-Documents/caddy_service

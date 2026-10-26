@@ -115,16 +115,19 @@ variables, CA trust, and troubleshooting steps are documented in:
 TheGarden/agent-worker/README.md
 ```
 
-`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and
-CA certificates; copies `worker.py` and `mission.py`; installs the worker's
-LiteLLM key and Caddy root certificate; writes `worker.env`; and starts the
-worker now and at reboot. `worker_model_base_url` points at the Tailnet-only
-Caddy route. `allow_generated_code` remains `false`; mission artifacts are
-returned without executing them. The separate `create-python-script` operation
-is unsandboxed.
+`playbooks/agent-workers.yml` installs Python, a virtualenv, the worker runtime,
+the Caddy root certificate, and a supervised systemd service. Keybroker is
+verified over HTTPS and each worker's authenticated identity is checked before
+Ansible removes the legacy local LiteLLM key. Each run receives a
+model-scoped, budget-limited virtual key that is revoked at completion or
+expires through the Keybroker reaper. An administrator must separately revoke
+the old LiteLLM key after validating the new path. Stage only Caddy's public
+`root.crt` at `/tmp/thegarden-caddy-root.crt` on the Ansible controller; never
+distribute `root.key`. `allow_generated_code` remains `false`; mission
+artifacts are returned without execution. The separate `create-python-script`
+operation is unsandboxed.
 
-Use `--ask-become-pass` for package installation and system CA trust. Each
-worker requires its own LiteLLM virtual key.
+Use `--ask-become-pass` for package installation and system CA trust.
 
 ## Proxmox validation
 

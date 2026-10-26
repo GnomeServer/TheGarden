@@ -85,29 +85,18 @@ class SharedTaskTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ActivityEstimateTests(unittest.IsolatedAsyncioTestCase):
-    async def test_estimates_use_mapped_ssh_sessions_and_foreground_pulses(self):
+    async def test_estimates_use_foreground_pulses_not_ssh(self):
         day = date(2026, 10, 12)
         opened = datetime(2026, 10, 12, 10, 0, tzinfo=timezone.utc)
-        closed = opened + timedelta(minutes=2)
         session = SimpleNamespace(execute=AsyncMock(side_effect=[
             Result([("member-1",)]),
-            Result([
-                SimpleNamespace(
-                    user_id="member-1", node_id="worker-01", session_id="ssh-session",
-                    event_type="ssh_session_opened", occurred_at=opened,
-                ),
-                SimpleNamespace(
-                    user_id="member-1", node_id="worker-01", session_id="ssh-session",
-                    event_type="ssh_session_closed", occurred_at=closed,
-                ),
-            ]),
             Result([
                 ("member-1", opened + timedelta(minutes=1)),
                 ("member-1", opened + timedelta(minutes=2)),
             ]),
         ]))
         estimates = await estimate_totals(session, day, day)
-        self.assertEqual(estimates[("member-1", day)], {"ssh": 120, "dashboard": 120})
+        self.assertEqual(estimates[("member-1", day)], {"ssh": 0, "dashboard": 120})
 
 
 

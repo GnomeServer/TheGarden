@@ -6,7 +6,7 @@
   <meta name="theme-color" id="theme-color" content="#12151c">
   <title>TheGarden — Team dashboard</title>
   <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.5.5">
-  <script src="/dashboard/static/app.js?v=1.5.11" defer></script>
+  <script src="/dashboard/static/app.js?v=1.5.12" defer></script>
 </head>
 <body>
   <section id="login" class="login-shell hidden" aria-labelledby="login-title">
@@ -58,14 +58,9 @@
           <div id="work-sessions" class="table-wrap section-gap" aria-live="polite"><p class="loading">Loading reported entries…</p></div>
         </section>
         <section class="content-section" aria-labelledby="dashboard-time-title">
-          <div class="section-heading"><div><p class="eyebrow">DASHBOARD ACTIVITY</p><h2 id="dashboard-time-title">Dashboard time spent</h2></div><div class="date-filters"><label for="dashboard-time-from">From (UTC)</label><input id="dashboard-time-from" type="date"><label for="dashboard-time-to">To (UTC)</label><input id="dashboard-time-to" type="date"><button id="load-dashboard-time" class="button secondary" type="button">Update</button></div></div>
-          <p class="notice"><strong>Estimated foreground dashboard activity, not hours worked.</strong> Counts one minute per pulse while the page is visible and recently active. Worker execution is measured separately.</p>
-          <div id="dashboard-time" class="estimate-list" aria-live="polite"><p class="loading">Loading dashboard activity…</p></div>
-        </section>
-        <section class="content-section" aria-labelledby="worker-execution-title">
-          <div class="section-heading"><div><p class="eyebrow">WORKER EXECUTION</p><h2 id="worker-execution-title">Worker run time</h2></div><div class="date-filters"><label for="worker-run-from">From (UTC)</label><input id="worker-run-from" type="date"><label for="worker-run-to">To (UTC)</label><input id="worker-run-to" type="date"><button id="load-worker-runs" class="button secondary" type="button">Update</button></div></div>
-          <p class="notice"><strong>Measured worker execution, not human hours.</strong> Duration comes from run-start and run-completion timestamps; active runs accrue elapsed time.</p>
-          <div id="worker-execution" class="estimate-list" aria-live="polite"><p class="loading">Loading worker execution…</p></div>
+          <div class="section-heading"><div><p class="eyebrow">HOURS WORKED</p><h2 id="dashboard-time-title">Activity estimates</h2></div><div class="date-filters"><label for="dashboard-time-from">From (UTC)</label><input id="dashboard-time-from" type="date"><label for="dashboard-time-to">To (UTC)</label><input id="dashboard-time-to" type="date"><button id="load-dashboard-time" class="button secondary" type="button">Update</button></div></div>
+          <p class="notice"><strong>Human hours estimate for authority.</strong> One minute per pulse while this page is visible and in use. SSH sessions and worker runtime are not included. Self-reported timers above are the explicit record.</p>
+          <div id="dashboard-time" class="estimate-list" aria-live="polite"><p class="loading">Loading activity estimates…</p></div>
         </section>
       </section>
 

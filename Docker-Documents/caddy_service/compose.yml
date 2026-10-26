@@ -3,6 +3,8 @@ services:
   caddy:
     image: ${CADDY_IMAGE:-caddy:2.11.4-alpine}
     container_name: caddy
+    environment:
+      KEYBROKER_PROXY_TOKEN: ${KEYBROKER_PROXY_TOKEN:?Set KEYBROKER_PROXY_TOKEN in .env}
     restart: unless-stopped
     ports:
       - "80:80"

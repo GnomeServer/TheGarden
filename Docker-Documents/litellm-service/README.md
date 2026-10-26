@@ -69,20 +69,24 @@ give the upstream provider key to workers or OMP. API Guard manages LiteLLM
 virtual keys; upstream provider credentials remain in LiteLLM's private
 deployment environment and must be rotated there.
 
-The worker reads `MODEL_API_KEY` from the environment. Ansible loads each
-worker-specific virtual key from `litellm_key_source`, installs it at
-`~/.config/litellm/worker-api-key`, and exports it when the worker starts.
+Ansible-managed Dark Factory agent workers obtain model-scoped keys from
+Keybroker for each run; the worker role no longer reads `MODEL_API_KEY` or
+installs `~/.config/litellm/worker-api-key`. After the Keybroker cutover is
+verified on a worker, revoke its legacy LiteLLM key in API Guard. Do not use the
+static-key instructions below for enrolled agent workers.
 
-Create separate restricted keys rather than sharing one key across laptops:
+`create-luna-key.sh` remains for manual clients that have not migrated to
+Keybroker. Create a separately restricted key per such client and keep its
+secret local:
 
 ```bash
 cd "$REPO_ROOT/Docker-Documents/litellm-service"
-KEY_ALIAS=worker-02 WORKER_ID=worker-02 KEY_FILE=.worker-02-api-key ./create-luna-key.sh
+KEY_ALIAS=manual-client KEY_FILE=.manual-client-api-key ./create-luna-key.sh
 ```
 
-Repeat with each worker ID and its matching `.worker-0N-api-key` file. The key
-is restricted to the `luna` model; never commit the generated files.
-
+Do not distribute those keys to the four Ansible-managed agent workers. The
+worker-role cutover removes the old `~/.config/litellm/worker-api-key` file but
+does not revoke the corresponding key in LiteLLM.
 ## Start the stack
 
 Caddy and the inference backend must be running first so the external

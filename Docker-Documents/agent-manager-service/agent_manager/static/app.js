@@ -234,8 +234,6 @@ function taskQuery() {
 
 async function refreshAll() {
   if (!state.session) return;
-  const from = $("worker-run-from").value;
-  const to = $("worker-run-to").value;
   const dashboardFrom = $("dashboard-time-from").value;
   const dashboardTo = $("dashboard-time-to").value;
   const results = await Promise.allSettled([
@@ -245,7 +243,6 @@ async function refreshAll() {
     api("/v1/workers"),
     api("/v1/dashboard/runs?limit=100"),
     api("/v1/activity?limit=150"),
-    api(`/v1/dashboard/worker-execution?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
     api(`/v1/activity/estimates?from=${encodeURIComponent(dashboardFrom)}&to=${encodeURIComponent(dashboardTo)}`),
     api("/v1/nodes/health"),
     api("/v1/access-events?limit=100"),
@@ -268,7 +265,6 @@ async function refreshAll() {
     "workers",
     "runs",
     "activity",
-    "workerExecution",
     "dashboardActivity",
     "nodeHealth",
     "accessEvents",
@@ -316,7 +312,6 @@ function render() {
   renderWorkers();
   renderRuns();
   renderActivity();
-  renderWorkerExecution();
   renderDashboardActivity();
   renderNodes();
   renderAccess();
@@ -1163,36 +1158,6 @@ async function deleteIdentityMapping(button) {
 }
 
 
-function renderWorkerExecution() {
-  const target = $("worker-execution");
-  if (state.workerExecutionError) {
-    setError(target, "Worker execution time could not be loaded. Check the date range and try again.");
-    return;
-  }
-  if (!state.workerExecution) {
-    target.innerHTML = '<p class="loading">Loading worker execution…</p>';
-    return;
-  }
-  if (!state.workerExecution.length) {
-    setEmpty(target, "No worker executions in this date range.");
-    return;
-  }
-  const sorted = [...state.workerExecution].sort((a, b) =>
-    String(b.day).localeCompare(String(a.day)) || String(a.worker_id).localeCompare(String(b.worker_id)),
-  );
-  target.innerHTML = sorted.map((item) => `
-    <article class="estimate-card">
-      <div class="estimate-main">
-        <div><p class="eyebrow">${esc(formatDay(item.day))} UTC</p><h3>${esc(item.worker_id)}</h3></div>
-        <strong class="estimate-total">${esc(formatWorkerDuration(item.duration_seconds))}<small>worker runtime</small></strong>
-      </div>
-      <div class="source-breakdown">
-        <span>Runs <strong>${esc(item.run_count)}</strong></span>
-        <span>Active now <strong>${esc(item.active_runs)}</strong></span>
-      </div>
-    </article>
-  `).join("");
-}
 
 function renderDashboardActivity() {
   const target = $("dashboard-time");
@@ -1215,14 +1180,14 @@ function renderDashboardActivity() {
       memberName(a.user_id).localeCompare(memberName(b.user_id)),
     );
   if (!items.length) {
-    setEmpty(target, "No foreground dashboard activity in this date range.");
+    setEmpty(target, "No hours-worked estimates in this date range.");
     return;
   }
   const cards = items.map((item) => `
     <article class="estimate-card">
       <div class="estimate-main">
         <div><p class="eyebrow">${esc(formatDay(item.day))} UTC</p><h3>${esc(memberName(item.user_id))}</h3></div>
-        <strong class="estimate-total">${esc(formatWorkerDuration(item.dashboardSeconds))}<small>dashboard activity estimate</small></strong>
+        <strong class="estimate-total">${esc(formatWorkerDuration(item.dashboardSeconds))}<small>hours worked estimate</small></strong>
       </div>
     </article>
   `).join("");
@@ -1240,18 +1205,6 @@ async function reloadDashboardActivity() {
     if (handleAuthError(error)) return;
   }
   renderDashboardActivity();
-}
-async function reloadWorkerExecution() {
-  const from = encodeURIComponent($("worker-run-from").value);
-  const to = encodeURIComponent($("worker-run-to").value);
-  try {
-    state.workerExecution = await api(`/v1/dashboard/worker-execution?from=${from}&to=${to}`);
-    state.workerExecutionError = null;
-  } catch (error) {
-    state.workerExecutionError = error;
-    if (handleAuthError(error)) return;
-  }
-  renderWorkerExecution();
 }
 
 function switchView(view, updateHash = true) {
@@ -1335,7 +1288,6 @@ $("task-status-filter").addEventListener("change", () => {
   renderTasks();
   refreshAll().catch(() => {});
 });
- $("load-worker-runs").addEventListener("click", reloadWorkerExecution);
  $("load-dashboard-time").addEventListener("click", reloadDashboardActivity);
 $("identity-admin").addEventListener("click", (event) => {
   const mapButton = event.target.closest("[data-map-identity]");
@@ -1386,8 +1338,6 @@ $("logout").addEventListener("click", async () => {
   showLogin("You have signed out.");
 });
 
-$("worker-run-to").value = utcDateValue(new Date());
- $("worker-run-from").value = $("worker-run-to").value;
  $("dashboard-time-to").value = utcDateValue(new Date());
  $("dashboard-time-from").value = $("dashboard-time-to").value;
 for (const eventName of ["pointerdown", "touchstart", "click", "keydown"]) {

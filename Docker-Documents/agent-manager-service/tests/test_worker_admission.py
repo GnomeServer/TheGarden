@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import os
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -119,28 +116,3 @@ class WorkerStreamMigrationTests(unittest.IsolatedAsyncioTestCase):
         manager.add_stream.assert_not_awaited()
 
 
-WORKER_SOURCE = Path(os.environ.get(
-    "TEST_WORKER_SOURCE", str(Path(__file__).resolve().parents[3] / "agent-worker" / "worker.py")
-))
-
-
-class WorkerHealthTests(unittest.IsolatedAsyncioTestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        spec = importlib.util.spec_from_file_location("worker_under_test", WORKER_SOURCE)
-        cls.worker = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.worker)
-
-    async def test_disabled_worker_never_advertises_execution(self) -> None:
-        message = SimpleNamespace(reply="_INBOX.test", data=b"{}", respond=AsyncMock())
-        with patch.object(self.worker, "ALLOW_GENERATED_CODE", False):
-            await self.worker.respond_to_health(message)
-        message.respond.assert_not_awaited()
-
-    async def test_other_targets_and_malformed_requests_are_ignored(self) -> None:
-        for data in (b"{", b"[]", b"null", b'{"worker_id":"worker-02"}'):
-            with self.subTest(data=data):
-                message = SimpleNamespace(reply="_INBOX.test", data=data, respond=AsyncMock())
-                with patch.object(self.worker, "ALLOW_GENERATED_CODE", True), patch.object(self.worker, "WORKER_ID", "worker-03"):
-                    await self.worker.respond_to_health(message)
-                message.respond.assert_not_awaited()

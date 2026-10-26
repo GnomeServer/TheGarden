@@ -61,14 +61,15 @@ ansible-galaxy collection install -r requirements.yml
 `playbooks/docker-services.yml` deploys the projects named in `inventory/group_vars/docker_hosts.yml`, in this order:
 
 1. `caddy` at `/home/infra-lab-user/caddy-service` (`build: never`), which creates `caddy_proxy`
-2. `forgejo` at `/home/infra-lab-user/forgejo-service`
-3. `open-webui` at `/home/infra-lab-user/open-webui-service`
-4. `llama` at `/home/infra-lab-user/llama-service`
-5. `grafana` at `/home/infra-lab-user/grafana-service`
-6. `agent-manager` at `/home/infra-lab-user/agent-manager-service` (`build: always`)
-7. `api-guard-dashboard` at `/home/infra-lab-user/TheGarden/Docker-Documents/api-guard-dashboard` (`build: always`)
+2. `keybroker` at `/home/infra-lab-user/TheGarden/Docker-Documents/keybroker-service` (`build: always`)
+3. `forgejo` at `/home/infra-lab-user/forgejo-service`
+4. `open-webui` at `/home/infra-lab-user/open-webui-service`
+5. `llama` at `/home/infra-lab-user/llama-service`
+6. `grafana` at `/home/infra-lab-user/grafana-service`
+7. `agent-manager` at `/home/infra-lab-user/agent-manager-service` (`build: always`)
+8. `api-guard-dashboard` at `/home/infra-lab-user/TheGarden/Docker-Documents/api-guard-dashboard` (`build: always`)
 
-These are VM paths. Most Compose projects are separate deployment directories; API Guard uses the existing `TheGarden` checkout path shown above. The playbook does not copy source files, does not deploy `litellm-service`, and does not add `compose.worker-test.yml`. Keep API Guard's private `.env` in its checkout. Because `infra-lab-services` is a local connection, the playbook runs on the controller. It does not SSH to `10.1.10.2`.
+These are VM paths. Most Compose projects are separate deployment directories; Keybroker and API Guard use the existing `TheGarden` checkout path shown above. The playbook does not copy source files, does not deploy `litellm-service`, and does not add `compose.worker-test.yml`. Keep Keybroker, API Guard, Caddy proxy, and manager secrets in their deployment `.env` files. Because `infra-lab-services` is a local connection, the playbook runs on the controller. It does not SSH to `10.1.10.2`.
 
 Repository source directories:
 
@@ -81,6 +82,7 @@ TheGarden/Docker-Documents/grafana_services
 TheGarden/Docker-Documents/litellm-service
 TheGarden/Docker-Documents/agent-manager-service
 TheGarden/Docker-Documents/api-guard-dashboard
+TheGarden/Docker-Documents/keybroker-service
 ```
 
 Each project keeps its local `.env` file outside Git. Those files contain
@@ -119,12 +121,37 @@ ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/site.yml --check --diff
 ```
 
-`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, and CA
-certificates; copies `worker.py`, `mission.py`, and requirements; installs each
-worker's LiteLLM virtual key and Caddy root CA; writes the worker environment
-and start script; and starts the worker now and at reboot. Mission generation
-uses the Tailnet-only Caddy route at
-`https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
+Before the first worker rollout, stage Caddy's **public** root certificate on
+the Ansible controller. On the Caddy VM:
+
+```bash
+cd ~/caddy-service
+sudo docker compose exec -T caddy \
+  cat /data/caddy/pki/authorities/local/root.crt \
+  > /tmp/thegarden-caddy-root.crt
+```
+
+Copy that certificate to `/tmp/thegarden-caddy-root.crt` on the controller if
+the playbook runs elsewhere. The role fails before deleting any worker key if
+the certificate or authenticated worker identity check is missing. Never copy
+or distribute Caddy's `root.key`.
+
+`playbooks/agent-workers.yml` installs the worker runtime, Caddy root CA,
+Keybroker URL, and a supervised `dark-factory-agent-worker.service`. Workers
+obtain a model-scoped, budget-limited key per run, then revoke it on completion;
+the service does not receive a persistent LiteLLM key. Before the one-time
+cutover, Ansible checks Keybroker readiness and authenticates each host through
+`/v1/worker/identity` over HTTPS, then stops the old cron/systemd worker,
+removes `~/.config/litellm/worker-api-key`, verifies that the old process is
+gone, and records a cutover marker. It does not revoke the old LiteLLM key:
+after confirming each worker is using session keys, revoke legacy worker keys
+in API Guard. Subsequent playbook runs restart the service only when its code
+or configuration changes.
+
+The worker uses the Tailnet-only Caddy endpoint at
+`https://infra-lab-services.tail494f6d.ts.net/keybroker`. Check a host with
+`sudo systemctl status dark-factory-agent-worker` and
+`sudo journalctl -u dark-factory-agent-worker -n 100 --no-pager`.
 
 The worker process polls the shared durable `agent-workers-coder` consumer and
 sends a heartbeat every 15 seconds. The default `worker_nats_url` is
@@ -132,12 +159,12 @@ sends a heartbeat every 15 seconds. The default `worker_nats_url` is
 Mission artifacts are generated from the user's goal and saved under
 `AGENT_WORKSPACE/missions/`; the worker returns artifact contents to Agent
 Manager/Open WebUI. This flow does not clone or push the configured Forgejo
-repository.
+repository, and generated artifacts are not executed by mission runs.
 
-The Tailscale machines `michelangelo` and `dell-drd17c4` (Sammy) are not
-registered as workers because their owners have not opted in yet. Do not run
-the worker playbook against them until they are ready and provide their SSH
-login and worker-scoped LiteLLM key paths.
+Only the four enrolled workers in `inventory/hosts.yml` receive Keybroker
+access. `michelangelo` and `sammy` remain unregistered until their owners opt
+in and their SSH/Tailscale identities are enrolled. Do not leave their old
+static keys active while they remain out of band.
 
 Use `--ask-become-pass` because package installation and system CA trust require
 privilege. `allow_generated_code` remains `false`; the separate
