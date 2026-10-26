@@ -118,16 +118,17 @@ TheGarden/agent-worker/README.md
 `playbooks/agent-workers.yml` installs Python, a virtualenv, cron, CA trust,
 and process-management tools; copies `worker.py`, requirements, and the OMP job
 image sources; builds the pinned image; installs each worker's LiteLLM key and
-Caddy root certificate; and manages the worker with systemd. Source,
-environment, certificate, and image changes restart the service. The playbook
-removes the legacy cron entry and obsolete `mission.py` module. Mission output
-is uploaded to Agent Manager's PostgreSQL artifact store and returned as a
-signed download link; the temporary OMP workspace is removed after upload.
-`allow_generated_code` remains `false`; the separate `create-python-script`
-operation is unsandboxed if explicitly enabled.
+Caddy root certificate; and manages the worker with systemd. Targets deploy one
+at a time. Source, environment, certificate, and image changes restart the
+service. The playbook removes the legacy cron entry and obsolete `mission.py`
+module. Mission output is uploaded to Agent Manager's PostgreSQL artifact store
+and returned as a signed download link; the temporary OMP workspace is removed
+after upload.
 
-Use `--ask-become-pass` for package installation and system CA trust. Each
-worker requires its own LiteLLM virtual key.
+`allow_generated_code` is false by default. This blocks only the separate,
+unsandboxed `create-python-script` operation; OMP mission coding remains enabled.
+Only explicitly enable it on a worker if unsandboxed code execution is
+deliberately accepted. Each worker requires its own LiteLLM virtual key.
 
 ## Proxmox validation
 

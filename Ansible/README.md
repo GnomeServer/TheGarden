@@ -133,29 +133,35 @@ or push the configured Forgejo repository.
 
 `playbooks/agent-workers.yml` installs the Python queue consumer, writes
 `~/agent-worker/worker.env`, copies `agent-worker/omp-image/`, builds the pinned
-OMP job image, and manages `dark-factory-agent-worker` with systemd. Source,
-environment, certificate, and image changes notify one service restart. Legacy
-cron-started workers are stopped during the one-time cutover. The worker user
-needs Docker access; membership in the Docker group is root-equivalent. The
-separate `create-python-script` operation remains disabled by default and runs
-generated code unsandboxed if explicitly enabled.
+OMP job image, and manages `dark-factory-agent-worker` with systemd. The play
+deploys one host at a time. Source, environment, certificate, and image changes
+restart that host's service. Legacy cron-started workers are stopped during the
+one-time cutover. The worker user needs Docker access; membership in the Docker
+group is root-equivalent. The playbook does not install Docker or Tailscale.
 
-The Tailscale machines `michelangelo` and `dell-drd17c4` (Sammy) are not
-registered as workers because their owners have not opted in yet. Do not run
-the worker playbook against them until they are ready and provide their SSH
-login and worker-scoped LiteLLM key paths.
+`allow_generated_code` is false by default. OMP `mission` jobs still run in the
+pinned image and perform normal code generation and review. Only the separate
+`create-python-script` operation is blocked; it runs generated code unsandboxed
+if explicitly enabled.
 
-Set the target to an enrolled inventory host before running these commands:
+Only onboard workers after their owners opt in. Do not run the playbook against
+`michelangelo` or `dell-drd17c4` until their owners approve and provide SSH login
+and a worker-scoped LiteLLM key. For a new worker, prepare an apt-based
+Linux/systemd host with SSH, Python 3, Docker access, and Tailscale reachability
+to NATS and LiteLLM. Add its Tailscale address, SSH user, unique `worker_id`,
+role, and controller-side `litellm_key_source` to `inventory/hosts.yml`. Ensure
+the Caddy root CA is available at `caddy_root_ca_source`.
+
+From `Ansible/`, ping and deploy only the approved target:
 
 ```bash
-cd Ansible
-WORKER_HOST=inkii
+WORKER_HOST=inkii # replace with the approved inventory host
 ansible agent_workers --limit "$WORKER_HOST" -m ansible.builtin.ping
 ansible-playbook playbooks/agent-workers.yml --limit "$WORKER_HOST" --ask-become-pass
+ansible "$WORKER_HOST" -m ansible.builtin.command -a "systemctl is-active dark-factory-agent-worker"
 ```
 
 `--ask-become-pass` is needed for package installation, system CA trust, and
-systemd management. Before the run, from the repository root run
-`scripts/export_caddy_root_ca.sh` (or `../scripts/export_caddy_root_ca.sh` from
-`Ansible/`) and place the worker-scoped LiteLLM key at the inventory host's
-`litellm_key_source`. Do not commit key files.
+systemd management. Before deployment, export the Caddy root CA with
+`../scripts/export_caddy_root_ca.sh` from `Ansible/` and place the worker-scoped
+key at the host's `litellm_key_source`. Do not commit key files.

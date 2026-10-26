@@ -81,5 +81,7 @@ ansible-playbook playbooks/agent-workers.yml --syntax-check
 
 The worker role installs the dynamic model-backed mission runner, a worker-scoped
 LiteLLM key, and Caddy's internal CA certificate. It configures the Tailnet
-LiteLLM route and starts the worker now and at reboot. See
+LiteLLM route and starts the worker now and at reboot. `allow_generated_code`
+is false by default; that blocks only legacy unsandboxed `create-python-script`
+execution, not OMP mission coding. See
 `TheGarden/agent-worker/README.md` for the mission artifact and status behavior.

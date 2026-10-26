@@ -95,7 +95,23 @@ The existing `inventory/worker-1.yml` is an optional single-worker inventory
 for isolated testing. Do not load it together with `hosts.yml` unless you
 intentionally want to maintain duplicate definitions for `inkii`.
 
-The worker runtime is installed by `playbooks/agent-workers.yml`. Add a laptop by uncommenting a host like `michelangelo` in `hosts.yml`, then run `ansible-playbook playbooks/agent-workers.yml --limit michelangelo --ask-become-pass`. Do not load `proxmox-guests.example.yml` beside `hosts.yml`.
+`playbooks/agent-workers.yml` provisions the worker systemd service one host at
+a time. Only onboard a host after its owner opts in. Prepare an apt-based
+Linux/systemd laptop with SSH, Python 3, Docker access, and Tailscale reachability
+to NATS/LiteLLM. Add its Tailscale address, SSH user, unique worker ID, role,
+and controller-side LiteLLM key path in `hosts.yml`; ensure the Caddy root CA
+is available to the controller. From `Ansible/`, target only that approved host:
+
+```bash
+WORKER_HOST=inkii # replace with the approved inventory host
+ansible agent_workers --limit "$WORKER_HOST" -m ansible.builtin.ping
+ansible-playbook playbooks/agent-workers.yml --limit "$WORKER_HOST" --ask-become-pass
+```
+
+`allow_generated_code` is false by default. That disables only legacy,
+unsandboxed `create-python-script` execution; OMP mission coding is unaffected.
+See `../README.md` for the complete procedure. Do not load
+`proxmox-guests.example.yml` beside `hosts.yml`.
 
 ## Proxmox guest template
 
