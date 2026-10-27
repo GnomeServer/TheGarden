@@ -10,6 +10,12 @@ Initialize `reviewer_count` to 0 for each review cycle. Increment it once for ea
 
 When the mission contains a user clarification, continue from the existing files in `/work`; do not discard prior work. Treat that clarification as authoritative context, reset `reviewer_count` to 0 for the new review cycle, and allow a fresh set of up to ten coder-reviewer attempts.
 
+When the mission JSON has `modifies_existing_artifact: true`, `/work` starts
+with the user's current artifact files. Treat them as the existing product:
+make the requested changes in place, preserve files the user did not ask to
+remove, and include every remaining deliverable in the final `artifacts`
+manifest. Do not rebuild the project from scratch unless the user asks.
+
 Do not access credentials, clone/push repositories, merge, deploy, or use network tools. Keep all work under `/work`. Run only relevant, bounded local checks. The `repo` and `base_ref` in the mission are identifiers; this image has no Forgejo credential or repository checkout.
 
 The worker wrapper requires the final assistant message to be exactly one JSON object, with no code fence or extra prose. Do not use `pending` or a progress summary as the final status.

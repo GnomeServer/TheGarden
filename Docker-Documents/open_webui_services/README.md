@@ -166,6 +166,16 @@ cancelled runs clean their workspaces; `needs_input` preserves a worker-local
 checkpoint until the user clarifies or cancels. Download completed artifacts
 before their links expire.
 
+To modify a delivered product, continue in the same conversation and start the
+request with an instruction such as “Add a dark mode to the app.” The Pipe uses
+the latest completed artifact link to start a new child mission; the original
+artifact stays unchanged and the child returns a separate ZIP. Start a new
+conversation for an unrelated mission.
+
+The Pipe supplies the Open WebUI user ID; the Manager rejects attempts to use
+another user's artifact. Only missions completed after this Pipe version
+records user IDs can be modified; older artifacts lack that ownership binding.
+
 The Pipe's `AGENT_MANAGER_API_TOKEN` valve must be set to the separate
 run-only `AGENT_MANAGER_OPENWEBUI_TOKEN` from Agent Manager's private `.env`.
 Do not use the administrator `AGENT_MANAGER_API_TOKEN` or a LiteLLM key.

@@ -32,6 +32,11 @@ mission instead of creating another run. The dashboard shows the current run
 phase and worker, refreshing every 30 seconds; per-agent model calls are
 summarized after the crew finishes rather than streamed live.
 
+In the same Open WebUI conversation, a follow-up modification starts a new child
+mission from the latest completed ZIP. The Manager accepts only a completed
+artifact owned by the authenticated run actor; the worker starts from those
+files and returns a new ZIP. The original mission and artifact remain unchanged.
+
 The dashboard's worker runtime view aggregates `RunRecord` start and completion
 timestamps by worker and UTC day. The
 `/v1/dashboard/worker-execution?from=YYYY-MM-DD&to=YYYY-MM-DD` endpoint returns
@@ -298,6 +303,25 @@ a different second artifact. Artifact bytes are stored in the
 and a signed download URL that expires after seven days. Daily cleanup removes
 artifact rows after the default 30-day retention period; set
 `ARTIFACT_RETENTION_DAYS` to change the retention period.
+
+## Modifying a completed artifact
+
+`POST /v1/omp/turns` accepts an optional `parent_mission_id` for a requested
+modification. The Manager validates that the parent is completed, belongs to
+the run-submission actor, and still has a retained artifact. For Open WebUI,
+it also checks the requester ID supplied by the Pipe against the ID recorded
+on the parent mission; older missions without that ID cannot be used as sources.
+The Manager publishes each child with a fresh signed source-download URL; that
+URL is carried only in the worker event. The worker verifies TLS, checksum,
+size, and ZIP paths before placing the source files under `/work`. Each
+modification receives a new mission ID and artifact; it does not overwrite
+the parent.
+
+In Open WebUI, continue in the same conversation and begin the request with a
+modification such as “Add a dark mode to the app.” The Pipe uses the most recent
+completed artifact link in that conversation. Start a separate conversation
+when requesting an unrelated mission.
+
 
 ## Mission cancellation
 

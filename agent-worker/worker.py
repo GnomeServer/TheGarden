@@ -2,6 +2,7 @@
 """Long-running Agent Manager worker for model-driven missions and scripts."""
 
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -11,18 +12,18 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import tempfile
 import time
-import sys
 import unicodedata
 import urllib.error
 import urllib.request
-import zipfile
-from pathlib import Path, PurePosixPath
-from urllib.parse import quote, urlsplit
 import uuid
+import zipfile
 from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import parse_qs, quote, urlsplit
 
 import nats
 from nats.errors import TimeoutError as NatsTimeoutError
@@ -561,6 +562,153 @@ def upload_artifact(
     return descriptor
 
 
+def download_parent_artifact(
+    artifact_input: Any,
+    ca_file: Path | None,
+) -> bytes:
+    """Fetch a signed source ZIP only from the configured Manager endpoint."""
+    if not isinstance(artifact_input, dict):
+        raise ValueError("modification mission omitted its source artifact")
+    parent_id = artifact_input.get("parent_mission_id")
+    artifact_id = artifact_input.get("artifact_id")
+    download_url = artifact_input.get("download_url")
+    filename = artifact_input.get("filename")
+    content_type = artifact_input.get("content_type")
+    expected_size = artifact_input.get("size_bytes")
+    expected_digest = artifact_input.get("sha256")
+    try:
+        if str(uuid.UUID(parent_id)) != parent_id or str(uuid.UUID(artifact_id)) != artifact_id:
+            raise ValueError
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("source artifact identifiers are invalid") from None
+    if (
+        not isinstance(download_url, str)
+        or not isinstance(filename, str)
+        or not filename.casefold().endswith(".zip")
+        or content_type != "application/zip"
+        or type(expected_size) is not int
+        or not 0 < expected_size <= MAX_ARTIFACT_BYTES
+        or not isinstance(expected_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+    ):
+        raise ValueError("source artifact descriptor is invalid")
+
+    parsed_url = urlsplit(download_url)
+    try:
+        port = parsed_url.port
+        query = parse_qs(parsed_url.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        raise ValueError("source artifact URL is invalid") from None
+    expected_path = (
+        f"/v1/omp/missions/{quote(parent_id, safe='')}/artifacts/"
+        f"{quote(artifact_id, safe='')}/download"
+    )
+    allowed_netlocs = {CADDY_HOST.lower(), f"{CADDY_HOST.lower()}:443"}
+    if (
+        parsed_url.scheme != "https"
+        or parsed_url.hostname != CADDY_HOST.lower()
+        or parsed_url.netloc.lower() not in allowed_netlocs
+        or port not in (None, 443)
+        or parsed_url.path != expected_path
+        or set(query) != {"expires", "signature"}
+        or any(len(values) != 1 for values in query.values())
+        or not query["expires"][0].isdigit()
+        or not re.fullmatch(r"[0-9a-f]{64}", query["signature"][0])
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.fragment
+    ):
+        raise ValueError("source artifact URL must target the signed Manager download route")
+    if ca_file is None or not ca_file.is_file():
+        raise ValueError("MODEL_CA_FILE is required to verify source artifact TLS")
+
+    request = urllib.request.Request(
+        download_url,
+        headers={"Accept": "application/zip"},
+        method="GET",
+    )
+    context = ssl.create_default_context(cafile=str(ca_file))
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=context),
+        _RejectArtifactRedirects(),
+    )
+    try:
+        with opener.open(request, timeout=60) as response:
+            content = response.read(MAX_ARTIFACT_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"source artifact download failed with HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("source artifact download failed; verify Manager reachability and TLS") from None
+    if len(content) != expected_size or len(content) > MAX_ARTIFACT_BYTES:
+        raise ValueError("source artifact size does not match its descriptor")
+    if hashlib.sha256(content).hexdigest() != expected_digest:
+        raise ValueError("source artifact checksum does not match its descriptor")
+    return content
+
+
+def extract_artifact_zip(content: bytes, work_dir: Path) -> list[str]:
+    """Safely unpack a bounded Manager ZIP into a fresh mission workspace."""
+    if not content or len(content) > MAX_ARTIFACT_BYTES:
+        raise ValueError("source artifact ZIP is empty or exceeds the size limit")
+    root = work_dir.resolve(strict=True)
+    names: list[str] = []
+    seen: set[str] = set()
+    total_size = 0
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            infos = archive.infolist()
+            if not infos or len(infos) > MAX_ARTIFACT_FILES:
+                raise ValueError("source artifact ZIP has an invalid file count")
+            for info in infos:
+                name = info.filename
+                relative = PurePosixPath(name)
+                if (
+                    not name
+                    or "\x00" in name
+                    or "\\" in name
+                    or relative.is_absolute()
+                    or not relative.parts
+                    or relative.as_posix() != name
+                    or any(part in {"", ".", ".."} for part in relative.parts)
+                    or re.match(r"^[A-Za-z]:", relative.parts[0])
+                    or any(char in name for char in "\r\n")
+                    or info.is_dir()
+                    or info.flag_bits & 0x1
+                    or stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFREG)
+                    or name in seen
+                ):
+                    raise ValueError(f"source artifact contains an unsafe path: {name!r}")
+                seen.add(name)
+                if info.file_size < 0 or info.file_size > MAX_ARTIFACT_BYTES:
+                    raise ValueError("source artifact ZIP contains an oversized file")
+                total_size += info.file_size
+                if total_size > MAX_ARTIFACT_BYTES:
+                    raise ValueError("source artifact ZIP exceeds the expanded size limit")
+
+                destination = root.joinpath(*relative.parts)
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if not destination.parent.resolve(strict=True).is_relative_to(root):
+                    raise ValueError("source artifact path escapes its workspace")
+                written = 0
+                with archive.open(info) as source, destination.open("xb") as target:
+                    while True:
+                        chunk = source.read(64 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > info.file_size or written > MAX_ARTIFACT_BYTES:
+                            raise ValueError("source artifact expanded beyond its declared size")
+                        target.write(chunk)
+                if written != info.file_size:
+                    raise ValueError("source artifact file size does not match its ZIP entry")
+                names.append(name)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("source artifact is not a valid ZIP archive") from exc
+    return names
+
+
 def get_mission_control(
     control_url: Any,
     upload_token: Any,
@@ -664,6 +812,24 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
     resume_from_checkpoint = metadata.get("resume_from_checkpoint") is True
     checkpoint_retained = False
 
+    parent_mission_id = metadata.get("parent_mission_id")
+    artifact_input = metadata.get("artifact_input")
+    if (parent_mission_id is None) != (artifact_input is None):
+        return {
+            "status": "failed",
+            "summary": "The worker received incomplete artifact modification metadata.",
+        }
+    if artifact_input is not None and (
+        not isinstance(parent_mission_id, str)
+        or not isinstance(artifact_input, dict)
+        or artifact_input.get("parent_mission_id") != parent_mission_id
+        or resume_from_checkpoint
+    ):
+        return {
+            "status": "failed",
+            "summary": "The worker received invalid artifact modification metadata.",
+        }
+
     ca_file = Path(MODEL_CA_FILE).expanduser() if MODEL_CA_FILE.strip() else None
     if ca_file is None or not ca_file.is_file():
         return {
@@ -738,6 +904,8 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
         "clarification": metadata.get("clarification"),
         "reviewer_feedback": metadata.get("reviewer_feedback"),
         "reviewer_count_start": 0,
+        "parent_mission_id": parent_mission_id,
+        "modifies_existing_artifact": artifact_input is not None,
     }
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="omp-mission-", dir=WORKSPACE) as temporary:
@@ -756,6 +924,20 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
         else:
             work_dir = run_dir / "work"
             work_dir.mkdir()
+            if artifact_input is not None:
+                try:
+                    parent_archive = await asyncio.to_thread(
+                        download_parent_artifact, artifact_input, ca_file
+                    )
+                    await asyncio.to_thread(
+                        extract_artifact_zip, parent_archive, work_dir
+                    )
+                except Exception as exc:
+                    return {
+                        "status": "failed",
+                        "summary": "The worker could not load the completed artifact for modification.",
+                        "error": f"{type(exc).__name__}: {exc}"[:1000],
+                    }
         mission_path.write_text(
             json.dumps(mission, ensure_ascii=False) + "\n", encoding="utf-8"
         )
@@ -831,6 +1013,18 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
 
         watcher = asyncio.create_task(watch_cancellation())
         try:
+            if artifact_input is not None:
+                source_control = await asyncio.to_thread(
+                    get_mission_control, control_url, upload_token, run_id, ca_file
+                )
+                if (
+                    source_control.get("cancel_requested")
+                    or source_control.get("status") in {"cancel_requested", "cancelled"}
+                ):
+                    return {
+                        "status": "cancelled",
+                        "summary": "Mission cancelled at the user's request.",
+                    }
             if cancellation.is_set():
                 return {
                     "status": "cancelled",

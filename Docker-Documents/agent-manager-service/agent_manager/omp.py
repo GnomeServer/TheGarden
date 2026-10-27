@@ -22,11 +22,12 @@ from .artifacts import (
     provision_upload_capability,
     upload_event_metadata,
     upload_token_hash,
+    validate_artifact_id,
 )
 from .auth import require_run_submission
 from .dashboard import record_activity
 from .database import get_session
-from .models import RunRecord, UserRecord
+from .models import ArtifactBlobRecord, RunRecord, UserRecord
 from .settings import settings
 from .crew_rules import attach_project_reply, crew_label, crew_size, is_chat_turn, missing_requirements
 from .orchestrator import ask_model, dispatch_to_worker
@@ -47,17 +48,71 @@ class OmpTurn(BaseModel):
     model: str | None = Field(default=None, max_length=512)
     mission_id: uuid.UUID | None = None
     cancel_token: str | None = Field(default=None, min_length=32, max_length=128)
+    parent_mission_id: uuid.UUID | None = None
+    requester_id: str | None = Field(default=None, max_length=255)
 
     @model_validator(mode="after")
-    def validate_cancel_capability(self) -> "OmpTurn":
+    def validate_capabilities(self) -> "OmpTurn":
         if (self.mission_id is None) != (self.cancel_token is None):
             raise ValueError("mission_id and cancel_token must be provided together")
+        if self.parent_mission_id is not None and not self.goal.strip():
+            raise ValueError("goal is required to modify a parent mission")
         return self
 
 
 class MissionClarification(BaseModel):
     clarification: str = Field(min_length=1, max_length=10000)
 
+
+
+async def load_modification_source(
+    parent_mission_id: uuid.UUID,
+    actor: UserRecord,
+    session: AsyncSession,
+    requester_id: str | None = None,
+) -> tuple[RunRecord, dict[str, Any]]:
+    parent = await session.get(RunRecord, str(parent_mission_id))
+    metadata = parent.run_metadata or {} if parent is not None else {}
+    if (
+        parent is None
+        or metadata.get("operation") != "mission"
+        or metadata.get("submitted_by") != actor.id
+        or parent.status != "completed"
+    ):
+        raise HTTPException(status_code=404, detail="Completed parent artifact not found")
+
+    if metadata.get("source") == "open-webui" and (
+        not isinstance(requester_id, str)
+        or not requester_id
+        or metadata.get("requester_id") != requester_id
+    ):
+        raise HTTPException(status_code=404, detail="Completed parent artifact not found")
+
+    stored_artifact = metadata.get("artifact")
+    artifact_id = stored_artifact.get("id") if isinstance(stored_artifact, dict) else None
+    if not isinstance(artifact_id, str) or not validate_artifact_id(artifact_id):
+        raise HTTPException(status_code=404, detail="Completed parent artifact not found")
+    blob = await session.get(ArtifactBlobRecord, artifact_id)
+    if blob is None or blob.run_id != parent.id:
+        raise HTTPException(status_code=404, detail="Completed parent artifact not found")
+    if blob.content_type != "application/zip" or not blob.filename.casefold().endswith(".zip"):
+        raise HTTPException(status_code=409, detail="Parent artifact is not a ZIP")
+
+    descriptor = mission_artifact(
+        {
+            "artifact": {
+                "id": blob.id,
+                "filename": blob.filename,
+                "content_type": blob.content_type,
+                "size_bytes": blob.size_bytes,
+                "sha256": blob.sha256,
+            }
+        },
+        parent.id,
+    )
+    if descriptor is None:
+        raise HTTPException(status_code=404, detail="Completed parent artifact not found")
+    return parent, descriptor
 
 def question(text: str) -> dict[str, str]:
     return {"type": "question", "text": text}
@@ -83,7 +138,9 @@ def mission_reply(
 def omp_decision(body: OmpTurn) -> dict[str, str] | None:
     """Return a question, or None when the turn is ready for the orchestrator."""
     goal = body.goal.strip()
-    if not goal or GREETING.match(goal) or len(goal) < 12:
+    if body.parent_mission_id is None and (
+        not goal or GREETING.match(goal) or len(goal) < 12
+    ):
         return question("What should the crew do?")
     if not body.forgejo_repository.strip():
         return question("Which Forgejo repository should this mission use? For example owner/project.")
@@ -98,12 +155,36 @@ async def accept_or_bounce(
     actor: UserRecord,
     request: Request,
     session: AsyncSession,
+    parent_record: RunRecord | None = None,
+    parent_artifact: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Record a mission and hand its planned work to the central orchestrator."""
-    repository = body.forgejo_repository.strip()
-    project = (body.project_name or "").strip()
+    if body.parent_mission_id is not None:
+        if parent_record is None or parent_artifact is None:
+            parent_record, parent_artifact = await load_modification_source(
+                body.parent_mission_id, actor, session, body.requester_id
+            )
+        if parent_record.id != str(body.parent_mission_id):
+            raise HTTPException(status_code=404, detail="Completed parent artifact not found")
+    else:
+        parent_record = None
+        parent_artifact = None
+
+    parent_metadata = dict(parent_record.run_metadata or {}) if parent_record else {}
+    repository = (
+        parent_record.forgejo_repository
+        if parent_record
+        else body.forgejo_repository.strip()
+    )
+    project = (
+        str(parent_metadata.get("project_name") or body.project_name or "").strip()
+    )
     bounced = not REPO_PATTERN.match(repository)
-    gap = None if bounced else missing_requirements(body.goal.strip())
+    gap = (
+        None
+        if bounced or parent_record
+        else missing_requirements(body.goal.strip())
+    )
     size = crew_size(body.goal.strip())
     bounce = "Need a Forgejo repository in owner/project form." if bounced else gap
     bounce_to = "omp" if bounce else "none"
@@ -132,12 +213,18 @@ async def accept_or_bounce(
         },
         "crew": {"size": size, "host": "starting"},
     }
+
+    if source == "open-webui" and body.requester_id:
+        metadata["requester_id"] = body.requester_id
+    if parent_record is not None and parent_artifact is not None:
+        metadata["parent_mission_id"] = parent_record.id
+        metadata["parent_artifact_id"] = parent_artifact["id"]
     record = RunRecord(
         id=mission_id,
         goal=body.goal.strip(),
         forgejo_repository=repository or "unspecified",
-        base_ref="main",
-        model=body.model,
+        base_ref=parent_record.base_ref if parent_record else "main",
+        model=(body.model or parent_record.model) if parent_record else body.model,
         status="bounced" if bounce else "accepted",
         run_metadata=metadata,
     )
@@ -152,15 +239,28 @@ async def accept_or_bounce(
         run_id=mission_id,
         repository=record.forgejo_repository,
         summary=summary[:200],
-        payload={"bounce_to": bounce_to},
+        payload={
+            "bounce_to": bounce_to,
+            **(
+                {"parent_mission_id": parent_record.id}
+                if parent_record is not None
+                else {}
+            ),
+        },
     )
     if bounce:
         await session.commit()
         return question(bounce or "The orchestrator sent this mission back.")
-    summary = (
-        f"OMP handed the job to a worker laptop. "
-        f"The worker runs {crew_label(size)}."
-    )
+    if parent_record is not None:
+        summary = (
+            f"OMP started a modification of mission {parent_record.id}. "
+            f"The worker runs {crew_label(size)}."
+        )
+    else:
+        summary = (
+            f"OMP handed the job to a worker laptop. "
+            f"The worker runs {crew_label(size)}."
+        )
     metadata = dict(record.run_metadata or {})
     ledger = dict(metadata.get("ledger") or {})
     ledger["result_summary"] = summary[:200]
@@ -186,15 +286,26 @@ async def accept_or_bounce(
     upload_token, upload_url = provision_upload_capability(record)
     record.status = "queued"
     await session.commit()
+    event_metadata = upload_event_metadata(record, upload_token, upload_url)
+    if parent_record is not None and parent_artifact is not None:
+        event_metadata["artifact_input"] = {
+            "parent_mission_id": parent_record.id,
+            "artifact_id": parent_artifact["id"],
+            "filename": parent_artifact["filename"],
+            "content_type": parent_artifact["content_type"],
+            "size_bytes": parent_artifact["size_bytes"],
+            "sha256": parent_artifact["sha256"],
+            "download_url": parent_artifact["download_url"],
+        }
     event = {
         "event": "run.created",
         "event_id": str(uuid.uuid4()),
         "run_id": mission_id,
         "goal": body.goal.strip(),
         "forgejo_repository": record.forgejo_repository,
-        "base_ref": "main",
-        "model": body.model,
-        "metadata": upload_event_metadata(record, upload_token, upload_url),
+        "base_ref": record.base_ref,
+        "model": record.model,
+        "metadata": event_metadata,
     }
     try:
         await dispatch_to_worker(request.app.state.nats.jetstream(), event)
@@ -210,24 +321,57 @@ async def omp_turn(
     actor: UserRecord = Depends(require_run_submission),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
-    pending = PENDING.get(actor.id)
-    pending_goal = pending[1] if pending and time.monotonic() - pending[0] < PENDING_SECONDS else None
-    goal, project_name = attach_project_reply(body.goal, pending_goal)
-    if project_name:
-        PENDING.pop(actor.id, None)
-        body = body.model_copy(update={"goal": goal, "project_name": project_name})
-    if is_chat_turn(body.goal):
-        return await answer_chat(body.goal.strip(), actor, request, session, body.project_name)
-    gap = missing_requirements(body.goal)
-    if gap:
-        return question(gap)
-    if not (body.project_name or "").strip():
-        body = body.model_copy(update={"project_name": chat_title(body.goal, None)})
+    parent_record = None
+    parent_artifact = None
+    if body.parent_mission_id is not None:
+        try:
+            parent_record, parent_artifact = await load_modification_source(
+                body.parent_mission_id, actor, session, body.requester_id
+            )
+        except HTTPException:
+            await session.rollback()
+            raise
+        parent_metadata = parent_record.run_metadata or {}
+        parent_project = parent_metadata.get("project_name")
+        if not isinstance(parent_project, str) or not parent_project.strip():
+            parent_project = chat_title(parent_record.goal, None)
+        body = body.model_copy(
+            update={
+                "forgejo_repository": parent_record.forgejo_repository,
+                "project_name": parent_project,
+                "model": body.model or parent_record.model,
+            }
+        )
+    else:
+        pending = PENDING.get(actor.id)
+        pending_goal = (
+            pending[1]
+            if pending and time.monotonic() - pending[0] < PENDING_SECONDS
+            else None
+        )
+        goal, project_name = attach_project_reply(body.goal, pending_goal)
+        if project_name:
+            PENDING.pop(actor.id, None)
+            body = body.model_copy(update={"goal": goal, "project_name": project_name})
+        if is_chat_turn(body.goal):
+            return await answer_chat(
+                body.goal.strip(), actor, request, session, body.project_name
+            )
+        gap = missing_requirements(body.goal)
+        if gap:
+            return question(gap)
+        if not (body.project_name or "").strip():
+            body = body.model_copy(
+                update={"project_name": chat_title(body.goal, None)}
+            )
+
     reply = omp_decision(body)
     if reply is not None:
         return reply
     try:
-        return await accept_or_bounce(body, actor, request, session)
+        return await accept_or_bounce(
+            body, actor, request, session, parent_record, parent_artifact
+        )
     except HTTPException:
         await session.rollback()
         raise
@@ -353,6 +497,7 @@ async def mission_status(
         "crew_outcome": result.get("crew_outcome"),
         "worker_id": record.worker_id,
         "reviewer_count": reviewer_count,
+        "parent_mission_id": metadata.get("parent_mission_id"),
         "artifact": mission_artifact(metadata, record.id) if record.status == "completed" else None,
     }
 

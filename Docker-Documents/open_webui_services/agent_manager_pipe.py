@@ -243,6 +243,48 @@ class Pipe:
                 return matches[-1]
         return None
 
+    @staticmethod
+    def _is_modification_request(text: str) -> bool:
+        instruction = (
+            r"^\s*(?:(?:please|can you|could you|would you|i want you to|"
+            r"i want to|i'd like you to|i'd like to|i would like you to|"
+            r"i would like to)\s+)?"
+            r"(?:modify|change|update|revise|edit|improve|fix|add|remove|replace|"
+            r"redesign|tweak|customize|customise|polish)\b"
+        )
+        make_request = (
+            r"^\s*(?:(?:please|can you|could you|would you)\s+)?"
+            r"make\s+(?:it|this|that|the\s+[\w-]+)\b"
+        )
+        return bool(
+            re.match(instruction, text, re.IGNORECASE)
+            or re.match(make_request, text, re.IGNORECASE)
+        )
+
+    @classmethod
+    def _modification_parent_mission_id(
+        cls, history: list[tuple[str, str]]
+    ) -> tuple[bool, str | None]:
+        if not history or history[-1][0] != "user":
+            return False, None
+        if not cls._is_modification_request(history[-1][1]):
+            return False, None
+        artifact_link = re.compile(
+            r"/v1/omp/missions/"
+            r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+            r"/artifacts/"
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+            r"/download\b",
+            re.IGNORECASE,
+        )
+        for role, text in reversed(history[:-1]):
+            if role != "assistant":
+                continue
+            match = artifact_link.search(text)
+            if match:
+                return True, match.group(1)
+        return True, None
+
 
     @classmethod
     def _format_mission_status(
@@ -288,12 +330,30 @@ class Pipe:
         __event_emitter__: Any = None,
         __event_call__: Any = None,
     ) -> str:
-        del __user__
+        requester_id = None
+        if isinstance(__user__, dict):
+            raw_user_id = __user__.get("id")
+            if isinstance(raw_user_id, (str, int)) and not isinstance(raw_user_id, bool):
+                requester_id = str(raw_user_id).strip() or None
+                if requester_id is not None and len(requester_id) > 255:
+                    requester_id = None
         history = self._history(body)
         if not history or history[-1][0] != "user":
             return "Could not send the chat turn to OMP: no latest user message was found."
         latest_message = history[-1][1]
         status_query = self._is_status_query(latest_message)
+        modification_request, parent_mission_id = (
+            self._modification_parent_mission_id(history)
+            if not status_query
+            else (False, None)
+        )
+        if modification_request and parent_mission_id is None:
+            return (
+                "I couldn't find a completed artifact earlier in this chat. "
+                "Ask for the modification in the conversation that contains its download link."
+            )
+        if modification_request and requester_id is None:
+            return "Could not identify the Open WebUI user for this artifact modification."
         mission_id = self._mission_id_from_history(history[:-1]) if status_query else None
         if status_query and not mission_id:
             return "I couldn't find a mission ID earlier in this chat. Open the original mission or include its ID."
@@ -330,6 +390,10 @@ class Pipe:
                 "mission_id": mission_id,
                 "cancel_token": cancel_token,
             }
+        if parent_mission_id is not None:
+            request_body["parent_mission_id"] = parent_mission_id
+        if requester_id is not None:
+            request_body["requester_id"] = requester_id
         await self._emit_status(
             __event_emitter__,
             "Checking mission status…" if status_query else "Asking OMP…",

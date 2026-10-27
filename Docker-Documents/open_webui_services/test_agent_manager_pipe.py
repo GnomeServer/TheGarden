@@ -141,7 +141,7 @@ class FakeAgentManagerClient:
                 {"status": "queued", "summary": "Clarification received; resuming."}
             )
         self.request_body = request_body
-        if not request_body.get("project_name"):
+        if not request_body.get("project_name") and not request_body.get("parent_mission_id"):
             return FakeResponse(
                 {"type": "question", "text": "What project name should this mission use?"}
             )
@@ -324,6 +324,78 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
+
+
+    async def test_modification_followup_uses_previous_completed_artifact(self) -> None:
+        pipe = self.configured_pipe()
+        client = FakeAgentManagerClient()
+        parent_id = "8a9e15ac-4f53-45b1-a7c8-34f7c8b0e3a1"
+        artifact_id = "4ba9c3c2-61b8-4b66-b5d5-804547e64ab1"
+        artifact_url = (
+            "https://manager.example/v1/omp/missions/"
+            f"{parent_id}/artifacts/{artifact_id}/download?expires=123&signature=abc"
+        )
+        messages = [
+            {"role": "user", "content": "Build a calculator."},
+            {
+                "role": "assistant",
+                "content": (
+                    f"Mission `{parent_id}` completed.\n"
+                    f"Download the completed work:\n- [artifacts.zip]({artifact_url})"
+                ),
+            },
+            {"role": "user", "content": "Can you add a dark mode to the app?"},
+        ]
+
+        with patch.object(agent_manager_pipe.httpx, "AsyncClient", return_value=client):
+            result = await pipe.pipe(
+                {"messages": messages},
+                __user__={"id": "openwebui-user-1"},
+            )
+
+        self.assertEqual(client.request_body["parent_mission_id"], parent_id)
+        self.assertEqual(client.request_body["requester_id"], "openwebui-user-1")
+        self.assertEqual(
+            client.request_body["goal"], "Can you add a dark mode to the app?"
+        )
+        self.assertIn(f"[calculator.html]({client.signed_url})", result)
+
+    async def test_modification_without_a_downloaded_artifact_does_not_start_a_run(self) -> None:
+        pipe = self.configured_pipe()
+        client = FakeAgentManagerClient()
+        parent_id = "8a9e15ac-4f53-45b1-a7c8-34f7c8b0e3a1"
+        messages = [
+            {"role": "user", "content": "Build a calculator."},
+            {"role": "assistant", "content": f"Mission `{parent_id}` completed."},
+            {"role": "user", "content": "Update it to support keyboard shortcuts."},
+        ]
+
+        with patch.object(agent_manager_pipe.httpx, "AsyncClient", return_value=client):
+            result = await pipe.pipe({"messages": messages})
+
+        self.assertIn("completed artifact earlier in this chat", result)
+        self.assertEqual(client.post_calls, 0)
+
+
+    async def test_modification_requires_openwebui_user_identity(self) -> None:
+        pipe = self.configured_pipe()
+        client = FakeAgentManagerClient()
+        parent_id = "8a9e15ac-4f53-45b1-a7c8-34f7c8b0e3a1"
+        artifact_id = "4ba9c3c2-61b8-4b66-b5d5-804547e64ab1"
+        artifact_url = (
+            "https://manager.example/v1/omp/missions/"
+            f"{parent_id}/artifacts/{artifact_id}/download?expires=123&signature=abc"
+        )
+        messages = [
+            {"role": "assistant", "content": f"[artifacts.zip]({artifact_url})"},
+            {"role": "user", "content": "Add a dark mode to the app."},
+        ]
+
+        with patch.object(agent_manager_pipe.httpx, "AsyncClient", return_value=client):
+            result = await pipe.pipe({"messages": messages})
+
+        self.assertIn("identify the Open WebUI user", result)
+        self.assertEqual(client.post_calls, 0)
 
 
 if __name__ == "__main__":

@@ -104,6 +104,12 @@ complete artifact manifest. On success, the worker uploads the ZIP and removes
 its temporary workspace. Artifacts are retained for 30 days by default; signed
 links expire after seven days.
 
+For an artifact modification, the Manager creates a new child mission and
+supplies its parent ZIP as a signed, TLS-verified worker download. The worker
+checks its size and checksum, rejects unsafe ZIP paths, and extracts it into
+the new `/work` before launching OMP. The original mission and ZIP stay
+unchanged; the child mission uploads its own reviewed ZIP.
+
 The Open WebUI Stop action requests cancellation for the active mission. The
 Manager marks queued runs `cancelled` immediately and running runs
 `cancel_requested`; the worker listens for cancellation events, polls the

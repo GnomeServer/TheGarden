@@ -218,6 +218,87 @@ class ArtifactPackagingTests(unittest.TestCase):
         )
 
 
+class ParentArtifactInputTests(unittest.TestCase):
+    def descriptor(self, download_url: str, payload: bytes) -> dict:
+        return {
+            "parent_mission_id": "8a9e15ac-4f53-45b1-a7c8-34f7c8b0e3a1",
+            "artifact_id": "4ba9c3c2-61b8-4b66-b5d5-804547e64ab1",
+            "filename": "artifacts.zip",
+            "content_type": "application/zip",
+            "size_bytes": len(payload),
+            "sha256": worker.hashlib.sha256(payload).hexdigest(),
+            "download_url": download_url,
+        }
+
+    def test_download_checks_signed_manager_url_size_and_checksum(self) -> None:
+        payload = b"signed parent archive"
+        descriptor = self.descriptor(
+            "https://"
+            + worker.CADDY_HOST
+            + "/v1/omp/missions/8a9e15ac-4f53-45b1-a7c8-34f7c8b0e3a1/"
+            "artifacts/4ba9c3c2-61b8-4b66-b5d5-804547e64ab1/"
+            "download?expires=123&signature="
+            + "a" * 64,
+            payload,
+        )
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = payload
+        opener = MagicMock()
+        opener.open.return_value = response
+        with tempfile.TemporaryDirectory() as directory:
+            ca_file = Path(directory) / "root.crt"
+            ca_file.write_text("certificate", encoding="utf-8")
+            with (
+                patch.object(worker.ssl, "create_default_context", return_value=object()),
+                patch.object(worker.urllib.request, "build_opener", return_value=opener),
+            ):
+                result = worker.download_parent_artifact(descriptor, ca_file)
+
+        self.assertEqual(result, payload)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.headers["Accept"], "application/zip")
+        self.assertNotIn("Authorization", request.headers)
+
+    def test_download_rejects_non_manager_hosts_before_networking(self) -> None:
+        payload = b"archive"
+        descriptor = self.descriptor(
+            "https://attacker.example/artifact?expires=123&signature=" + "a" * 64,
+            payload,
+        )
+        with patch.object(worker.urllib.request, "build_opener") as build_opener:
+            with self.assertRaisesRegex(ValueError, "Manager download route"):
+                worker.download_parent_artifact(descriptor, None)
+        build_opener.assert_not_called()
+
+    def test_zip_extraction_rejects_traversal_and_symlink_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, member in enumerate(
+                ("../escape.txt", "/absolute.txt", "folder\\\\escape.txt")
+            ):
+                payload = io.BytesIO()
+                with zipfile.ZipFile(payload, "w") as archive:
+                    archive.writestr(member, b"unsafe")
+                workspace = root / f"workspace-{index}"
+                workspace.mkdir()
+                with self.subTest(member=member), self.assertRaises(ValueError):
+                    worker.extract_artifact_zip(payload.getvalue(), workspace)
+                self.assertFalse((root / "escape.txt").exists())
+
+            payload = io.BytesIO()
+            symlink = zipfile.ZipInfo("link.txt")
+            symlink.create_system = 3
+            symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+            with zipfile.ZipFile(payload, "w") as archive:
+                archive.writestr(symlink, "target.txt")
+            workspace = root / "symlink-workspace"
+            workspace.mkdir()
+            with self.assertRaisesRegex(ValueError, "unsafe path"):
+                worker.extract_artifact_zip(payload.getvalue(), workspace)
+            self.assertFalse((workspace / "link.txt").exists())
+
+
 class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_workspace_is_removed_only_after_upload_finishes(self) -> None:
         descriptor = {
@@ -538,6 +619,183 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(mission_documents[1]["reviewer_count_start"], 0)
         self.assertFalse(checkpoint.exists())
+
+    async def test_modification_starts_from_parent_artifact_and_uploads_updated_files(self) -> None:
+        parent_id = "8a9e15ac-4f53-45b1-a7c8-34f7c8b0e3a1"
+        child_id = "abc6aa27-03dc-47e1-9357-f5ca3cb1f6e0"
+        artifact_id = "4ba9c3c2-61b8-4b66-b5d5-804547e64ab1"
+        parent_archive_file = io.BytesIO()
+        with zipfile.ZipFile(parent_archive_file, "w") as archive:
+            archive.writestr("app/index.html", b"old product")
+        parent_archive = parent_archive_file.getvalue()
+        source_descriptor = {
+            "parent_mission_id": parent_id,
+            "artifact_id": artifact_id,
+            "filename": "artifacts.zip",
+            "content_type": "application/zip",
+            "size_bytes": len(parent_archive),
+            "sha256": worker.hashlib.sha256(parent_archive).hexdigest(),
+            "download_url": (
+                f"https://{worker.CADDY_HOST}/v1/omp/missions/{parent_id}/artifacts/"
+                f"{artifact_id}/download?expires=123&signature={'a' * 64}"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "worker-workspace"
+            ca_file = root / "model-root.crt"
+            ca_file.write_text("certificate", encoding="utf-8")
+            observed_work_dir: list[Path] = []
+
+            def fake_docker(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                mission_mount = next(
+                    item for item in command
+                    if item.startswith("type=bind,src=")
+                    and item.endswith(",dst=/mission.json,readonly")
+                )
+                mission_path = Path(
+                    mission_mount[len("type=bind,src=") : -len(",dst=/mission.json,readonly")]
+                )
+                mission = json.loads(mission_path.read_text(encoding="utf-8"))
+                self.assertEqual(mission["parent_mission_id"], parent_id)
+                self.assertTrue(mission["modifies_existing_artifact"])
+                work_mount = next(
+                    item for item in command
+                    if item.startswith("type=bind,src=") and item.endswith(",dst=/work")
+                )
+                work_dir = Path(work_mount[len("type=bind,src=") : -len(",dst=/work")])
+                observed_work_dir.append(work_dir)
+                original = work_dir / "app" / "index.html"
+                self.assertEqual(original.read_bytes(), b"old product")
+                original.write_bytes(b"updated product")
+                (work_dir / "app" / "style.css").write_bytes(b"body { color: navy; }\n")
+                result = {
+                    "mission_id": child_id,
+                    "status": "completed",
+                    "reviewer_approved": True,
+                    "reviewer_count": 0,
+                    "summary": "The requested change passed review.",
+                    "artifacts": ["app/index.html", "app/style.css"],
+                }
+                return SimpleNamespace(stdout=json.dumps(result), stderr=None, returncode=0)
+
+            def fake_upload(
+                _upload_url: str,
+                _upload_token: str,
+                run_id: str,
+                filename: str,
+                content_type: str,
+                content: bytes,
+                _ca_file: Path,
+            ) -> dict:
+                self.assertEqual(run_id, child_id)
+                self.assertEqual(filename, "artifacts.zip")
+                self.assertEqual(content_type, "application/zip")
+                with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                    self.assertEqual(
+                        archive.namelist(), ["app/index.html", "app/style.css"]
+                    )
+                    self.assertEqual(
+                        archive.read("app/index.html"), b"updated product"
+                    )
+                    self.assertEqual(
+                        archive.read("app/style.css"), b"body { color: navy; }\n"
+                    )
+                return {"id": "child-artifact", "filename": filename}
+
+            with (
+                patch.object(worker, "WORKSPACE", workspace),
+                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
+                patch.object(worker, "MODEL_API_KEY", "model-key"),
+                patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
+                patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(worker, "download_parent_artifact", return_value=parent_archive),
+                patch.object(worker.subprocess, "run", side_effect=fake_docker),
+                patch.object(worker, "upload_artifact", side_effect=fake_upload),
+                patch.object(
+                    worker,
+                    "get_mission_control",
+                    return_value={
+                        "mission_id": child_id,
+                        "status": "running",
+                        "cancel_requested": False,
+                    },
+                ),
+            ):
+                result = await worker.run_mission_image(
+                    {"run_id": child_id, "goal": "Add a dark mode to the app."},
+                    {
+                        "artifact_upload_url": (
+                            f"https://{worker.CADDY_HOST}/v1/omp/missions/{child_id}/artifact"
+                        ),
+                        "artifact_control_url": (
+                            f"https://{worker.CADDY_HOST}/v1/omp/missions/{child_id}/control"
+                        ),
+                        "artifact_upload_token": "child-upload-capability",
+                        "parent_mission_id": parent_id,
+                        "artifact_input": source_descriptor,
+                    },
+                )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["artifact"]["filename"], "artifacts.zip")
+        self.assertFalse(observed_work_dir[0].exists())
+
+
+    async def test_cancel_during_source_download_prevents_container_launch(self) -> None:
+        parent_id = "8a9e15ac-4f53-45b1-a7c8-34f7c8b0e3a1"
+        child_id = "abc6aa27-03dc-47e1-9357-f5ca3cb1f6e0"
+        parent_archive_file = io.BytesIO()
+        with zipfile.ZipFile(parent_archive_file, "w") as archive:
+            archive.writestr("app/index.html", b"existing product")
+        control_states = iter(
+            (
+                {"mission_id": child_id, "status": "running", "cancel_requested": False},
+                {"mission_id": child_id, "status": "cancel_requested", "cancel_requested": True},
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ca_file = root / "model-root.crt"
+            ca_file.write_text("certificate", encoding="utf-8")
+            workspace = root / "worker-workspace"
+            with (
+                patch.object(worker, "WORKSPACE", workspace),
+                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
+                patch.object(worker, "MODEL_API_KEY", "model-key"),
+                patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
+                patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(
+                    worker,
+                    "get_mission_control",
+                    side_effect=lambda *_args: next(control_states),
+                ),
+                patch.object(
+                    worker,
+                    "download_parent_artifact",
+                    return_value=parent_archive_file.getvalue(),
+                ),
+                patch.object(worker.subprocess, "run") as docker_run,
+            ):
+                result = await worker.run_mission_image(
+                    {"run_id": child_id, "goal": "Update the existing app."},
+                    {
+                        "artifact_upload_url": (
+                            f"https://{worker.CADDY_HOST}/v1/omp/missions/{child_id}/artifact"
+                        ),
+                        "artifact_control_url": (
+                            f"https://{worker.CADDY_HOST}/v1/omp/missions/{child_id}/control"
+                        ),
+                        "artifact_upload_token": "child-capability",
+                        "parent_mission_id": parent_id,
+                        "artifact_input": {"parent_mission_id": parent_id},
+                    },
+                )
+
+        self.assertEqual(result["status"], "cancelled")
+        docker_run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

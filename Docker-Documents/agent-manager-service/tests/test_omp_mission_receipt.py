@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import json
 import unittest
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
 from fastapi import HTTPException
 from agent_manager.artifacts import upload_token_hash
+from agent_manager.models import ArtifactBlobRecord, RunRecord
 from agent_manager.omp import (
     MissionClarification,
     OmpTurn,
     accept_or_bounce,
     cancel_mission,
+    load_modification_source,
     mission_cancel_token_hash,
     mission_control,
     mission_status,
+    omp_turn,
     resume_mission,
 )
 
@@ -65,6 +70,120 @@ class MissionReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["metadata"]["operation"], "mission")
         self.assertIn("artifact_control_url", event["metadata"])
         self.assertNotIn("mission_cancel_token_hash", event["metadata"])
+
+    async def test_modification_creates_child_and_checks_parent_owner(self) -> None:
+        parent_id = "8a9e15ac-4f53-45b1-a7c8-34f7c8b0e3a1"
+        child_id = "abc6aa27-03dc-47e1-9357-f5ca3cb1f6e0"
+        artifact_id = "4ba9c3c2-61b8-4b66-b5d5-804547e64ab1"
+        actor = SimpleNamespace(id="open-webui-service")
+        parent = SimpleNamespace(
+            id=parent_id,
+            goal="Build a calculator application.",
+            forgejo_repository="owner/source",
+            base_ref="release",
+            model="luna",
+            status="completed",
+            run_metadata={
+                "operation": "mission",
+                "source": "open-webui",
+                "submitted_by": actor.id,
+                "requester_id": "openwebui-user-1",
+                "project_name": "Calculator",
+                "artifact": {"id": artifact_id},
+            },
+        )
+        blob = SimpleNamespace(
+            id=artifact_id,
+            run_id=parent_id,
+            filename="artifacts.zip",
+            content_type="application/zip",
+            size_bytes=123,
+            sha256="a" * 64,
+        )
+        child_records = []
+        async def get(model, key, **_kwargs):
+            if model is RunRecord:
+                return parent if key == parent_id else None
+            if model is ArtifactBlobRecord:
+                return blob if key == artifact_id else None
+            raise AssertionError(f"unexpected record lookup: {model}")
+
+        session = SimpleNamespace(
+            get=AsyncMock(side_effect=get),
+            add=child_records.append,
+            flush=AsyncMock(),
+            commit=AsyncMock(),
+            rollback=AsyncMock(),
+        )
+        jetstream = CapturingJetStream()
+        request = SimpleNamespace(
+            state=SimpleNamespace(auth_method="open-webui"),
+            app=SimpleNamespace(
+                state=SimpleNamespace(nats=SimpleNamespace(jetstream=lambda: jetstream))
+            ),
+        )
+        source_descriptor = {
+            "id": artifact_id,
+            "filename": "artifacts.zip",
+            "content_type": "application/zip",
+            "size_bytes": 123,
+            "sha256": "a" * 64,
+            "download_url": (
+                "https://infra-lab-services.tail494f6d.ts.net/v1/omp/missions/"
+                f"{parent_id}/artifacts/{artifact_id}/download?expires=123&signature=abc"
+            ),
+        }
+        body = OmpTurn(
+            goal="Can you add a dark mode to the app?",
+            mission_id=uuid.UUID(child_id),
+            cancel_token="c" * 40,
+            parent_mission_id=uuid.UUID(parent_id),
+            requester_id="openwebui-user-1",
+        )
+
+        with (
+            patch("agent_manager.omp.mission_artifact", return_value=source_descriptor),
+            patch("agent_manager.omp.record_activity", new=AsyncMock()),
+        ):
+            reply = await omp_turn(body, request, actor, session)
+
+        self.assertEqual(reply["mission_id"], child_id)
+        self.assertEqual(len(child_records), 1)
+        child = child_records[0]
+        self.assertEqual(child.status, "queued")
+        self.assertEqual(child.forgejo_repository, parent.forgejo_repository)
+        self.assertEqual(child.base_ref, parent.base_ref)
+        self.assertEqual(child.model, parent.model)
+        self.assertEqual(child.run_metadata["parent_mission_id"], parent_id)
+        self.assertEqual(child.run_metadata["requester_id"], "openwebui-user-1")
+        self.assertEqual(child.run_metadata["parent_artifact_id"], artifact_id)
+        self.assertEqual(jetstream.events[0][0], "agent.runs.created")
+        event = jetstream.events[0][1]
+        self.assertEqual(event["goal"], body.goal)
+        self.assertEqual(event["metadata"]["artifact_input"]["parent_mission_id"], parent_id)
+        self.assertEqual(event["metadata"]["artifact_input"]["download_url"], source_descriptor["download_url"])
+
+        with patch("agent_manager.omp.mission_artifact", return_value=source_descriptor):
+            with self.assertRaises(HTTPException) as caught:
+                await load_modification_source(
+                    uuid.UUID(parent_id), SimpleNamespace(id="different-user"), session
+                )
+        self.assertEqual(caught.exception.status_code, 404)
+        with self.assertRaises(HTTPException) as caught:
+            await load_modification_source(
+                uuid.UUID(parent_id), actor, session, "different-openwebui-user"
+            )
+        self.assertEqual(caught.exception.status_code, 404)
+
+
+        blob.content_type = "text/html"
+        blob.filename = "calculator.html"
+        with self.assertRaises(HTTPException) as caught:
+            await load_modification_source(
+                uuid.UUID(parent_id), actor, session, "openwebui-user-1"
+            )
+        self.assertEqual(caught.exception.status_code, 409)
+
 
     async def test_mission_status_exposes_valid_reviewer_count(self) -> None:
         record = SimpleNamespace(
