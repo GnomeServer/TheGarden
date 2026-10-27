@@ -36,5 +36,15 @@ class PlannerGateTests(unittest.TestCase):
         )
 
 
+    def test_generic_gui_and_button_tasks_do_not_trigger_calculator_gate(self) -> None:
+        goals = (
+            "Build a contact page with a submit button that shows a confirmation message.",
+            "Create a tabbed dashboard GUI with buttons for navigating between reports.",
+        )
+        for goal in goals:
+            with self.subTest(goal=goal):
+                self.assertIsNone(missing_requirements(goal))
+
+
 if __name__ == "__main__":
     unittest.main()

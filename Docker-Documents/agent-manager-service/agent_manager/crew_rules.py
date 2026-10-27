@@ -26,7 +26,7 @@ def crew_label(size: dict[str, int | str]) -> str:
 def missing_requirements(goal: str) -> str | None:
     """Planner gate. A gap here bounces to OMP before any coder starts."""
     text = goal.casefold()
-    if any(word in text for word in ("calculator", "gui", "button")):
+    if re.search(r"\bcalculator\b", text):
         operation_patterns = (
             r"\b(?:add|addition|additions|adding|sum|plus)\b",
             r"\b(?:subtract|subtraction|subtractions|subtracting|difference|differences|minus)\b",
