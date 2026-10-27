@@ -257,7 +257,7 @@
     addAction(
       "hardening",
       "Model-escape controls remain incomplete",
-      "API Guard detects only recognized credential patterns. It does not restrict worker internet egress or detect arbitrary exfiltration. Enforce host/Tailscale egress rules, keep unsandboxed script execution disabled, and add host/network monitoring.",
+      "The VaultGuard worker unit template is configured to deny direct public-IP egress and allow the service VM/Tailscale DNS; this takes effect only after deployment and verification on each host. It does not constrain other host processes, prevent DNS tunneling, or detect arbitrary model exfiltration. Keep unsandboxed script execution disabled and add host/network monitoring.",
     );
     addAction(
       "hardening",

@@ -5,3 +5,11 @@ worker_consumer: "agent-workers-{{ worker_role }}"
 # `create-python-script` executes as the laptop user; keep disabled by default.
 allow_generated_code: false
 worker_keybroker_base_url: "https://infra-lab-services.tail494f6d.ts.net/keybroker"
+# The worker and its child processes need only the service VM and Tailscale DNS.
+# Override these CIDRs if the service endpoint or resolver changes.
+worker_egress_allow_ips:
+  - 100.94.49.45/32
+  - 100.100.100.100/32
+  - 127.0.0.1/32
+  - 127.0.0.53/32
+  - ::1/128

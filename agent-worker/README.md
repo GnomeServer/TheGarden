@@ -171,6 +171,13 @@ The worker does not read or store a static `MODEL_API_KEY` or LiteLLM master
 key. The Keybroker server controls the model alias, budget, and session TTL;
 mission input cannot override these policies.
 
+The Ansible-managed systemd unit denies direct public-IP egress for the worker
+service and its child processes, allowing the configured service VM and
+Tailscale DNS/loopback resolver addresses. This filter takes effect only after
+the unit is deployed and requires systemd/kernel IP filtering support. It does
+not restrict unrelated host processes or prevent DNS-tunnel exfiltration; use
+host-level Tailscale ACL/firewall rules as an additional boundary.
+
 The worker scans prompts and model responses for an exact session-key echo and
 recognized OpenAI, OpenRouter, Anthropic, and Google key formats. A detected
 value is withheld from model calls and run outputs; the worker stops further

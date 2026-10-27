@@ -153,6 +153,14 @@ The worker uses the Tailnet-only Caddy endpoint at
 `sudo systemctl status dark-factory-agent-worker` and
 `sudo journalctl -u dark-factory-agent-worker -n 100 --no-pager`.
 
+The worker unit also uses systemd IP filtering: it denies direct public-IP
+egress and allows only the service VM, Tailscale DNS, and loopback resolver
+addresses from `worker_egress_allow_ips`. This applies to the worker process and
+its children after the updated unit is deployed. Override the allowlist when
+the service VM or resolver address changes. It does not restrict unrelated
+processes on the laptop or prevent DNS tunneling; keep host Tailscale ACLs and
+firewall policy in scope.
+
 The worker process polls the shared durable `agent-workers-coder` consumer and
 sends a heartbeat every 15 seconds. The default `worker_nats_url` is
 `nats://100.94.49.45:4222`; that listener must be reachable over Tailscale.

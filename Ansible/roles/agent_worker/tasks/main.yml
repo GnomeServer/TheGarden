@@ -8,7 +8,11 @@
       - worker_role | length > 0
       - worker_keybroker_base_url is defined
       - worker_keybroker_base_url is match('^https://')
-    fail_msg: "Set worker_id, worker_role, and an HTTPS Keybroker URL for {{ inventory_hostname }} before running this playbook."
+      - worker_egress_allow_ips is defined
+      - worker_egress_allow_ips | length > 0
+      - "'0.0.0.0/0' not in worker_egress_allow_ips"
+      - "'::/0' not in worker_egress_allow_ips"
+    fail_msg: "Set worker_id, worker_role, an HTTPS Keybroker URL, and a non-global worker_egress_allow_ips allowlist for {{ inventory_hostname }}."
 
 
 - name: Install Python, virtualenv, procps, and CA certificates

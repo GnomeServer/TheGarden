@@ -19,6 +19,11 @@ ProtectSystem=strict
 ReadWritePaths={{ ansible_user_dir }}/agent-worker {{ ansible_user_dir }}/agent-workspace
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Worker and subprocess network access is limited to the service VM and DNS.
+IPAddressDeny=any
+{% for address in worker_egress_allow_ips %}
+IPAddressAllow={{ address }}
+{% endfor %}
 
 [Install]
 WantedBy=multi-user.target
