@@ -84,12 +84,14 @@
     const oldKeyIds = new Set(keys.filter((key) => key.age_days !== null && key.age_days >= rotationDays).map((key) => key.key_id || `alias:${key.alias}`));
     const unknownAlerts = events.filter((event) => event.status === "flagged" && !event.matched_key_id).map((event) => `event:${event.event_id}`);
     const alertCount = new Set([...flaggedIds, ...oldKeyIds, ...unknownAlerts]).size;
-    text("key-alert-count", number(alertCount));
-    text("key-alert-detail", `${number(flaggedIds.size)} exposed · ${number(oldKeyIds.size)} age overdue`);
     if (!keys.length) {
+      text("key-alert-count", unknownAlerts.length ? number(alertCount) : "—");
+      text("key-alert-detail", "No active key inventory; age and rotation checks are incomplete");
       $("keys").innerHTML = '<p class="empty">No LiteLLM keys were returned.</p>';
       return;
     }
+    text("key-alert-count", number(alertCount));
+    text("key-alert-detail", `${number(flaggedIds.size)} exposed · ${number(oldKeyIds.size)} age overdue`);
     const table = document.createElement("table");
     table.innerHTML = '<thead><tr><th>Key</th><th>Models</th><th>Spend / cap</th><th>Age</th><th>Status</th><th>Actions</th></tr></thead>';
     const body = document.createElement("tbody");
@@ -177,6 +179,96 @@
     root.replaceChildren(list);
   }
 
+  function renderActions(data) {
+    const root = $("readiness-items");
+    const actions = [];
+    const addAction = (level, titleText, detailText) => {
+      const item = document.createElement("article");
+      item.className = `readiness-item ${level}`;
+      const heading = document.createElement("div");
+      heading.className = "readiness-heading";
+      const title = document.createElement("strong");
+      title.textContent = titleText;
+      const priority = document.createElement("span");
+      priority.className = "readiness-priority";
+      priority.textContent = level === "urgent" ? "URGENT" : level === "review" ? "REVIEW" : "HARDENING";
+      heading.append(title, priority);
+      const detail = document.createElement("p");
+      detail.textContent = detailText;
+      item.append(heading, detail);
+      actions.push(item);
+    };
+    const events = Array.isArray(data.exposure_events) ? data.exposure_events : [];
+    const keys = Array.isArray(data.keys) ? data.keys : [];
+    const workerAlerts = events.filter(
+      (event) => event.status === "flagged" && (event.worker_id || event.session_id),
+    );
+    const visiblePending = events.filter((event) => event.notification_status === "pending").length;
+    const pending = Math.max(Number(data.alert_notification_pending_count || 0), visiblePending);
+
+    if (workerAlerts.length) {
+      addAction(
+        "urgent",
+        "Investigate worker/session exposure",
+        `${workerAlerts.length} flagged event(s). Verify exact session-key revocation; identify unmapped patterns before resolving them.`,
+      );
+    }
+    if (!data.alert_notifications_configured) {
+      addAction(
+        "urgent",
+        "Configure 24/7 alert delivery",
+        "Set API_GUARD_ALERT_WEBHOOK_URL and a distinct API_GUARD_ALERT_WEBHOOK_SECRET for a Forge/paging receiver with acknowledgement and escalation. Email or this dashboard alone is not an on-call system.",
+      );
+    } else if (pending) {
+      addAction(
+        "urgent",
+        "Confirm alert receiver delivery",
+        `${pending} notification(s) are queued or retrying. Check the receiver and acknowledge incidents there; HTTP acceptance does not confirm a responder saw the alert.`,
+      );
+    }
+    if (!keys.length) {
+      addAction(
+        "review",
+        "Reconcile the empty key inventory",
+        "No active LiteLLM virtual keys were returned. Short-lived worker keys may be absent between jobs; verify any expected long-lived consumer key and confirm Keybroker targets the same LiteLLM instance as spend logging.",
+      );
+    }
+    if (data.unmatched_usage_key_count > 0) {
+      addAction(
+        "review",
+        "Reconcile unmatched spend records",
+        `${number(data.unmatched_usage_key_count)} spend-log key ID(s) have no active key record. They may be historical or from another LiteLLM database; per-key attribution is incomplete until checked.`,
+      );
+    }
+    if (data.budget.zero_cost_requests_monthly > 0) {
+      addAction(
+        "review",
+        "Verify zero-priced token usage",
+        `${number(data.budget.zero_cost_requests_monthly)} token-bearing request(s) were priced at $0. Check LiteLLM model pricing and the provider bill before treating that usage as free.`,
+      );
+    }
+    if (data.usage_truncated) {
+      addAction(
+        "review",
+        "Review incomplete usage totals",
+        "LiteLLM spend-log pagination reached its limit; displayed totals are lower bounds.",
+      );
+    }
+    addAction(
+      "hardening",
+      "Model-escape controls remain incomplete",
+      "API Guard detects only recognized credential patterns. It does not restrict worker internet egress or detect arbitrary exfiltration. Enforce host/Tailscale egress rules, keep unsandboxed script execution disabled, and add host/network monitoring.",
+    );
+    addAction(
+      "hardening",
+      "Verify the worker roster separately",
+      "This dashboard inventories LiteLLM keys, not enrolled hosts. Compare the Keybroker IP allowlist and Ansible inventory against every intended, owner-approved worker.",
+    );
+
+    root.replaceChildren(...actions);
+    $("readiness-count").textContent = `${actions.length} action${actions.length === 1 ? "" : "s"}`;
+  }
+
   async function load() {
     const sequence = ++state.loadSequence;
     text("connection", "Refreshing");
@@ -187,41 +279,18 @@
       renderBudget(data.budget);
       renderOpenAICosts(data.openai_costs);
       renderKeys(data.keys, data.rotation_days, data.exposure_events);
-      renderExposures(data.exposure_events);
+      renderActions(data);
       text("as-of", `Updated ${new Date(data.as_of).toLocaleTimeString()}`);
-      const notices = [];
       const workerAlerts = data.exposure_events.filter(
         (event) => event.status === "flagged" && (event.worker_id || event.session_id),
       );
       if (workerAlerts.length) {
-        notices.push(`URGENT: ${workerAlerts.length} worker/session credential exposure alert${workerAlerts.length === 1 ? "" : "s"} require review. The affected run is stopped; inspect the identifiers below. Keybroker revokes only exact current-session matches; unassociated patterns need human investigation and do not revoke unrelated keys.`);
-      }
-      const visiblePendingNotifications = data.exposure_events.filter(
-        (event) => event.notification_status === "pending",
-      ).length;
-      const pendingNotifications = Math.max(
-        Number(data.alert_notification_pending_count || 0),
-        visiblePendingNotifications,
-      );
-      if (!data.alert_notifications_configured) {
-        notices.push("24/7 external notification is not configured; alerts are only visible in API Guard and the worker run result.");
-      } else if (pendingNotifications) {
-        notices.push(`${pendingNotifications} external alert notification${pendingNotifications === 1 ? " is" : "s are"} queued/retrying; confirm delivery in the dashboard and check the configured receiver.`);
-      }
-      if (data.usage_truncated) notices.push("Spend logs reached LiteLLM's 10,000-row limit; displayed usage totals are lower bounds.");
-      if (data.budget.zero_cost_requests_monthly > 0) {
-        notices.push(`${number(data.budget.zero_cost_requests_monthly)} token-bearing requests were priced at $0 by LiteLLM; they may be free or unpriced. Check provider pricing and billing.`);
-      }
-      if (data.unmatched_usage_key_count > 0) {
-        notices.push(`${number(data.unmatched_usage_key_count)} key IDs in spend logs have no active LiteLLM key record; they may be historical or from a different LiteLLM database. Overall totals include them, but per-key inventory may be incomplete.`);
-      }
-      if (notices.length) {
-        $("status-banner").textContent = notices.join(" ");
+        $("status-banner").textContent = `URGENT: ${workerAlerts.length} worker/session credential exposure alert${workerAlerts.length === 1 ? "" : "s"} require review. The affected run is stopped; inspect the identifiers below.`;
         $("status-banner").classList.remove("hidden");
       } else {
         $("status-banner").classList.add("hidden");
       }
-      $("status-banner").classList.toggle("urgent", workerAlerts.length > 0 || pendingNotifications > 0);
+      $("status-banner").classList.toggle("urgent", workerAlerts.length > 0);
       $("jev-status").textContent = data.jev_configured ? `JEV advisor ready: ${data.jev_model}. Its output is advisory only.` : `JEV is not configured. Set a dedicated, restricted API_GUARD_JEV_API_KEY and route the ${data.jev_model} model alias through LiteLLM.`;
       $("ask-jev").disabled = !data.jev_configured;
       $("key-expiry-days").textContent = String(data.rotation_days * 2);
