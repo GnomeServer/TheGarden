@@ -431,7 +431,7 @@ def activity_out(event: ActivityRecord) -> dict[str, Any]:
     elif source == "time":
         known = {
             "time.started", "time.stopped", "time.discarded", "time.submitted",
-            "time.approved", "time.rejected",
+            "time.approved", "time.rejected", "time.edited",
         }
         event_type = event.event_type if event.event_type in known else "time.activity"
         summary = {
@@ -441,6 +441,7 @@ def activity_out(event: ActivityRecord) -> dict[str, Any]:
             "time.submitted": "A self-reported timer was submitted for review",
             "time.approved": "A self-reported timer was approved",
             "time.rejected": "A self-reported timer was rejected",
+            "time.edited": "A self-reported timer was edited",
         }.get(event_type, "Self-reported time activity")
         original = event.payload or {}
         safe_payload = {}
@@ -902,6 +903,8 @@ def run_phase(status: str, metadata: dict[str, Any]) -> str:
         return "Worker OMP is running the ephemeral image"
     if metadata.get("operation") == "mission" and status == "completed":
         return "Worker returned the revised result. No second review."
+    if metadata.get("operation") == "mission" and status == "needs_input":
+        return "Waiting for user clarification after reviewer limit"
     if status == "planning":
         return "Planner is checking the request"
     if status == "coding":
@@ -943,7 +946,7 @@ async def dashboard_runs(
     records = (
         await session.execute(select(RunRecord).order_by(desc(RunRecord.created_at)).limit(limit))
     ).scalars().all()
-    statuses = {"queued", "running", "completed", "failed", "cancel_requested", "cancelled", "accepted", "bounced", "planning", "coding", "review"}
+    statuses = {"queued", "running", "completed", "failed", "cancel_requested", "cancelled", "needs_input", "accepted", "bounced", "planning", "coding", "review"}
     output: list[dict[str, Any]] = []
     for record in records:
         metadata = record.run_metadata or {}

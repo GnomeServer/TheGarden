@@ -5,6 +5,7 @@ import io
 import json
 import stat
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
@@ -20,7 +21,7 @@ SPEC.loader.exec_module(worker)
 
 
 class ArtifactPackagingTests(unittest.TestCase):
-    def test_single_file_is_uploaded_raw_with_its_requested_filename(self) -> None:
+    def test_single_file_is_uploaded_as_zip_and_preserves_its_relative_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             work_dir = Path(directory)
             (work_dir / "reports").mkdir()
@@ -30,9 +31,11 @@ class ArtifactPackagingTests(unittest.TestCase):
                 work_dir, ["reports/summary.txt"]
             )
 
-        self.assertEqual(filename, "summary.txt")
-        self.assertEqual(content_type, "text/plain")
-        self.assertEqual(payload, b"single file")
+        self.assertEqual(filename, "artifacts.zip")
+        self.assertEqual(content_type, "application/zip")
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            self.assertEqual(archive.namelist(), ["reports/summary.txt"])
+            self.assertEqual(archive.read("reports/summary.txt"), b"single file")
 
     def test_multiple_files_produce_deterministic_deflated_zip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -280,12 +283,13 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(upload_token, secret)
                 self.assertEqual(run_id, "run-1")
-                self.assertEqual(filename, "result.txt")
-                self.assertEqual(content_type, "text/plain")
-                self.assertEqual(content, b"result")
+                self.assertEqual(filename, "artifacts.zip")
+                self.assertEqual(content_type, "application/zip")
                 self.assertNotIn(secret.encode(), content)
                 self.assertTrue(observed_work_dir[0].is_dir())
-                self.assertEqual((observed_work_dir[0] / filename).read_bytes(), content)
+                with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                    self.assertEqual(archive.namelist(), ["result.txt"])
+                    self.assertEqual(archive.read("result.txt"), b"result")
                 return descriptor
 
             with (
@@ -296,6 +300,15 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
                 patch.object(worker.subprocess, "run", side_effect=fake_docker),
                 patch.object(worker, "upload_artifact", side_effect=fake_upload),
+                patch.object(
+                    worker,
+                    "get_mission_control",
+                    return_value={
+                        "mission_id": "run-1",
+                        "status": "running",
+                        "cancel_requested": False,
+                    },
+                ),
             ):
                 result = await worker.run_mission_image(
                     {
@@ -317,6 +330,214 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(observed_work_dir[0].exists())
             self.assertEqual(list(workspace.iterdir()), [])
 
+    async def test_cancel_event_stops_named_omp_container(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "worker-workspace"
+            ca_file = root / "model-root.crt"
+            ca_file.write_text("certificate", encoding="utf-8")
+            docker_started = threading.Event()
+            docker_stopped = threading.Event()
+            stopped_containers: list[str] = []
+            control_states = iter(
+                (
+                    {"mission_id": "cancel-run", "status": "running", "cancel_requested": False},
+                    {"mission_id": "cancel-run", "status": "cancel_requested", "cancel_requested": True},
+                )
+            )
+
+            def fake_control(*_args: object) -> dict[str, object]:
+                return next(control_states)
+
+            def fake_docker(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                docker_started.set()
+                self.assertIn("--name", command)
+                if not docker_stopped.wait(timeout=3):
+                    self.fail("cancellation did not stop the named OMP container")
+                return SimpleNamespace(stdout="", stderr="stopped", returncode=143)
+
+            def fake_stop(container_name: str) -> None:
+                stopped_containers.append(container_name)
+                docker_stopped.set()
+
+            metadata = {
+                "artifact_upload_url": (
+                    f"https://{worker.CADDY_HOST}/v1/omp/missions/cancel-run/artifact"
+                ),
+                "artifact_control_url": (
+                    f"https://{worker.CADDY_HOST}/v1/omp/missions/cancel-run/control"
+                ),
+                "artifact_upload_token": "run-scoped-token",
+            }
+            with (
+                patch.object(worker, "WORKSPACE", workspace),
+                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
+                patch.object(worker, "MODEL_API_KEY", "model-key"),
+                patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
+                patch.object(worker, "CANCEL_POLL_INTERVAL_SECONDS", 0.01),
+                patch.object(worker, "ACTIVE_MISSIONS", {}),
+                patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(worker, "get_mission_control", side_effect=fake_control),
+                patch.object(worker, "stop_omp_container", side_effect=fake_stop),
+                patch.object(worker.subprocess, "run", side_effect=fake_docker),
+            ):
+                result = await worker.run_mission_image(
+                    {"run_id": "cancel-run", "goal": "Create a result file"},
+                    metadata,
+                )
+
+        self.assertTrue(docker_started.is_set())
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(len(stopped_containers), 1)
+        self.assertTrue(stopped_containers[0].startswith("omp-mission-"))
+
+
+    async def test_queued_cancelled_mission_never_starts_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ca_file = Path(directory) / "model-root.crt"
+            ca_file.write_text("certificate", encoding="utf-8")
+            metadata = {
+                "artifact_upload_url": (
+                    f"https://{worker.CADDY_HOST}/v1/omp/missions/queued-run/artifact"
+                ),
+                "artifact_control_url": (
+                    f"https://{worker.CADDY_HOST}/v1/omp/missions/queued-run/control"
+                ),
+                "artifact_upload_token": "run-scoped-token",
+            }
+            with (
+                patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
+                patch.object(
+                    worker,
+                    "get_mission_control",
+                    return_value={
+                        "mission_id": "queued-run",
+                        "status": "cancelled",
+                        "cancel_requested": True,
+                    },
+                ),
+                patch.object(worker.shutil, "which") as docker_lookup,
+                patch.object(worker.subprocess, "run") as docker_run,
+            ):
+                result = await worker.run_mission_image(
+                    {"run_id": "queued-run", "goal": "Create a result file"},
+                    metadata,
+                )
+
+        self.assertEqual(result["status"], "cancelled")
+        docker_lookup.assert_not_called()
+        docker_run.assert_not_called()
+    async def test_needs_input_checkpoint_resumes_same_workspace_and_resets_count(self) -> None:
+        run_id = "957b111b-2aa5-4fae-b3aa-5f658f27b1ef"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "worker-workspace"
+            ca_file = root / "model-root.crt"
+            ca_file.write_text("certificate", encoding="utf-8")
+            outputs = [
+                {
+                    "mission_id": run_id,
+                    "status": "needs_input",
+                    "reviewer_approved": False,
+                    "reviewer_count": 10,
+                    "summary": "The reviewer still rejects the interface.",
+                    "question": "Should the interface prioritize speed or accuracy?",
+                    "artifacts": [],
+                },
+                {
+                    "mission_id": run_id,
+                    "status": "completed",
+                    "reviewer_approved": True,
+                    "reviewer_count": 0,
+                    "summary": "The clarification resolved the review.",
+                    "artifacts": ["result.txt"],
+                },
+            ]
+            mission_documents: list[dict] = []
+
+            def fake_docker(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                mission_mount = next(
+                    item
+                    for item in command
+                    if item.startswith("type=bind,src=")
+                    and item.endswith(",dst=/mission.json,readonly")
+                )
+                mission_path = Path(
+                    mission_mount[len("type=bind,src=") : -len(",dst=/mission.json,readonly")]
+                )
+                mission_documents.append(json.loads(mission_path.read_text()))
+                work_mount = next(
+                    item
+                    for item in command
+                    if item.startswith("type=bind,src=") and item.endswith(",dst=/work")
+                )
+                work_dir = Path(work_mount[len("type=bind,src=") : -len(",dst=/work")])
+                if len(mission_documents) == 1:
+                    (work_dir / "draft.txt").write_text("first draft", encoding="utf-8")
+                else:
+                    self.assertEqual((work_dir / "draft.txt").read_text(), "first draft")
+                    (work_dir / "result.txt").write_text("revised product", encoding="utf-8")
+                return SimpleNamespace(stdout=json.dumps(outputs.pop(0)), stderr=None)
+
+            metadata = {
+                "operation": "mission",
+                "artifact_upload_url": (
+                    f"https://{worker.CADDY_HOST}/v1/omp/missions/{run_id}/artifact"
+                ),
+                "artifact_control_url": (
+                    f"https://{worker.CADDY_HOST}/v1/omp/missions/{run_id}/control"
+                ),
+                "artifact_upload_token": "run-scoped-token",
+                "project_name": "clarification-test",
+            }
+            with (
+                patch.object(worker, "WORKSPACE", workspace),
+                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
+                patch.object(worker, "MODEL_API_KEY", "model-key"),
+                patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
+                patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(
+                    worker,
+                    "get_mission_control",
+                    return_value={
+                        "mission_id": run_id,
+                        "status": "running",
+                        "cancel_requested": False,
+                    },
+                ),
+                patch.object(worker.subprocess, "run", side_effect=fake_docker),
+                patch.object(
+                    worker,
+                    "upload_artifact",
+                    return_value={"id": "artifact-1", "filename": "artifacts.zip"},
+                ),
+            ):
+                first = await worker.run_mission_image(
+                    {"run_id": run_id, "goal": "Build the requested interface."},
+                    metadata,
+                )
+                checkpoint = worker.mission_checkpoint_path(run_id)
+                self.assertEqual(first["status"], "needs_input")
+                self.assertTrue((checkpoint / "draft.txt").is_file())
+
+                resumed = await worker.run_mission_image(
+                    {"run_id": run_id, "goal": "Build the requested interface."},
+                    {
+                        **metadata,
+                        "resume_from_checkpoint": True,
+                        "clarification": "Prioritize accuracy.",
+                        "reviewer_feedback": first["question"],
+                        "reviewer_count_reset": 0,
+                    },
+                )
+
+        self.assertEqual(resumed["status"], "completed")
+        self.assertEqual(resumed["reviewer_count"], 0)
+        self.assertEqual(
+            mission_documents[1]["clarification"], "Prioritize accuracy."
+        )
+        self.assertEqual(mission_documents[1]["reviewer_count_start"], 0)
+        self.assertFalse(checkpoint.exists())
 
 if __name__ == "__main__":
     unittest.main()

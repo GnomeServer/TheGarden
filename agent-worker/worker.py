@@ -4,7 +4,6 @@
 import asyncio
 import io
 import json
-import mimetypes
 import os
 import re
 import socket
@@ -12,6 +11,7 @@ import ssl
 import stat
 import subprocess
 import tempfile
+import time
 import sys
 import unicodedata
 import urllib.error
@@ -64,6 +64,8 @@ MODEL_TLS_INSECURE = os.getenv("MODEL_TLS_INSECURE", "0").lower() in {
 WORKER_VERSION = "0.5.0"
 HEARTBEAT_SECONDS = 15
 _presence = {"status": "idle", "run_id": None}
+ACTIVE_MISSIONS: dict[str, tuple[str, asyncio.Event]] = {}
+CANCEL_POLL_INTERVAL_SECONDS = 1.0
 
 def docker_model_host_args(base_url: str) -> list[str]:
     """Resolve the Caddy MagicDNS name inside bridge-network containers."""
@@ -377,15 +379,6 @@ def package_artifacts(
             )
         contents.append((relative, content))
 
-    if len(contents) == 1:
-        relative, content = contents[0]
-        filename = PurePosixPath(relative).name
-        return (
-            filename,
-            mimetypes.guess_type(filename)[0] or "application/octet-stream",
-            content,
-        )
-
     archive = io.BytesIO()
     with zipfile.ZipFile(
         archive,
@@ -408,6 +401,70 @@ def package_artifacts(
             f"ZIP artifact exceeds the {MAX_ARTIFACT_BYTES}-byte upload limit"
         )
     return "artifacts.zip", "application/zip", payload
+
+
+def _checkpoint_file_paths(work_dir: Path) -> list[str]:
+    root = work_dir.resolve(strict=True)
+    paths: list[str] = []
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in directories:
+            if (current_path / name).is_symlink():
+                raise ValueError("mission checkpoint contains a symlinked directory")
+        for name in filenames:
+            path = current_path / name
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("mission checkpoint contains a non-regular file")
+            paths.append(path.relative_to(root).as_posix())
+    return paths
+
+
+def mission_checkpoint_path(run_id: str) -> Path:
+    try:
+        canonical_id = str(uuid.UUID(run_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("mission checkpoint requires a UUID run_id") from exc
+    return WORKSPACE / ".pending-missions" / canonical_id
+
+
+def validate_mission_checkpoint(run_id: str) -> Path:
+    checkpoint = mission_checkpoint_path(run_id)
+    if checkpoint.is_symlink() or not checkpoint.is_dir():
+        raise ValueError("mission clarification checkpoint is missing")
+    paths = _checkpoint_file_paths(checkpoint)
+    if paths:
+        collect_artifact_files(checkpoint, paths)
+    return checkpoint
+
+
+def save_mission_checkpoint(work_dir: Path, run_id: str) -> Path:
+    paths = _checkpoint_file_paths(work_dir)
+    if paths:
+        files = collect_artifact_files(work_dir, paths)
+    else:
+        files = []
+    checkpoint = mission_checkpoint_path(run_id)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if checkpoint.exists() or checkpoint.is_symlink():
+        raise ValueError("mission clarification checkpoint already exists")
+    checkpoint.mkdir(mode=0o700)
+    try:
+        for relative, source, _size in files:
+            destination = checkpoint.joinpath(*PurePosixPath(relative).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copy2(source, destination, follow_symlinks=False)
+    except Exception:
+        shutil.rmtree(checkpoint, ignore_errors=True)
+        raise
+    return checkpoint
+
+
+def remove_mission_checkpoint(run_id: str) -> None:
+    checkpoint = mission_checkpoint_path(run_id)
+    if checkpoint.is_symlink():
+        checkpoint.unlink()
+    elif checkpoint.is_dir():
+        shutil.rmtree(checkpoint)
 
 
 class _RejectArtifactRedirects(urllib.request.HTTPRedirectHandler):
@@ -503,14 +560,155 @@ def upload_artifact(
     return descriptor
 
 
+def get_mission_control(
+    control_url: Any,
+    upload_token: Any,
+    run_id: str,
+    ca_file: Path | None,
+) -> dict[str, Any]:
+    if not isinstance(control_url, str) or not isinstance(upload_token, str):
+        raise ValueError("mission control URL and upload token are required")
+    parsed_url = urlsplit(control_url)
+    try:
+        port = parsed_url.port
+    except ValueError:
+        raise ValueError("mission control URL must target the configured manager route") from None
+    expected_path = f"/v1/omp/missions/{quote(run_id, safe='')}/control"
+    allowed_netlocs = {CADDY_HOST.lower(), f"{CADDY_HOST.lower()}:443"}
+    if (
+        parsed_url.scheme != "https"
+        or parsed_url.hostname != CADDY_HOST.lower()
+        or parsed_url.netloc.lower() not in allowed_netlocs
+        or port not in (None, 443)
+        or parsed_url.path != expected_path
+        or parsed_url.query
+        or parsed_url.fragment
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+    ):
+        raise ValueError("mission control URL must target the configured manager route")
+    if ca_file is None or not ca_file.is_file():
+        raise ValueError("MODEL_CA_FILE is required to verify mission control TLS")
+    request = urllib.request.Request(
+        control_url,
+        headers={
+            "Authorization": f"Bearer {upload_token}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    context = ssl.create_default_context(cafile=str(ca_file))
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=context),
+        _RejectArtifactRedirects(),
+    )
+    try:
+        with opener.open(request, timeout=10) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"mission control check failed with HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("mission control check failed; verify manager route and TLS") from None
+    try:
+        result = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RuntimeError("mission control returned invalid JSON") from exc
+    if not isinstance(result, dict) or result.get("mission_id") != run_id:
+        raise RuntimeError("mission control returned a mismatched run")
+    return result
+
+
+def stop_omp_container(container_name: str) -> None:
+    for _attempt in range(20):
+        completed = subprocess.run(
+            ["docker", "stop", "--time", "5", container_name],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if completed.returncode == 0:
+            return
+        detail = f"{completed.stdout}\n{completed.stderr}".lower()
+        if "no such container" not in detail and "not found" not in detail:
+            raise RuntimeError("Docker could not stop the cancelled OMP container")
+        time.sleep(0.1)
+    raise RuntimeError("cancelled OMP container did not become available to stop")
+
+
+async def cancel_active_mission(run_id: str) -> bool:
+    active = ACTIVE_MISSIONS.get(run_id)
+    if active is None:
+        return False
+    container_name, cancellation = active
+    if cancellation.is_set():
+        return True
+    cancellation.set()
+    try:
+        await asyncio.to_thread(stop_omp_container, container_name)
+    except Exception as exc:
+        print(f"failed to stop cancelled OMP container: {type(exc).__name__}", flush=True)
+    return True
+
+
 async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-    """Run the mission, upload its product, then remove its temporary workspace."""
+    """Run a cancellable OMP container, upload its product, then remove its workspace."""
     goal = event.get("goal") if isinstance(event.get("goal"), str) else ""
     run_id = event.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         return {"status": "failed", "summary": "Mission is missing run_id."}
     if not goal.strip():
         return {"status": "failed", "summary": "Mission is missing its goal."}
+    resume_from_checkpoint = metadata.get("resume_from_checkpoint") is True
+    checkpoint_retained = False
+
+    ca_file = Path(MODEL_CA_FILE).expanduser() if MODEL_CA_FILE.strip() else None
+    if ca_file is None or not ca_file.is_file():
+        return {
+            "status": "failed",
+            "summary": "The worker cannot verify Agent Manager's cancellation endpoint because its Caddy root certificate is missing.",
+        }
+    upload_url = metadata.get("artifact_upload_url")
+    control_url = metadata.get("artifact_control_url")
+    if not isinstance(control_url, str) and isinstance(upload_url, str):
+        control_url = f"{upload_url.rsplit('/', 1)[0]}/control"
+    upload_token = metadata.get("artifact_upload_token")
+    try:
+        control = await asyncio.to_thread(
+            get_mission_control, control_url, upload_token, run_id, ca_file
+        )
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "summary": "The worker could not verify the mission's cancellation state.",
+            "error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+    control_status = control.get("status")
+    if control.get("cancel_requested") or control_status in {
+        "cancel_requested",
+        "cancelled",
+    }:
+        if resume_from_checkpoint:
+            remove_mission_checkpoint(run_id)
+        return {
+            "status": "cancelled",
+            "summary": "Mission cancelled at the user's request.",
+        }
+    if control_status == "needs_input":
+        return {
+            "status": "needs_input",
+            "summary": str(control.get("summary") or "Clarification is still required."),
+            "question": str(control.get("question") or "Please clarify the unresolved review feedback."),
+            "reviewer_approved": False,
+            "reviewer_count": control.get("reviewer_count", 0),
+            "artifacts": [],
+        }
+    if control_status not in {"queued", "running"}:
+        return {
+            "status": "failed",
+            "summary": f"Mission cannot resume from Manager status {control_status!r}.",
+        }
     if not shutil.which("docker"):
         return {
             "status": "failed",
@@ -521,9 +719,7 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
             "status": "failed",
             "summary": "The worker OMP image is missing its LiteLLM URL or virtual key.",
         }
-
-    ca_file = Path(MODEL_CA_FILE).expanduser() if MODEL_CA_FILE.strip() else None
-    if MODEL_BASE_URL.startswith("https://") and (ca_file is None or not ca_file.is_file()):
+    if MODEL_BASE_URL.startswith("https://") and not ca_file.is_file():
         return {
             "status": "failed",
             "summary": "The worker cannot verify the HTTPS model endpoint because its Caddy root certificate is missing.",
@@ -538,15 +734,36 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
         "base_ref": event.get("base_ref", "main"),
         "project_name": metadata.get("project_name"),
         "crew": crew,
+        "clarification": metadata.get("clarification"),
+        "reviewer_feedback": metadata.get("reviewer_feedback"),
+        "reviewer_count_start": 0,
     }
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="omp-mission-", dir=WORKSPACE) as temporary:
         run_dir = Path(temporary)
         mission_path = run_dir / "mission.json"
-        work_dir = run_dir / "work"
+        checkpoint_dir = mission_checkpoint_path(run_id) if resume_from_checkpoint else None
+        if resume_from_checkpoint:
+            try:
+                work_dir = validate_mission_checkpoint(run_id)
+            except (OSError, ValueError) as exc:
+                return {
+                    "status": "failed",
+                    "summary": "The worker could not restore the mission checkpoint.",
+                    "error": f"{type(exc).__name__}: {exc}"[:1000],
+                }
+        else:
+            work_dir = run_dir / "work"
+            work_dir.mkdir()
+        mission_path.write_text(
+            json.dumps(mission, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
         env_file = run_dir / "job.env"
-        work_dir.mkdir()
-        mission_path.write_text(json.dumps(mission, ensure_ascii=False) + "\n", encoding="utf-8")
+        if checkpoint_dir is not None and checkpoint_dir.is_symlink():
+            return {
+                "status": "failed",
+                "summary": "The mission checkpoint path is unsafe.",
+            }
         env_file.write_text(
             "\n".join(
                 [
@@ -561,8 +778,11 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
         )
         os.chmod(env_file, 0o600)
 
+        container_name = f"omp-mission-{uuid.uuid5(uuid.NAMESPACE_URL, run_id).hex[:20]}"
+        cancellation = asyncio.Event()
+        ACTIVE_MISSIONS[run_id] = (container_name, cancellation)
         command = [
-            "docker", "run", "--rm",
+            "docker", "run", "--rm", "--name", container_name,
             "--network", "bridge",
             "--read-only",
             "--user", f"{os.getuid()}:{os.getgid()}",
@@ -577,71 +797,150 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
             "--mount", f"type=bind,src={work_dir},dst=/work",
         ]
         command.extend(docker_model_host_args(MODEL_BASE_URL))
-        if ca_file is not None and ca_file.is_file():
-            command.extend([
-                "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/caddy-root.crt",
-                "--mount", f"type=bind,src={ca_file},dst=/etc/ssl/certs/caddy-root.crt,readonly",
-            ])
+        command.extend([
+            "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/caddy-root.crt",
+            "--mount", f"type=bind,src={ca_file},dst=/etc/ssl/certs/caddy-root.crt,readonly",
+        ])
         command.append(OMP_WORKER_IMAGE)
+
+        async def watch_cancellation() -> None:
+            while not cancellation.is_set():
+                await asyncio.sleep(CANCEL_POLL_INTERVAL_SECONDS)
+                if cancellation.is_set():
+                    return
+                try:
+                    state = await asyncio.to_thread(
+                        get_mission_control, control_url, upload_token, run_id, ca_file
+                    )
+                except Exception:
+                    continue
+                if state.get("cancel_requested") or state.get("status") in {
+                    "cancel_requested",
+                    "cancelled",
+                }:
+                    cancellation.set()
+                    try:
+                        await asyncio.to_thread(stop_omp_container, container_name)
+                    except Exception as exc:
+                        print(
+                            f"failed to stop cancelled OMP container: {type(exc).__name__}",
+                            flush=True,
+                        )
+                    return
+
+        watcher = asyncio.create_task(watch_cancellation())
         try:
-            completed = await asyncio.to_thread(
-                subprocess.run,
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=None,
-                text=True,
-                timeout=660,
-                check=False,
+            if cancellation.is_set():
+                return {
+                    "status": "cancelled",
+                    "summary": "Mission cancelled at the user's request.",
+                }
+            try:
+                completed = await asyncio.to_thread(
+                    subprocess.run,
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=None,
+                    text=True,
+                    timeout=660,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                if cancellation.is_set():
+                    return {
+                        "status": "cancelled",
+                        "summary": "Mission cancelled at the user's request.",
+                    }
+                try:
+                    await asyncio.to_thread(stop_omp_container, container_name)
+                except Exception:
+                    pass
+                return {
+                    "status": "failed",
+                    "summary": "The worker OMP image exceeded its 660-second limit.",
+                }
+            if cancellation.is_set():
+                return {
+                    "status": "cancelled",
+                    "summary": "Mission cancelled at the user's request.",
+                }
+            line = next(
+                (
+                    item
+                    for item in reversed((completed.stdout or "").splitlines())
+                    if item.startswith("{")
+                ),
+                "",
             )
-        except subprocess.TimeoutExpired:
-            return {
-                "status": "failed",
-                "summary": "The worker OMP image exceeded its 660-second limit.",
-            }
-        line = next(
-            (item for item in reversed(completed.stdout.splitlines()) if item.startswith("{")),
-            "",
-        )
-        if not line:
-            return {
-                "status": "failed",
-                "summary": "Worker OMP image exited without a result.",
-                "error": (completed.stderr or completed.stdout or "No worker output")[-1200:],
-            }
-        try:
-            result = json.loads(line)
-        except json.JSONDecodeError as exc:
-            return {
-                "status": "failed",
-                "summary": "Worker OMP image returned invalid JSON.",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        if not isinstance(result, dict):
-            return {"status": "failed", "summary": "Worker OMP image returned a non-object result."}
-        if result.get("mission_id") not in (None, run_id):
-            return {"status": "failed", "summary": "Worker OMP result has a mismatched mission_id."}
-        result["mission_id"] = run_id
-        result.setdefault("summary", "Worker OMP finished.")
-        result.pop("script", None)
-        result.pop("artifact", None)
-        if result.get("status") == "completed":
-            filename, content_type, content = await asyncio.to_thread(
-                package_artifacts, work_dir, result.get("artifacts")
-            )
-            descriptor = await asyncio.to_thread(
-                upload_artifact,
-                metadata.get("artifact_upload_url"),
-                metadata.get("artifact_upload_token"),
-                run_id,
-                filename,
-                content_type,
-                content,
-                ca_file,
-            )
-            result["artifact"] = descriptor
-        result.pop("artifacts", None)
-        return result
+            if not line:
+                return {
+                    "status": "failed",
+                    "summary": "Worker OMP image exited without a result.",
+                    "error": (completed.stderr or completed.stdout or "No worker output")[-1200:],
+                }
+            try:
+                result = json.loads(line)
+            except json.JSONDecodeError as exc:
+                return {
+                    "status": "failed",
+                    "summary": "Worker OMP image returned invalid JSON.",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            if not isinstance(result, dict):
+                return {
+                    "status": "failed",
+                    "summary": "Worker OMP image returned a non-object result.",
+                }
+            if result.get("mission_id") not in (None, run_id):
+                return {
+                    "status": "failed",
+                    "summary": "Worker OMP result has a mismatched mission_id.",
+                }
+            result["mission_id"] = run_id
+            result.setdefault("summary", "Worker OMP finished.")
+            result.pop("script", None)
+            result.pop("artifact", None)
+            if result.get("status") == "needs_input":
+                if not resume_from_checkpoint:
+                    save_mission_checkpoint(work_dir, run_id)
+                checkpoint_retained = True
+                return result
+            if result.get("status") == "completed":
+                current_control = await asyncio.to_thread(
+                    get_mission_control, control_url, upload_token, run_id, ca_file
+                )
+                if (
+                    cancellation.is_set()
+                    or current_control.get("cancel_requested")
+                    or current_control.get("status") in {"cancel_requested", "cancelled"}
+                ):
+                    return {
+                        "status": "cancelled",
+                        "summary": "Mission cancelled at the user's request.",
+                    }
+                filename, content_type, content = await asyncio.to_thread(
+                    package_artifacts, work_dir, result.get("artifacts")
+                )
+                descriptor = await asyncio.to_thread(
+                    upload_artifact,
+                    upload_url,
+                    upload_token,
+                    run_id,
+                    filename,
+                    content_type,
+                    content,
+                    ca_file,
+                )
+                result["artifact"] = descriptor
+            result.pop("artifacts", None)
+            return result
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+            ACTIVE_MISSIONS.pop(run_id, None)
+            if resume_from_checkpoint and not checkpoint_retained:
+                remove_mission_checkpoint(run_id)
 
 
 async def process_message(js: Any, message: Any) -> None:
@@ -802,6 +1101,21 @@ async def respond_to_health(message: Any, publish: Any) -> None:
         await publish(reply, json.dumps(payload).encode("utf-8"))
 
 
+async def respond_to_cancellation(message: Any) -> None:
+    try:
+        payload = json.loads(message.data.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    run_id = payload.get("run_id")
+    if isinstance(run_id, str) and not await cancel_active_mission(run_id):
+        try:
+            await asyncio.to_thread(remove_mission_checkpoint, run_id)
+        except ValueError:
+            return
+
+
 async def main() -> None:
     nc = await nats.connect(
         NATS_URL,
@@ -836,16 +1150,63 @@ async def main() -> None:
         ),
     )
 
+    resume_subscription = await js.pull_subscribe(
+        f"agent.runs.resume.{WORKER_ID}",
+        stream="AGENT_RUNS",
+        durable=f"agent-worker-resume-{WORKER_ID}",
+        config=ConsumerConfig(
+            ack_policy=AckPolicy.EXPLICIT,
+            ack_wait=900,
+            deliver_policy=DeliverPolicy.ALL,
+        ),
+    )
+
+    cancellation_subscription = await js.pull_subscribe(
+        "agent.runs.cancelled",
+        stream="AGENT_RUNS",
+        durable=f"agent-worker-cancel-{WORKER_ID}",
+        config=ConsumerConfig(
+            ack_policy=AckPolicy.EXPLICIT,
+            ack_wait=60,
+            deliver_policy=DeliverPolicy.ALL,
+        ),
+    )
+
+    async def cancellation_loop() -> None:
+        while True:
+            try:
+                messages = await cancellation_subscription.fetch(1, timeout=1)
+            except NatsTimeoutError:
+                continue
+            message = messages[0]
+            try:
+                await respond_to_cancellation(message)
+                await message.ack()
+            except Exception as exc:
+                print(f"cancellation event handling failed: {type(exc).__name__}", flush=True)
+                await message.nak()
+
+    cancellation_task = asyncio.create_task(cancellation_loop())
+
     try:
         while True:
             try:
-                messages = await subscription.fetch(1, timeout=120)
+                resumed = await resume_subscription.fetch(1, timeout=0.25)
             except NatsTimeoutError:
-                continue
-            await process_message(js, messages[0])
+                try:
+                    created = await subscription.fetch(1, timeout=1)
+                except NatsTimeoutError:
+                    continue
+                await process_message(js, created[0])
+            else:
+                await process_message(js, resumed[0])
     finally:
         heartbeat.cancel()
+        cancellation_task.cancel()
+        await asyncio.gather(cancellation_task, return_exceptions=True)
         await subscription.unsubscribe()
+        await resume_subscription.unsubscribe()
+        await cancellation_subscription.unsubscribe()
         await nc.close()
 
 

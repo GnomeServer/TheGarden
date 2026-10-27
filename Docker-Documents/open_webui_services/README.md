@@ -140,27 +140,31 @@ https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 
 ## Naming Agent Manager work from Open WebUI
 
-Open WebUI's Pipe source is `agent_manager_pipe.py`; `test_agent_manager_pipe.py`
-is a unit-test file and must not be imported as the Pipe. When a user submits a
-task without `Project: <name>`, the Pipe asks for the project name in an input
-dialog. A leading `Script: <filename>` directive overrides the filename
-derived from the task:
+Open WebUI's Pipe source is `agent_manager_pipe.py`;
+`test_agent_manager_pipe.py` is a unit-test file and must not be imported as
+the Pipe. A leading `Project: <name>` directive names the mission. Without it,
+Agent Manager derives a project title from the goal. The Pipe requires a
+`FORGEJO_REPOSITORY` valve; when it is empty, OMP asks for a repository in
+`owner/project` form. This mission Pipe does not accept a `Script: <filename>`
+directive.
 
-```text
-Project: quarterly-audit
-Script: audit_report.py
+The Open WebUI Stop button sends a run-scoped cancellation request for the
+active mission. The worker stops its named OMP container and reports the final
+`cancelled` state. Closing the browser tab alone does not cancel the background
+Pipe task. If a worker is offline, it checks the queued run's cancellation
+state before starting it after reconnecting.
 
-Create a dependency-free script that writes a report.json file.
-```
-
-Named scripts are stored at `<workspace>/<project-slug>/<normalized-filename>`. `.py` is added only when omitted. Duplicates become `name_2.py`, `name_3.py`. The UUID remains the Agent Manager run ID. The Pipe requires the `FORGEJO_REPOSITORY` valve. It stops on `completed`, `failed`, or `cancelled`, not on `cancel_requested`.
-API callers without an input dialog must include `Project: <name>`.
+After ten rejected coder-reviewer attempts, the Pipe presents the reviewer's
+specific clarification question. Your answer resumes the same mission from its
+worker checkpoint and resets the review counter to zero. Other execution errors
+remain failures; only the reviewer-limit case pauses for clarification.
 
 Completed work is returned as Manager-hosted artifact downloads, not inline
-source. A single output file downloads directly; multiple output files are
-packaged as a ZIP bundle. Download links are signed and expire after seven
-days. Worker workspaces are temporary and are cleaned up after the job, so
-download artifacts before the links expire rather than relying on workspace files remaining available.
+source. Every mission's output is packaged as a ZIP, even if it contains just
+one file. Download links are signed and expire after seven days. Completed or
+cancelled runs clean their workspaces; `needs_input` preserves a worker-local
+checkpoint until the user clarifies or cancels. Download completed artifacts
+before their links expire.
 
 The Pipe's `AGENT_MANAGER_API_TOKEN` valve must be set to the separate
 run-only `AGENT_MANAGER_OPENWEBUI_TOKEN` from Agent Manager's private `.env`.

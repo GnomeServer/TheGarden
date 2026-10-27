@@ -4,8 +4,18 @@ import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
-from agent_manager.omp import OmpTurn, accept_or_bounce, mission_status
+from fastapi import HTTPException
+from agent_manager.artifacts import upload_token_hash
+from agent_manager.omp import (
+    MissionClarification,
+    OmpTurn,
+    accept_or_bounce,
+    cancel_mission,
+    mission_cancel_token_hash,
+    mission_control,
+    mission_status,
+    resume_mission,
+)
 
 
 class CapturingJetStream:
@@ -47,12 +57,14 @@ class MissionReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply["type"], "mission")
         self.assertEqual(reply["status"], "queued")
         self.assertTrue(reply["mission_id"])
+        self.assertGreaterEqual(len(reply["cancel_token"]), 32)
         self.assertEqual(len(jetstream.events), 1)
         subject, event, _headers = jetstream.events[0]
         self.assertEqual(subject, "agent.runs.created")
         self.assertEqual(event["run_id"], reply["mission_id"])
         self.assertEqual(event["metadata"]["operation"], "mission")
-
+        self.assertIn("artifact_control_url", event["metadata"])
+        self.assertNotIn("mission_cancel_token_hash", event["metadata"])
 
     async def test_mission_status_exposes_valid_reviewer_count(self) -> None:
         record = SimpleNamespace(
@@ -67,6 +79,30 @@ class MissionReceiptTests(unittest.IsolatedAsyncioTestCase):
         session = SimpleNamespace(get=AsyncMock(return_value=record))
         response = await mission_status("mission-1", SimpleNamespace(), session)
         self.assertEqual(response["reviewer_count"], 3)
+
+    async def test_needs_input_status_exposes_question_without_artifact(self) -> None:
+        record = SimpleNamespace(
+            id="mission-clarification",
+            status="needs_input",
+            run_metadata={
+                "operation": "mission",
+                "result": {
+                    "reviewer_count": 10,
+                    "question": "Should the result favor speed or accuracy?",
+                },
+                "ledger": {"result_summary": "Reviewer limit reached."},
+            },
+        )
+        session = SimpleNamespace(get=AsyncMock(return_value=record))
+
+        response = await mission_status("mission-clarification", SimpleNamespace(), session)
+
+        self.assertEqual(response["status"], "needs_input")
+        self.assertEqual(response["reviewer_count"], 10)
+        self.assertEqual(
+            response["question"], "Should the result favor speed or accuracy?"
+        )
+        self.assertIsNone(response["artifact"])
 
     async def test_mission_status_sanitizes_invalid_reviewer_count(self) -> None:
         for value in (True, -1, "3", None):
@@ -83,6 +119,180 @@ class MissionReceiptTests(unittest.IsolatedAsyncioTestCase):
                 session = SimpleNamespace(get=AsyncMock(return_value=record))
                 response = await mission_status("mission-1", SimpleNamespace(), session)
                 self.assertIsNone(response["reviewer_count"])
+
+    async def test_queued_mission_cancel_is_idempotent(self) -> None:
+        token = "t" * 40
+        jetstream = CapturingJetStream()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(nats=SimpleNamespace(jetstream=lambda: jetstream))
+            )
+        )
+        record = SimpleNamespace(
+            id="mission-1",
+            status="queued",
+            completed_at=None,
+            run_metadata={
+                "operation": "mission",
+                "mission_cancel_token_hash": mission_cancel_token_hash(token),
+            },
+        )
+        session = SimpleNamespace(
+            get=AsyncMock(return_value=record),
+            commit=AsyncMock(),
+        )
+
+        first = await cancel_mission(
+            "mission-1", request, f"Bearer {token}", session
+        )
+        second = await cancel_mission(
+            "mission-1", request, f"Bearer {token}", session
+        )
+
+        self.assertEqual(first["status"], "cancelled")
+        self.assertEqual(second["status"], "cancelled")
+        self.assertIsNotNone(record.completed_at)
+        session.commit.assert_awaited_once()
+        self.assertEqual(len(jetstream.events), 1)
+        self.assertEqual(jetstream.events[0][0], "agent.runs.cancelled")
+
+    async def test_running_mission_cancel_requests_worker_stop(self) -> None:
+        token = "t" * 40
+        jetstream = CapturingJetStream()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(nats=SimpleNamespace(jetstream=lambda: jetstream))
+            )
+        )
+        record = SimpleNamespace(
+            id="mission-2",
+            status="running",
+            run_metadata={
+                "operation": "mission",
+                "mission_cancel_token_hash": mission_cancel_token_hash(token),
+            },
+        )
+        session = SimpleNamespace(
+            get=AsyncMock(return_value=record),
+            commit=AsyncMock(),
+        )
+
+        response = await cancel_mission(
+            "mission-2", request, f"Bearer {token}", session
+        )
+
+        self.assertEqual(response["status"], "cancel_requested")
+        self.assertEqual(record.status, "cancel_requested")
+        self.assertEqual(jetstream.events[0][0], "agent.runs.cancelled")
+
+    async def test_mission_control_requires_worker_upload_capability(self) -> None:
+        token = "upload-capability"
+        record = SimpleNamespace(
+            id="mission-3",
+            status="cancel_requested",
+            run_metadata={
+                "operation": "mission",
+                "artifact_upload_token_hash": upload_token_hash(token),
+            },
+        )
+        session = SimpleNamespace(get=AsyncMock(return_value=record))
+
+        with self.assertRaises(HTTPException) as caught:
+            await mission_control(
+                "mission-3", "Bearer wrong", session
+            )
+        self.assertEqual(caught.exception.status_code, 404)
+        response = await mission_control(
+            "mission-3", f"Bearer {token}", session
+        )
+        self.assertTrue(response["cancel_requested"])
+        self.assertEqual(response["status"], "cancel_requested")
+
+    async def test_resume_resets_reviewer_count_and_targets_original_worker(self) -> None:
+        token = "c" * 40
+        jetstream = CapturingJetStream()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(nats=SimpleNamespace(jetstream=lambda: jetstream))
+            )
+        )
+        record = SimpleNamespace(
+            id="mission-resume",
+            goal="Create a product with clear behavior.",
+            forgejo_repository="test/smoke",
+            base_ref="main",
+            model=None,
+            worker_id="worker-03",
+            status="needs_input",
+            error=None,
+            completed_at=None,
+            run_metadata={
+                "operation": "mission",
+                "project_name": "smoke",
+                "worker_role": "coder",
+                "mission_cancel_token_hash": mission_cancel_token_hash(token),
+                "result": {
+                    "status": "needs_input",
+                    "reviewer_count": 10,
+                    "question": "Should the result favor speed or accuracy?",
+                },
+                "ledger": {"result_summary": "Reviewer limit reached."},
+            },
+        )
+        session = SimpleNamespace(
+            get=AsyncMock(return_value=record),
+            commit=AsyncMock(),
+        )
+
+        reply = await resume_mission(
+            record.id,
+            MissionClarification(clarification="Prioritize accuracy."),
+            request,
+            f"Bearer {token}",
+            session,
+        )
+
+        self.assertEqual(reply["mission_id"], record.id)
+        self.assertEqual(reply["status"], "queued")
+        self.assertEqual(record.status, "queued")
+        self.assertEqual(record.run_metadata["result"]["reviewer_count"], 0)
+        self.assertEqual(record.run_metadata["resume_count"], 1)
+        self.assertEqual(len(jetstream.events), 1)
+        subject, event, _headers = jetstream.events[0]
+        self.assertEqual(subject, "agent.runs.resume.worker-03")
+        self.assertEqual(event["run_id"], record.id)
+        self.assertTrue(event["metadata"]["resume_from_checkpoint"])
+        self.assertEqual(event["metadata"]["reviewer_count_reset"], 0)
+        self.assertEqual(event["metadata"]["clarification"], "Prioritize accuracy.")
+    async def test_waiting_for_input_mission_can_be_explicitly_cancelled(self) -> None:
+        token = "c" * 40
+        jetstream = CapturingJetStream()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(nats=SimpleNamespace(jetstream=lambda: jetstream))
+            )
+        )
+        record = SimpleNamespace(
+            id="mission-waiting",
+            status="needs_input",
+            completed_at=None,
+            run_metadata={
+                "operation": "mission",
+                "mission_cancel_token_hash": mission_cancel_token_hash(token),
+            },
+        )
+        session = SimpleNamespace(
+            get=AsyncMock(return_value=record),
+            commit=AsyncMock(),
+        )
+
+        response = await cancel_mission(
+            record.id, request, f"Bearer {token}", session
+        )
+
+        self.assertEqual(response["status"], "cancelled")
+        self.assertIsNotNone(record.completed_at)
+        self.assertEqual(jetstream.events[0][0], "agent.runs.cancelled")
 
 if __name__ == "__main__":
     unittest.main()

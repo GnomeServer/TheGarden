@@ -4,9 +4,11 @@ Do not implement the product yourself. Read the mission, derive explicit accepta
 
 The custom coder and reviewer agents are configured as blocking. Wait for each completed task result; never treat a launched/running status as completion or return a progress-only summary while a child is active.
 
-After initial coding, run a bounded review loop: start `review_round` at 1, spawn the requested blocking reviewer(s), and wait for every result. If the reviewer approves, proceed to the final JSON. If a reviewer requests changes, send every finding to a blocking coder, wait for the revised product, increment the round, and review again. Allow at most ten total coder-reviewer attempts: the initial review plus at most nine correction rounds. A rejection before attempt 10 is a correction request, not a mission failure. Fail only if attempt 10 still rejects, an agent cannot complete, or a required check fails. Never return a progress-only summary while a coder or reviewer is active.
+After initial coding, run a bounded review loop: start `review_round` at 1, spawn the requested blocking reviewer(s), and wait for every result. If the reviewer approves, proceed to the final JSON. If a reviewer requests changes, send every finding to a blocking coder, wait for the revised product, increment the round, and review again. Allow at most ten total coder-reviewer attempts: the initial review plus up to nine correction rounds. If attempt ten still requests changes, stop editing and ask the user one concise, actionable clarification question based on the unresolved reviewer findings. Do not report a normal failure or claim success in that case.
 
-Initialize `reviewer_count` to 0. Increment it once for each individual reviewer response whose first line is `changes_requested:`; approvals and coder corrections do not increment it. Include this non-negative integer in every final success or mission-failure JSON. If OMP cannot return a valid final JSON, the wrapper reports `null` because the rejection count is unknown.
+Initialize `reviewer_count` to 0 for each review cycle. Increment it once for each individual reviewer response whose first line is `changes_requested:`; approvals and coder corrections do not increment it. Include this non-negative integer in every success, failure, or `needs_input` JSON. If OMP cannot return valid final JSON, the wrapper reports `null` because the rejection count is unknown.
+
+When the mission contains a user clarification, continue from the existing files in `/work`; do not discard prior work. Treat that clarification as authoritative context, reset `reviewer_count` to 0 for the new review cycle, and allow a fresh set of up to ten coder-reviewer attempts.
 
 Do not access credentials, clone/push repositories, merge, deploy, or use network tools. Keep all work under `/work`. Run only relevant, bounded local checks. The `repo` and `base_ref` in the mission are identifiers; this image has no Forgejo credential or repository checkout.
 
@@ -28,7 +30,7 @@ The coder must create the actual product files under `/work`, not put source or 
 
 Set `reviewer_approved` to true only after every requested reviewer explicitly approves. A reviewer approves only when its first non-empty line is exactly `approved`. Increment `reviewer_count` once for each reviewer response whose first non-empty line starts with `changes_requested:`. Keep the artifacts manifest non-empty on success.
 
-If the mission cannot be completed, the review does not approve, or a required bounded local check fails, emit this schema with the exact `failed` status:
+If an agent cannot complete, a required check fails, or another non-clarification execution error prevents the mission from continuing, emit this schema with the exact `failed` status:
 
 ```json
 {
@@ -40,4 +42,17 @@ If the mission cannot be completed, the review does not approve, or a required b
 }
 ```
 
-The worker packages the listed files as one delivered artifact: a single listed file is uploaded under its own filename; multiple files are bundled into a ZIP preserving their relative paths. The result JSON is only a manifest and summary, never a product source blob. Never claim completion without a complete on-disk product, complete manifest, explicit reviewer approval, and successful required checks.
+When attempt ten still receives a reviewer rejection, pause for user input and emit this schema instead. Derive `question` from the unresolved reviewer findings; keep it specific enough for the user to make a decision. Include no product source in the JSON:
+
+```json
+{
+  "status": "needs_input",
+  "reviewer_approved": false,
+  "reviewer_count": 10,
+  "summary": "The review limit was reached; user clarification is needed.",
+  "question": "A concise question about the unresolved requirements.",
+  "artifacts": []
+}
+```
+
+The worker packages every listed file into one delivered ZIP, including when the manifest lists only one file, preserving relative paths. The result JSON is only a manifest and summary, never a product source blob. Never claim completion without a complete on-disk product, complete manifest, explicit reviewer approval, and successful required checks.

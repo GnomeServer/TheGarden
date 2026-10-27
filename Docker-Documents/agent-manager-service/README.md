@@ -12,20 +12,25 @@ mission, estimates crew counts, stores the run, and publishes
 `agent.runs.created`. NATS JetStream assigns it to one available coder worker.
 For `mission` runs, the worker's local OMP calls the worker-scoped LiteLLM
 endpoint. A model-backed planner creates acceptance criteria and coder tasks;
-coders produce goal-driven files; independent reviewers can request up to three
-revision attempts. Accepted artifact contents and review evidence return in the
-worker completion event and are stored in `metadata.result`. Artifacts are
-saved under the worker's `AGENT_WORKSPACE/missions/` directory. This flow does
-not clone, modify, or push the configured Forgejo repository, and it does not
-execute generated files. The manager consumes `agent.runs.status` and
-`agent.runs.completed`; status moves `queued` to `running`, terminal events
-close the run, and late events cannot reopen it.
+coders produce goal-driven files, and independent reviewers assess each attempt.
+After ten unsuccessful reviewer attempts, the worker reports `needs_input` with
+a specific question and retains a checkpoint. The user's clarification resumes
+the same mission with `reviewer_count` reset to zero.
 
-OpenWebUI polls mission status and returns generated artifact files after
-completion. A later “what's the status?” message queries that same mission
-instead of creating another run. The dashboard shows the current run phase and
-worker, refreshing every 30 seconds; per-agent model calls are summarized after
-the crew finishes rather than streamed live.
+The worker validates the accepted artifact manifest, packages every mission
+result as a ZIP (including a single-file result), and uploads it to Agent
+Manager. PostgreSQL stores the ZIP bytes in `mission_artifacts`; the mission
+status exposes a signed download link. The worker does not clone, modify, or
+push the configured Forgejo repository, and it does not execute generated
+files. The manager consumes `agent.runs.status` and `agent.runs.completed`;
+`needs_input` is nonterminal, terminal events close the run, and late events
+cannot reopen it.
+
+OpenWebUI polls mission status and returns a ZIP download link rather than
+inline source blocks. A later “what's the status?” message queries that same
+mission instead of creating another run. The dashboard shows the current run
+phase and worker, refreshing every 30 seconds; per-agent model calls are
+summarized after the crew finishes rather than streamed live.
 
 The dashboard's worker runtime view aggregates `RunRecord` start and completion
 timestamps by worker and UTC day. The
@@ -226,13 +231,11 @@ The request is stored in PostgreSQL and published to the JetStream subject:
 agent.runs.created
 ```
 
-The cancellation endpoint is `POST /v1/runs/{run_id}/cancel`. It sets `cancel_requested` and publishes:
-
-```text
-agent.runs.cancelled
-```
-
-Already `completed`, `failed`, or `cancelled` is returned unchanged and is not published. Nothing consumes `agent.runs.cancelled`, so the status never becomes `cancelled`. The Open WebUI Pipe treats only `completed`, `failed`, and `cancelled` as finished, so `cancel_requested` keeps it polling.
+The administrator cancellation endpoint is `POST /v1/runs/{run_id}/cancel`.
+It marks the run `cancel_requested` and publishes `agent.runs.cancelled`.
+Workers consume that event, stop active work, and report a `cancelled`
+completion; a late success cannot override the cancellation request. OMP
+missions use their run-scoped cancellation capability, described below.
 
 `worker_role` and `operation` are not request fields. Put them in `metadata`. A top-level object is accepted and ignored:
 
@@ -271,16 +274,23 @@ Bearer token required. A missing or wrong token is 401.
 | POST | `/v1/runs` | 202. Stores `queued`, then publishes `agent.runs.created`. Publish failure sets `failed` and returns 503 `run could not be queued`. |
 | GET | `/v1/runs` | Newest first. Query `status` is an exact match. `limit` defaults to 50 and must be 1–200. |
 | GET | `/v1/runs/{run_id}` | 404 detail is `run not found`. |
-| POST | `/v1/runs/{run_id}/cancel` | See the cancellation rules above. |
+| POST | `/v1/runs/{run_id}/cancel` | Administrator API token. Requests cancellation through the worker event stream. |
+| POST | `/v1/omp/missions/{mission_id}/cancel` | Run-scoped cancellation capability returned to the Pipe; queued missions cancel immediately, running missions become `cancel_requested`. |
+| GET | `/v1/omp/missions/{mission_id}/control` | Worker-only read using its upload capability; reports whether cancellation was requested. |
+| POST | `/v1/omp/missions/{mission_id}/resume` | Run-scoped capability. Resumes a `needs_input` mission on its original worker, preserving the checkpoint and resetting `reviewer_count` to zero. |
+
+The mission-specific routes use their per-run Bearer capabilities rather than
+the global administrator API token.
 
 `project_name` and `script_name` are stored inside `metadata`, not as columns. The same keys in the JSON body replace copies inside client `metadata`.
 
 ## Mission artifacts
 
 Each queued mission receives a run-scoped upload capability in its
-`agent.runs.created` event metadata. The worker uploads one file or ZIP as a raw
-request body to `PUT /v1/omp/missions/{run_id}/artifact`, with
-`X-Artifact-Filename` and `Content-Type` headers. Uploads are limited to 50 MiB;
+`agent.runs.created` event metadata. The worker uploads a ZIP containing every
+output file, including a single-file result, as the raw request body to
+`PUT /v1/omp/missions/{run_id}/artifact`, with `X-Artifact-Filename` and
+`Content-Type` headers. Uploads are limited to 50 MiB;
 the manager rejects unsafe filenames, allows same-content retries, and rejects
 a different second artifact. Artifact bytes are stored in the
 `mission_artifacts` PostgreSQL table, backed by the existing
@@ -289,6 +299,27 @@ and a signed download URL that expires after seven days. Daily cleanup removes
 artifact rows after the default 30-day retention period; set
 `ARTIFACT_RETENTION_DAYS` to change the retention period.
 
+## Mission cancellation
+
+Open WebUI's explicit Stop action posts to
+`/v1/omp/missions/{mission_id}/cancel` with a run-scoped capability. Queued
+missions become `cancelled`; running missions become `cancel_requested` until
+the worker confirms the stop. The worker checks cancellation state before
+launching and while its named OMP container runs, then reports `cancelled`.
+Closing the browser tab alone does not cancel a background Pipe task. If a
+worker is offline, a cancellation remains pending; the worker checks state
+before it can start that queued mission after reconnecting.
+
+
+## Reviewer-limit clarification
+
+After ten coder-reviewer attempts without approval, the run enters the
+nonterminal `needs_input` state and exposes a specific clarification question.
+The worker saves the current `/work` files in its per-run checkpoint, then
+becomes idle. Open WebUI prompts for clarification and posts the answer to
+`/v1/omp/missions/{mission_id}/resume`; the Manager targets the same worker and
+run. The resumed review cycle starts with `reviewer_count: 0`. Explicit cancel
+remains available while waiting for input.
 Compose and `.env.example` set `MODEL_BASE_URL` to `http://llama:8080/v1`. The Python fallback `http://litellm:4000/v1` is unused while Compose sets the variable. The API does not call Forgejo, llama.cpp, LiteLLM, or Ollama. Ollama is on `open-webui_internal` at `http://ollama:11434`.
 
 ## Caddy routes and metrics

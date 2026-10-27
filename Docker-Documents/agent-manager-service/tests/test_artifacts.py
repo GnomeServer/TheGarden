@@ -52,7 +52,7 @@ class MemorySession:
         self.commit = AsyncMock()
         self.rollback = AsyncMock()
 
-    async def get(self, model, key):
+    async def get(self, model, key, **_kwargs):
         if model is RunRecord:
             return self.record if self.record.id == key else None
         if model is ArtifactBlobRecord:
@@ -367,7 +367,7 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
             completed_at=None,
         )
 
-        async def get_record(model, _record_id):
+        async def get_record(model, _record_id, **_kwargs):
             return record if model is RunRecord else None
 
         session = SimpleNamespace(

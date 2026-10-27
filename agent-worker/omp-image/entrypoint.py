@@ -107,11 +107,18 @@ def extract_result(text: str) -> dict[str, Any] | None:
             value, _end = decoder.raw_decode(stripped[index:])
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and value.get("status") in {
-            "completed", "accepted", "failed", "blocked", "rejected"
-        }:
+        if (
+            isinstance(value, dict)
+            and value.get("status") in {
+                "completed",
+                "accepted",
+                "failed",
+                "blocked",
+                "rejected",
+                "needs_input",
+            }
+        ):
             return value
-    return None
 
 
 def validate_artifact_paths(value: Any) -> list[str]:
@@ -180,7 +187,17 @@ def normalize_result(result: dict[str, Any], mission_id: str) -> dict[str, Any]:
     reported_status = result.get("status")
     approved = result.get("reviewer_approved") is True
     result.pop("script", None)
-    if reported_status in {"accepted", "completed"} and approved:
+    if reported_status == "needs_input":
+        question = result.get("question")
+        if approved or reviewer_count < 10 or not isinstance(question, str) or not question.strip():
+            raise RuntimeError(
+                "OMP needs_input result must include ten reviewer rejections and a clarification question"
+            )
+        result["status"] = "needs_input"
+        result["reviewer_approved"] = False
+        result["question"] = question.strip()[:2000]
+        result["artifacts"] = []
+    elif reported_status in {"accepted", "completed"} and approved:
         result["artifacts"] = validate_artifact_paths(result.get("artifacts"))
         result["status"] = "completed"
     else:
@@ -189,12 +206,15 @@ def normalize_result(result: dict[str, Any], mission_id: str) -> dict[str, Any]:
         if reported_status in {"accepted", "completed"} and not approved:
             result["summary"] = "Worker OMP did not report explicit reviewer approval."
     result["bounce_to"] = "none"
-    result["steps"] = [
-        item for item in result.get("steps", []) if isinstance(item, str)
-    ] if isinstance(result.get("steps"), list) else []
+    result["steps"] = (
+        [item for item in result.get("steps", []) if isinstance(item, str)]
+        if isinstance(result.get("steps"), list)
+        else []
+    )
     if not isinstance(result.get("summary"), str) or not result["summary"].strip():
         raise RuntimeError("OMP result omitted a useful summary")
     return result
+
 
 def _write_progress(mission_id: str, phase: str, **details: Any) -> None:
     event = {

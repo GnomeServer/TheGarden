@@ -86,6 +86,46 @@ class MissionResultTests(unittest.TestCase):
         text = "OMP completed the task.\n" + json.dumps(expected) + "\n"
         self.assertEqual(entrypoint.extract_result(text), expected)
 
+    def test_needs_input_result_requests_clarification_after_retry_limit(self) -> None:
+        result = {
+            "mission_id": "mission-1",
+            "status": "needs_input",
+            "reviewer_approved": False,
+            "reviewer_count": 10,
+            "summary": "The reviewer still rejects one requirement.",
+            "question": "Should the result prioritize speed or accuracy?",
+            "artifacts": [],
+        }
+
+        self.assertEqual(
+            entrypoint.extract_result("Additional notes.\n" + json.dumps(result)),
+            result,
+        )
+        normalized = entrypoint.normalize_result(result.copy(), "mission-1")
+        self.assertEqual(normalized["status"], "needs_input")
+        self.assertEqual(normalized["reviewer_count"], 10)
+        self.assertEqual(normalized["question"], result["question"])
+        self.assertEqual(normalized["artifacts"], [])
+
+    def test_needs_input_requires_limit_and_question(self) -> None:
+        for overrides in (
+            {"reviewer_count": 9},
+            {"question": ""},
+        ):
+            result = {
+                "status": "needs_input",
+                "reviewer_approved": False,
+                "reviewer_count": 10,
+                "summary": "Clarification needed.",
+                "question": "Choose an output format.",
+                "artifacts": [],
+                **overrides,
+            }
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                RuntimeError, "ten reviewer rejections"
+            ):
+                entrypoint.normalize_result(result, "mission-1")
+
 
     def test_approved_result_returns_validated_artifact_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -10,11 +10,12 @@ For `mission`, the worker launches the pinned OMP job image. Its planner
 coordinates the requested coder and reviewer agents and accepts a result only
 after explicit reviewer approval. The isolated image receives a temporary
 workspace, mission file, scoped LiteLLM key, and trusted Caddy certificate; it
-has no Docker socket. The host worker validates the artifact manifest,
-packages one file or a ZIP, and uploads it over verified TLS to Agent Manager
-using a run-scoped capability. Agent Manager stores the bytes in PostgreSQL and
-returns a signed download link; the temporary OMP workspace is removed after
-upload. The worker does not clone or push the configured Forgejo repository.
+has no Docker socket. The host worker validates the artifact manifest, packages
+every result as a ZIP, including single-file results, and uploads it over
+verified TLS to Agent Manager using a run-scoped capability. Agent Manager
+stores the bytes in PostgreSQL and returns a signed download link; the temporary
+OMP workspace is removed after upload. The worker does not clone or push the
+configured Forgejo repository.
 
 The separate legacy `create-python-script` operation remains disabled by
 default. If explicitly enabled, it executes generated Python unsandboxed as the
@@ -83,22 +84,32 @@ the shared consumer.
 
 The NATS queue listener is `worker.py`; it launches the pinned OMP job image.
 Inside the image, OMP runs the planner and delegates to the requested coder
-and reviewer agents. Both agents block until their results are complete. The
-planner performs an initial review and up to nine correction rounds (ten review
-attempts total), but the worker's 600-second OMP timeout may stop the run sooner.
-It returns success only after explicit reviewer approval.
+and reviewer agents. Both agents block until their results are complete.
+The planner performs an initial review and up to nine correction rounds (ten
+review attempts total); the worker's 600-second OMP timeout may stop a run
+sooner. If attempt ten is still rejected, the mission enters `needs_input` and
+asks the user one specific clarification question instead of failing or
+cancelling. A clarification resumes the same mission from its worker checkpoint
+with `reviewer_count` reset to zero for the new review cycle.
 
-The final JSON includes `reviewer_count`: the number of individual reviewer
-verdicts marked `changes_requested` (zero means the first review approved).
-Wrapper-generated failures use `null` when no valid final OMP result exists.
-The planner reports this count; the wrapper validates its type but does not
-independently reconstruct reviewer history.
-The Agent Manager mission-status JSON exposes the same field.
-The Agent Manager mission endpoint returns a signed artifact download link
-rather than embedding product source. One file downloads directly; multiple
-files are delivered as a ZIP. The worker removes its temporary workspace after
-upload. Artifacts are retained for 30 days by default; signed links expire
-after seven days.
+`reviewer_count` counts individual reviewer verdicts marked `changes_requested`;
+it is not the attempt number. Wrapper-generated failures use `null` when no
+valid final OMP result exists. The Agent Manager mission-status JSON exposes
+this count and the clarification question.
+
+For `needs_input`, the worker retains a bounded checkpoint under
+`~/agent-workspace/.pending-missions/` until the mission resumes or is explicitly
+cancelled. Final success still requires explicit reviewer approval and a
+complete artifact manifest. On success, the worker uploads the ZIP and removes
+its temporary workspace. Artifacts are retained for 30 days by default; signed
+links expire after seven days.
+
+The Open WebUI Stop action requests cancellation for the active mission. The
+Manager marks queued runs `cancelled` immediately and running runs
+`cancel_requested`; the worker listens for cancellation events, polls the
+run-scoped control endpoint, stops the named OMP container, and reports
+`cancelled`. A disconnected worker checks the stored state before starting a
+queued mission after reconnecting.
 
 The image's `worker-litellm/luna` model metadata declares a 4,096-token context
 and a 2,048-token output limit, matching the repository's default llama.cpp

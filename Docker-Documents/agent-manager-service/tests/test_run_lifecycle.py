@@ -218,5 +218,78 @@ class RunEventTests(unittest.IsolatedAsyncioTestCase):
         record_activity_mock.assert_not_awaited()
 
 
+    async def test_late_success_after_cancel_request_remains_cancelled(self):
+        run = make_run(status="cancel_requested")
+        run.run_metadata = {"mission_cancel_token_hash": "secret-hash"}
+        worker = SimpleNamespace(id="worker-02", reported_status="busy", current_run_id=run.id, last_error=None)
+        session = make_event_session(run, worker)
+
+        with (
+            patch("agent_manager.main.SessionLocal", return_value=SessionContext(session)),
+            patch("agent_manager.main.record_activity", new_callable=AsyncMock, return_value=object()),
+            patch("agent_manager.main.activity_out", return_value={}),
+            patch("agent_manager.main.live_broker.publish", new_callable=AsyncMock),
+            patch("agent_manager.main.RUNS_COMPLETED") as completed_counter,
+            patch("agent_manager.main.RUNS_FAILED") as failed_counter,
+        ):
+            await apply_run_completion(
+                {
+                    "run_id": run.id,
+                    "worker_id": "worker-02",
+                    "status": "completed",
+                    "event_id": "late-success",
+                }
+            )
+
+        result = RunOut.from_record(run)
+        self.assertEqual(result.status, "cancelled")
+        self.assertIsNone(result.error)
+        self.assertNotIn("mission_cancel_token_hash", result.metadata)
+        self.assertEqual(worker.reported_status, "idle")
+        completed_counter.assert_not_called()
+        failed_counter.assert_not_called()
+
+
+    async def test_needs_input_is_nonterminal_and_keeps_cancel_capability(self):
+        run = make_run(status="running")
+        run.run_metadata = {"mission_cancel_token_hash": "private-capability-hash"}
+        worker = SimpleNamespace(id="worker-02", reported_status="busy", current_run_id=run.id, last_error=None)
+        session = make_event_session(run, worker)
+
+        with (
+            patch("agent_manager.main.SessionLocal", return_value=SessionContext(session)),
+            patch("agent_manager.main.record_activity", new_callable=AsyncMock, return_value=object()),
+            patch("agent_manager.main.activity_out", return_value={}),
+            patch("agent_manager.main.live_broker.publish", new_callable=AsyncMock),
+            patch("agent_manager.main.RUNS_COMPLETED") as completed_counter,
+            patch("agent_manager.main.RUNS_FAILED") as failed_counter,
+        ):
+            await apply_run_completion(
+                {
+                    "run_id": run.id,
+                    "worker_id": "worker-02",
+                    "status": "needs_input",
+                    "reviewer_approved": False,
+                    "reviewer_count": 10,
+                    "summary": "The review limit was reached.",
+                    "question": "Should the feature prioritize speed or accuracy?",
+                    "event_id": "needs-input",
+                }
+            )
+
+        result = RunOut.from_record(run)
+        self.assertEqual(result.status, "needs_input")
+        self.assertIsNone(result.completed_at)
+        self.assertEqual(result.metadata["result"]["reviewer_count"], 10)
+        self.assertEqual(
+            result.metadata["result"]["question"],
+            "Should the feature prioritize speed or accuracy?",
+        )
+        self.assertIn("mission_cancel_token_hash", run.run_metadata)
+        self.assertNotIn("mission_cancel_token_hash", result.metadata)
+        self.assertEqual(worker.reported_status, "idle")
+        completed_counter.assert_not_called()
+        failed_counter.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

@@ -161,6 +161,7 @@ class RunOut(BaseModel):
                     "artifact_upload_token_hash",
                     "artifact_upload_token",
                     "artifact_upload_url",
+                    "mission_cancel_token_hash",
                 }
             },
             created_at=record.created_at,
@@ -383,8 +384,8 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
     worker_id = payload.get("worker_id")
     if not isinstance(run_id, str) or not run_id:
         raise ValueError("completion event is missing run_id")
-    if worker_status not in {"completed", "failed"}:
-        raise ValueError(f"unsupported worker status: {worker_status!r}")
+    if worker_status not in {"completed", "failed", "cancelled", "needs_input"}:
+        raise ValueError(f"unsupported run completion status: {worker_status!r}")
     event_id = str(payload.get("event_id") or f"run-completion:{run_id}:{worker_status}")
     async with SessionLocal() as session:
         record = await session.get(RunRecord, run_id, with_for_update=True)
@@ -395,16 +396,25 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
             logger.info("ignoring late completion for terminal run %s", run_id)
             return
         previous_status = record.status
+        final_status = (
+            "cancelled"
+            if previous_status in {"cancel_requested", "cancelled"}
+            or worker_status == "cancelled"
+            else worker_status
+        )
         metadata = dict(record.run_metadata or {})
         metadata.pop("artifact_upload_token_hash", None)
         metadata.pop("artifact_upload_token", None)
         metadata.pop("artifact_upload_url", None)
+        if final_status != "needs_input":
+            metadata.pop("mission_cancel_token_hash", None)
         completion = dict(payload)
         completion.pop("run_id", None)
         for secret_key in (
             "artifact_upload_token",
             "artifact_upload_token_hash",
             "artifact_upload_url",
+            "mission_cancel_token_hash",
         ):
             completion.pop(secret_key, None)
         metadata["result"] = completion
@@ -421,24 +431,24 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
             chatter.extend(step for step in steps if isinstance(step, str))
             metadata["chatter"] = chatter[-12:]
         record.run_metadata = metadata
-        record.status = worker_status
+        record.status = final_status
         record.error = (
             str(payload.get("error") or payload.get("stderr") or "worker failed")[:4000]
-            if worker_status == "failed"
+            if final_status == "failed"
             else None
         )
         if isinstance(worker_id, str) and worker_id:
             record.worker_id = worker_id
         if record.started_at is None:
             record.started_at = parse_event_time(payload.get("started_at"))
-        if record.completed_at is None:
+        if final_status != "needs_input" and record.completed_at is None:
             record.completed_at = (
                 parse_event_time(payload.get("completed_at"))
                 or datetime.now(timezone.utc)
             )
         worker = await session.get(WorkerRecord, worker_id) if isinstance(worker_id, str) else None
         if worker is not None:
-            worker.reported_status = "idle" if worker_status == "completed" else "degraded"
+            worker.reported_status = "degraded" if final_status == "failed" else "idle"
             worker.current_run_id = None
             worker.last_error = record.error
         existing = await session.scalar(
@@ -452,16 +462,27 @@ async def apply_run_completion(payload: dict[str, Any]) -> None:
                 session,
                 source="worker",
                 source_event_id=event_id,
-                event_type=f"run.{worker_status}",
+                event_type=f"run.{final_status}",
                 worker_id=worker.id if worker else None,
                 run_id=run_id,
-                summary="Worker completed a repository run" if worker_status == "completed" else "Worker failed a repository run",
+                summary=(
+                    "Worker completed a repository run"
+                    if final_status == "completed"
+                    else "Worker cancelled a repository run"
+                    if final_status == "cancelled"
+                    else "Worker requested user clarification"
+                    if final_status == "needs_input"
+                    else "Worker failed a repository run"
+                ),
                 payload={},
             )
         await session.commit()
-    if previous_status not in {"completed", "failed"}:
-        (RUNS_COMPLETED if worker_status == "completed" else RUNS_FAILED).inc()
-    await live_broker.publish("run", {"id": run_id, "status": worker_status, "worker_id": worker_id})
+    if previous_status not in {"completed", "failed", "cancelled"}:
+        if final_status == "completed":
+            RUNS_COMPLETED.inc()
+        elif final_status == "failed":
+            RUNS_FAILED.inc()
+    await live_broker.publish("run", {"id": run_id, "status": final_status, "worker_id": worker_id})
     if event is not None:
         await live_broker.publish("activity", activity_out(event))
 
@@ -1071,7 +1092,7 @@ async def cancel_run(
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
     del actor
-    record = await session.get(RunRecord, run_id)
+    record = await session.get(RunRecord, run_id, with_for_update=True)
     if record is None:
         raise HTTPException(status_code=404, detail="run not found")
     if record.status in {"completed", "failed", "cancelled"}:

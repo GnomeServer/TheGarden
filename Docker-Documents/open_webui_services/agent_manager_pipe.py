@@ -2,13 +2,18 @@
 
 import asyncio
 import inspect
+import logging
 import re
+import secrets
 import time
+import uuid
 from typing import Any
 
 import httpx
 from pydantic import BaseModel, Field
 
+
+logger = logging.getLogger(__name__)
 
 class Pipe:
     class Valves(BaseModel):
@@ -238,38 +243,6 @@ class Pipe:
                 return matches[-1]
         return None
 
-    @staticmethod
-    def _format_artifacts(artifacts: Any) -> str:
-        if not isinstance(artifacts, list):
-            return ""
-        chunks: list[str] = []
-        total = 0
-        languages = {
-            ".css": "css",
-            ".html": "html",
-            ".js": "javascript",
-            ".json": "json",
-            ".py": "python",
-            ".ts": "typescript",
-        }
-        for item in artifacts:
-            if not isinstance(item, dict):
-                continue
-            path, content = item.get("path"), item.get("content")
-            if not isinstance(path, str) or not isinstance(content, str):
-                continue
-            if total + len(content) > 28000:
-                chunks.append("Additional generated files were omitted from this chat response due to the size limit.")
-                break
-            fence = "```"
-            while fence in content:
-                fence += "`"
-            extension = "." + path.rsplit(".", 1)[-1].casefold() if "." in path else ""
-            language = languages.get(extension, "")
-            safe_path = path.replace("`", "")
-            chunks.append(f"**`{safe_path}`**\n\n{fence}{language}\n{content}\n{fence}")
-            total += len(content)
-        return "\n\n" + "\n\n".join(chunks) if chunks else ""
 
     @classmethod
     def _format_mission_status(
@@ -283,12 +256,19 @@ class Pipe:
             worker_id = state.get("worker_id")
             suffix = f" on worker `{worker_id}`" if isinstance(worker_id, str) and worker_id else ""
             prefix = f"Mission `{mission_id}` is {status}{suffix}."
+        elif status == "needs_input":
+            prefix = f"Mission `{mission_id}` is waiting for clarification."
+            question = state.get("question")
+            if isinstance(question, str) and question.strip():
+                summary = question.strip()
         elif status in {"completed", "failed", "bounced", "cancelled"}:
             prefix = f"Mission `{mission_id}` is {status}."
         else:
             prefix = f"Mission `{mission_id}` has status `{status or 'unknown'}`."
         reply = f"{prefix} {summary}".strip()
-        return reply + cls._format_artifacts(state.get("artifacts"))
+        if status == "completed":
+            reply += cls._format_artifacts(state.get("artifact"))
+        return reply
 
     @staticmethod
     def _error_detail(response: httpx.Response) -> str:
@@ -308,7 +288,7 @@ class Pipe:
         __event_emitter__: Any = None,
         __event_call__: Any = None,
     ) -> str:
-        del __user__, __event_call__
+        del __user__
         history = self._history(body)
         if not history or history[-1][0] != "user":
             return "Could not send the chat turn to OMP: no latest user message was found."
@@ -337,12 +317,19 @@ class Pipe:
         if not token:
             return "Could not reach OMP: configure the Agent Manager API token in this Pipe's valves."
 
-        request_body = {
-            "goal": goal,
-            "forgejo_repository": repository,
-            "project_name": project_name,
-            "model": body.get("model"),
-        }
+        cancel_token = ""
+        request_body: dict[str, Any] = {}
+        if not status_query:
+            mission_id = str(uuid.uuid4())
+            cancel_token = secrets.token_urlsafe(32)
+            request_body = {
+                "goal": goal,
+                "forgejo_repository": repository,
+                "project_name": project_name,
+                "model": body.get("model"),
+                "mission_id": mission_id,
+                "cancel_token": cancel_token,
+            }
         await self._emit_status(
             __event_emitter__,
             "Checking mission status…" if status_query else "Asking OMP…",
@@ -362,6 +349,10 @@ class Pipe:
                     )
                 response.raise_for_status()
                 reply = response.json()
+            except asyncio.CancelledError:
+                if not status_query:
+                    await self._request_cancel(client, mission_id, cancel_token)
+                raise
             except httpx.HTTPStatusError as exc:
                 action = "status lookup" if status_query else "chat turn"
                 return (
@@ -384,17 +375,59 @@ class Pipe:
                 return text if isinstance(text, str) and text.strip() else "OMP needs more information."
             if reply.get("type") == "mission":
                 summary = reply.get("summary") if isinstance(reply.get("summary"), str) else "Mission recorded."
-                mission_id = reply.get("mission_id")
-                if isinstance(mission_id, str) and mission_id:
-                    followed = await self._follow_mission(
-                        client, mission_id, token, summary, project_name, __event_emitter__
-                    )
+                returned_id = reply.get("mission_id")
+                returned_token = reply.get("cancel_token")
+                if isinstance(returned_id, str) and returned_id:
+                    mission_id = returned_id
+                    if isinstance(returned_token, str) and returned_token:
+                        cancel_token = returned_token
+                    try:
+                        followed = await self._follow_mission(
+                            client,
+                            mission_id,
+                            token,
+                            summary,
+                            project_name,
+                            __event_emitter__,
+                            cancel_token,
+                            __event_call__,
+                        )
+                    except asyncio.CancelledError:
+                        await self._request_cancel(client, mission_id, cancel_token)
+                        raise
                     await self._emit_status(__event_emitter__, followed, done=True)
                     return followed
                 project = f" for `{project_name}`" if project_name else ""
                 await self._emit_status(__event_emitter__, summary, done=True)
                 return f"{summary}{project}."
             return "OMP returned an unexpected response."
+
+    async def _request_cancel(
+        self, client: httpx.AsyncClient, mission_id: str, cancel_token: str
+    ) -> None:
+        url = (
+            f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}"
+            f"/v1/omp/missions/{mission_id}/cancel"
+        )
+        headers = {"Authorization": f"Bearer {cancel_token}"}
+        for _attempt in range(12):
+            try:
+                response = await client.post(url, headers=headers)
+            except httpx.HTTPError:
+                await asyncio.sleep(0.25)
+                continue
+            if response.status_code == 404 or response.status_code >= 500:
+                await asyncio.sleep(0.25)
+                continue
+            if response.status_code >= 400:
+                logger.error(
+                    "mission cancellation failed for %s with HTTP %d",
+                    mission_id,
+                    response.status_code,
+                )
+            return
+        logger.error("mission cancellation did not settle for %s", mission_id)
+
 
     async def _follow_mission(
         self,
@@ -404,6 +437,8 @@ class Pipe:
         summary: str,
         project_name: str | None,
         emitter: Any,
+        cancel_token: str,
+        event_call: Any,
     ) -> str:
         deadline = time.monotonic() + self.valves.RUN_TIMEOUT_SECONDS
         project = f" for `{project_name}`" if project_name else ""
@@ -433,6 +468,68 @@ class Pipe:
                 await self._emit_status(emitter, progress)
                 last_progress = progress
             last_status = status if isinstance(status, str) else "unknown"
+            if status == "cancelled":
+                return f"Mission `{mission_id}` was cancelled at your request."
+            if status == "needs_input":
+                question = state.get("question") or state.get("summary") or summary
+                if not isinstance(question, str) or not question.strip():
+                    question = "The reviewer reached its limit; clarify what should change."
+                if not callable(event_call):
+                    return (
+                        f"Mission `{mission_id}` is waiting for clarification: "
+                        f"{question}"
+                    )
+                answer = await event_call(
+                    {
+                        "type": "input",
+                        "data": {
+                            "title": "Clarification needed",
+                            "message": question,
+                            "placeholder": "Clarify the requirement for the reviewer",
+                        },
+                    }
+                )
+                if isinstance(answer, dict):
+                    if answer.get("error"):
+                        return (
+                            f"Mission `{mission_id}` is still waiting for clarification: "
+                            f"{question}"
+                        )
+                    answer = answer.get("value") or answer.get("text") or answer.get("content")
+                if not isinstance(answer, str) or not answer.strip():
+                    return (
+                        f"Mission `{mission_id}` is still waiting for clarification: "
+                        f"{question}"
+                    )
+                resume_url = (
+                    f"{self.valves.AGENT_MANAGER_URL.rstrip('/')}"
+                    f"/v1/omp/missions/{mission_id}/resume"
+                )
+                try:
+                    resumed = await client.post(
+                        resume_url,
+                        headers={"Authorization": f"Bearer {cancel_token}"},
+                        json={"clarification": answer.strip()},
+                    )
+                    resumed.raise_for_status()
+                    resumed_state = resumed.json()
+                except (httpx.HTTPError, ValueError) as exc:
+                    return (
+                        f"Could not resume mission `{mission_id}` after clarification: "
+                        f"{exc}"
+                    )
+                if not isinstance(resumed_state, dict) or resumed_state.get("status") != "queued":
+                    return (
+                        f"Mission `{mission_id}` did not resume; its clarification remains pending."
+                    )
+                summary = (
+                    resumed_state.get("summary")
+                    if isinstance(resumed_state.get("summary"), str)
+                    else "Clarification received; resuming."
+                )
+                last_status = "queued"
+                deadline = time.monotonic() + self.valves.RUN_TIMEOUT_SECONDS
+                continue
             if status == "bounced":
                 question = state.get("question") or done or summary
                 return question if isinstance(question, str) else summary

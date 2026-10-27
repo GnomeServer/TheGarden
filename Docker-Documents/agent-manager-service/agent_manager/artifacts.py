@@ -52,7 +52,11 @@ def upload_event_metadata(
 ) -> dict[str, Any]:
     metadata = dict(record.run_metadata or {})
     metadata.pop("artifact_upload_token_hash", None)
+    metadata.pop("mission_cancel_token_hash", None)
     metadata["artifact_upload_url"] = upload_url
+    metadata["artifact_control_url"] = (
+        f"{settings.public_url.rstrip('/')}/v1/omp/missions/{record.id}/control"
+    )
     metadata["artifact_upload_token"] = token
     return metadata
 

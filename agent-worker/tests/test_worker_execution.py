@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import tempfile
@@ -145,6 +146,27 @@ class WorkerExecutionNamingTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("not a path", result["error"])
             self.assertIsNone(result["script"])
             self.assertFalse((workspace.parent / "escape.py").exists())
+
+
+class WorkerCancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nats_cancel_event_stops_matching_active_container(self) -> None:
+        run_id = "run-42"
+        cancellation = asyncio.Event()
+        message = SimpleNamespace(
+            data=json.dumps({"run_id": run_id}).encode("utf-8")
+        )
+        with (
+            patch.object(
+                worker,
+                "ACTIVE_MISSIONS",
+                {run_id: ("omp-mission-test", cancellation)},
+            ),
+            patch.object(worker, "stop_omp_container") as stop_container,
+        ):
+            await worker.respond_to_cancellation(message)
+
+        self.assertTrue(cancellation.is_set())
+        stop_container.assert_called_once_with("omp-mission-test")
 
 
 if __name__ == "__main__":
