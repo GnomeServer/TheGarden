@@ -133,6 +133,122 @@
     $("keys").replaceChildren(table);
   }
 
+  function renderWorkerRoster(workers) {
+    const root = $("worker-roster");
+    if (!Array.isArray(workers) || workers.length === 0) {
+      root.innerHTML = '<p class="empty">Keybroker returned no enrolled worker IP mappings.</p>';
+      return;
+    }
+    const table = document.createElement("table");
+    table.innerHTML = "<thead><tr><th>Host</th><th>Worker ID</th><th>Tailnet IP</th><th>Recorded jobs</th><th>Last job issued</th></tr></thead>";
+    const body = document.createElement("tbody");
+    for (const worker of workers) {
+      const row = document.createElement("tr");
+      row.innerHTML = "<td></td><td></td><td></td><td></td><td></td>";
+      row.cells[0].textContent = worker.host;
+      row.cells[1].textContent = worker.worker_id;
+      row.cells[2].textContent = worker.tailnet_ip;
+      row.cells[3].textContent = number(worker.session_count);
+      row.cells[4].textContent = worker.last_session_at
+        ? new Date(worker.last_session_at).toLocaleString()
+        : "No recorded sessions";
+      body.append(row);
+    }
+    table.append(body);
+    root.replaceChildren(table);
+  }
+
+  function renderWorkerSessions(data) {
+    const sessions = Array.isArray(data.worker_sessions) ? data.worker_sessions : [];
+    const counts = data.worker_session_status_counts || {};
+    const summary = $("worker-session-summary");
+    summary.replaceChildren();
+    for (const [label, value] of [
+      ["Unblocked LiteLLM keys", data.unblocked_key_count],
+      ["Active job sessions", counts.active],
+      ["Non-session active keys", data.unmanaged_active_key_count],
+      ["Expired sessions", counts.expired],
+      ["Revoked sessions", counts.revoked],
+      ["Unmatched legacy IDs", data.unmatched_usage_key_count],
+    ]) {
+      const item = document.createElement("div");
+      item.className = "session-summary-item";
+      const numberLabel = document.createElement("strong");
+      numberLabel.textContent = value === null ? "—" : number(value);
+      const title = document.createElement("span");
+      title.textContent = label;
+      item.append(numberLabel, title);
+      summary.append(item);
+    }
+
+    const root = $("worker-sessions");
+    if (!sessions.length) {
+      root.innerHTML = '<p class="empty">No Keybroker worker sessions were recorded in the rolling 365-day window.</p>';
+    } else {
+      const table = document.createElement("table");
+      table.innerHTML = "<thead><tr><th>Worker / alias</th><th>Session</th><th>Issued</th><th>Status</th><th>365-day spend / tokens</th><th>This month</th></tr></thead>";
+      const body = document.createElement("tbody");
+      for (const session of sessions) {
+        const row = document.createElement("tr");
+        row.innerHTML = "<td><strong></strong><small></small></td><td></td><td></td><td><span class='badge'></span></td><td></td><td></td>";
+        row.cells[0].querySelector("strong").textContent = `${escape(session.worker_id)} · ${escape(session.alias)}`;
+        row.cells[0].querySelector("small").textContent = session.model ? `Model: ${escape(session.model)}` : "Model not recorded";
+        row.cells[1].textContent = `…${escape(session.session_id.slice(-8))} · key …${escape(session.key_id_suffix || "unknown")}`;
+        row.cells[2].textContent = session.created_at ? new Date(session.created_at).toLocaleString() : "Unknown";
+        if (session.expires_at) {
+          const expiry = document.createElement("small");
+          expiry.textContent = `Expires ${new Date(session.expires_at).toLocaleString()}`;
+          row.cells[2].append(expiry);
+        }
+        const badge = row.cells[3].querySelector(".badge");
+        badge.textContent = `${session.status}${session.usage_attribution === "ambiguous" ? " · ambiguous key ID" : session.usage_attribution === "no usage" ? " · no spend logs" : session.usage_attribution === "unmapped" ? " · key ID unavailable" : ""}`;
+        if (session.status === "revoked" || session.status === "expired" || session.usage_attribution === "ambiguous") {
+          badge.classList.add("alert");
+        }
+        row.cells[4].textContent = session.spend_365d_usd === undefined
+          ? session.usage_attribution === "ambiguous" ? "Ambiguous attribution" : "—"
+          : `${money(session.spend_365d_usd)} · ${number(session.tokens_365d)} tokens`;
+        row.cells[5].textContent = session.spend_monthly_usd === undefined
+          ? "—"
+          : `${money(session.spend_monthly_usd)} · ${number(session.tokens_monthly)} tokens`;
+        body.append(row);
+      }
+      table.append(body);
+      root.replaceChildren(table);
+    }
+    if (data.worker_sessions_display_truncated || data.worker_session_history_truncated) {
+      const note = document.createElement("p");
+      note.className = "section-note";
+      note.textContent = `Showing newest ${number(sessions.length)} of ${number(data.worker_session_count ?? sessions.length)} session record(s); spend attribution uses the fetched history. ${data.worker_session_history_truncated ? "Keybroker history reached its page limit, so some sessions may be missing." : ""}`;
+      root.append(note);
+    }
+
+    const unmatchedRoot = $("unmatched-usage");
+    const unmatched = Array.isArray(data.unmatched_usage_keys) ? data.unmatched_usage_keys : [];
+    if (!unmatched.length) {
+      unmatchedRoot.innerHTML = '<p class="empty">No spend-log key IDs remain unmatched after checking LiteLLM key records and Keybroker session history.</p>';
+      return;
+    }
+    const heading = document.createElement("h3");
+    heading.textContent = "Legacy or unresolved spend IDs";
+    const description = document.createElement("p");
+    description.className = "section-note";
+    description.textContent = "Only the final eight characters are shown. These records match neither a LiteLLM key inventory entry nor a Keybroker worker session.";
+    const table = document.createElement("table");
+    table.innerHTML = "<thead><tr><th>Key ID suffix</th><th>365-day spend / tokens</th><th>This month</th></tr></thead>";
+    const body = document.createElement("tbody");
+    for (const key of unmatched) {
+      const row = document.createElement("tr");
+      row.innerHTML = "<td></td><td></td><td></td>";
+      row.cells[0].textContent = `…${escape(key.key_id_suffix)}`;
+      row.cells[1].textContent = `${money(key.spend_365d_usd)} · ${number(key.tokens_365d)} tokens`;
+      row.cells[2].textContent = `${money(key.spend_monthly_usd)} · ${number(key.tokens_monthly)} tokens`;
+      body.append(row);
+    }
+    table.append(body);
+    unmatchedRoot.replaceChildren(heading, description, table);
+  }
+
   function renderExposures(events) {
     const root = $("exposures");
     if (!events.length) {
@@ -156,11 +272,15 @@
       date.textContent = new Date(event.received_at).toLocaleString();
       const delivery = document.createElement("small");
       const tries = number(event.notification_attempts || 0);
-      delivery.textContent = event.notification_status === "sent"
-        ? "External receiver accepted alert"
-        : event.notification_status === "pending"
-          ? `External alert queued/retrying · ${tries} attempt${tries === 1 ? "" : "s"}`
-          : "External notification route not configured";
+      delivery.textContent = event.notification_status === "acknowledged"
+        ? `Acknowledged by ${escape(event.notification_acknowledged_by)} at ${new Date(event.notification_acknowledged_at).toLocaleString()}`
+        : event.notification_status === "awaiting_ack"
+          ? `Delivered to Forge; waiting for a human acknowledgment · ${tries} attempt${tries === 1 ? "" : "s"}`
+          : event.notification_status === "pending"
+            ? `Alert delivery queued/retrying · ${tries} attempt${tries === 1 ? "" : "s"}`
+            : event.notification_status === "sent"
+              ? "Receiver accepted alert; historical acknowledgment state unavailable"
+              : "Forge alert route not configured";
       item.append(title, detail, date, delivery);
       if (event.status === "flagged" && !event.matched_key_id) {
         const resolve = document.createElement("button");
@@ -200,11 +320,29 @@
     };
     const events = Array.isArray(data.exposure_events) ? data.exposure_events : [];
     const keys = Array.isArray(data.keys) ? data.keys : [];
+    const zeroCostModels = Array.isArray(data.budget.zero_cost_models_monthly)
+      ? data.budget.zero_cost_models_monthly
+      : [];
+    const zeroCostModelDetail = zeroCostModels.length
+      ? ` Models: ${zeroCostModels.map((item) => `${item.model} (${number(item.requests)} requests, ${number(item.tokens)} tokens)`).join("; ")}.`
+      : " Model identifier unavailable in spend logs.";
     const workerAlerts = events.filter(
       (event) => event.status === "flagged" && (event.worker_id || event.session_id),
     );
-    const visiblePending = events.filter((event) => event.notification_status === "pending").length;
+    const visiblePending = events.filter(
+      (event) => ["pending", "awaiting_ack"].includes(event.notification_status),
+    ).length;
     const pending = Math.max(Number(data.alert_notification_pending_count || 0), visiblePending);
+    const unmanagedAliases = Array.isArray(data.unmanaged_active_keys)
+      ? data.unmanaged_active_keys.map((key) => key.alias).filter(Boolean)
+      : [];
+    const alertDelivery = data.alert_delivery || {};
+    const alertSetupDetail = [
+      !alertDelivery.available && "Forge incident receiver status is unreachable or unverified.",
+      alertDelivery.available && !alertDelivery.receiver_configured && "Agent Manager has not configured its signed receiver.",
+      alertDelivery.available && !alertDelivery.external_notification_configured && "Agent Manager's external NOTIFICATION_WEBHOOK_URL is not configured.",
+      alertDelivery.available && !alertDelivery.ack_callback_configured && "Agent Manager cannot report human acknowledgments back to API Guard.",
+    ].filter(Boolean).join(" ");
 
     if (workerAlerts.length) {
       addAction(
@@ -217,34 +355,55 @@
       addAction(
         "urgent",
         "Configure 24/7 alert delivery",
-        "Set API_GUARD_ALERT_WEBHOOK_URL and a distinct API_GUARD_ALERT_WEBHOOK_SECRET for a Forge/paging receiver with acknowledgement and escalation. Email or this dashboard alone is not an on-call system.",
+        `Set the shared, distinct API_GUARD_ALERT_WEBHOOK_SECRET and API_GUARD_ALERT_ACK_SECRET in API Guard and Agent Manager. ${alertSetupDetail} Configure Agent Manager's NOTIFICATION_WEBHOOK_URL and token for an external pager/on-call relay. The incident remains open until a human acknowledges it; email or this dashboard alone is not an on-call system.`,
       );
     } else if (pending) {
       addAction(
         "urgent",
         "Confirm alert receiver delivery",
-        `${pending} notification(s) are queued or retrying. Check the receiver and acknowledge incidents there; HTTP acceptance does not confirm a responder saw the alert.`,
+        `${pending} alert(s) are retrying or awaiting human acknowledgment. Check the Forge incident inbox and external pager; HTTP acceptance does not prove a responder saw the alert.`,
       );
     }
-    if (!keys.length) {
+    if (!data.unblocked_key_count) {
       addAction(
         "review",
-        "Reconcile the empty key inventory",
-        "No active LiteLLM virtual keys were returned. Short-lived worker keys may be absent between jobs; verify any expected long-lived consumer key and confirm Keybroker targets the same LiteLLM instance as spend logging.",
+        "No unblocked LiteLLM keys",
+        "No unblocked key records were returned. Revoked and expired job sessions are tracked separately below; verify any expected long-lived consumer key.",
+      );
+    }
+    if (data.unmanaged_active_key_count > 0) {
+      addAction(
+        "review",
+        "Review long-lived or non-session keys",
+        `${number(data.unmanaged_active_key_count)} unblocked key(s) are not tied to an active Keybroker job session.${unmanagedAliases.length ? ` Aliases: ${unmanagedAliases.join(", ")}.` : ""} Confirm an owner, budget, expiry, and migration path; revoke legacy host keys after consumers move to per-job credentials.`,
       );
     }
     if (data.unmatched_usage_key_count > 0) {
       addAction(
         "review",
-        "Reconcile unmatched spend records",
-        `${number(data.unmatched_usage_key_count)} spend-log key ID(s) have no active key record. They may be historical or from another LiteLLM database; per-key attribution is incomplete until checked.`,
+        "Reconcile unresolved spend IDs",
+        `${number(data.unmatched_usage_key_count)} spend-log key ID(s) match neither a LiteLLM key record nor a Keybroker worker session. Review the suffix-only list below.`,
+      );
+    }
+    if (data.ambiguous_session_key_count > 0) {
+      addAction(
+        "review",
+        "Resolve ambiguous session attribution",
+        `${number(data.ambiguous_session_key_count)} key ID(s) map to multiple Keybroker sessions; usage is not duplicated across those sessions.`,
+      );
+    }
+    if (data.worker_session_history_truncated) {
+      addAction(
+        "review",
+        "Review incomplete worker session history",
+        "Keybroker session history reached its retrieval limit. Spend attributed to fetched sessions is shown, but some older records may be absent.",
       );
     }
     if (data.budget.zero_cost_requests_monthly > 0) {
       addAction(
         "review",
         "Verify zero-priced token usage",
-        `${number(data.budget.zero_cost_requests_monthly)} token-bearing request(s) were priced at $0. Check LiteLLM model pricing and the provider bill before treating that usage as free.`,
+        `${number(data.budget.zero_cost_requests_monthly)} token-bearing request(s) were priced at $0.${zeroCostModelDetail} Keybroker now blocks new keys for unpriced external models. Verify this route is local/free or configure exact LiteLLM pricing, then review/revoke any existing long-lived keys that used it.`,
       );
     }
     if (data.usage_truncated) {
@@ -257,12 +416,12 @@
     addAction(
       "hardening",
       "Model-escape controls remain incomplete",
-      "The VaultGuard worker unit template is configured to deny direct public-IP egress and allow the service VM/Tailscale DNS; this takes effect only after deployment and verification on each host. It does not constrain other host processes, prevent DNS tunneling, or detect arbitrary model exfiltration. Keep unsandboxed script execution disabled and add host/network monitoring.",
+      "The Ansible-managed systemd unit allows only the service VM IP and pins the Keybroker TLS hostname in /etc/hosts, so the worker service has no DNS-resolver or direct public-IP egress. This is per-service, not host-wide, and applies only after the unit is deployed. Keep generated script execution disabled.",
     );
     addAction(
       "hardening",
-      "Verify the worker roster separately",
-      "This dashboard inventories LiteLLM keys, not enrolled hosts. Compare the Keybroker IP allowlist and Ansible inventory against every intended, owner-approved worker.",
+      "Verify worker roster and deployment",
+      "The Keybroker allowlist and Ansible inventory include all six named hosts. Entries alone do not prove a worker service or egress policy is deployed; run Ansible and verify heartbeats on each host. Do not treat a Tailnet IP mapping as a live worker.",
     );
 
     root.replaceChildren(...actions);
@@ -279,6 +438,9 @@
       renderBudget(data.budget);
       renderOpenAICosts(data.openai_costs);
       renderKeys(data.keys, data.rotation_days, data.exposure_events);
+      renderWorkerRoster(data.worker_roster);
+      renderWorkerSessions(data);
+      renderExposures(data.exposure_events);
       renderActions(data);
       text("as-of", `Updated ${new Date(data.as_of).toLocaleTimeString()}`);
       const workerAlerts = data.exposure_events.filter(

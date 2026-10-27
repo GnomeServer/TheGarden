@@ -47,18 +47,21 @@ the service to non-Caddy clients. API Guard uses `http://keybroker:8000` over
 Docker networking and authenticates admin routes with
 `Authorization: Bearer $KEYBROKER_DASHBOARD_TOKEN`.
 
-Current enrolled worker mappings are fixed to the four entries from
-`Ansible/inventory/hosts.yml`:
+The Keybroker trusted-source allowlist includes the six designated agent hosts:
 
-| Worker | Worker ID | Tailnet IP |
+| Host | Worker ID | Tailnet IP |
 | --- | --- | --- |
 | Inkii | `worker-02` | `100.98.125.127` |
 | Naruto | `worker-04` | `100.88.92.78` |
 | Raphael | `worker-01` | `100.116.35.103` |
 | Donatello | `worker-03` | `100.94.145.104` |
+| Sammy | `worker-05` | `100.79.110.117` |
+| Michelangelo | `worker-06` | `100.70.246.104` |
 
-Sammy and Michelangelo are not enrolled. Add them only after explicit owner
-opt-in and configuring their SSH identity and worker enrollment.
+Sammy and Michelangelo are allowlisted in Keybroker using their Tailnet IPs.
+Both are in the Ansible inventory with SSH user `dow_admin`. The worker
+service and egress policy still require a successful Ansible deployment and
+host-side verification; an allowlist entry is not proof of a running worker.
 
 `GET /v1/worker/identity` verifies the Caddy-injected token and source-IP
 mapping without minting a key. Ansible calls it from each worker and checks
@@ -79,6 +82,17 @@ server-side allowlist and a session budget cannot exceed the administrator
 budget ceiling. The global LiteLLM `$25,000/365d` limit remains independent.
 The returned model base URL defaults to
 `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
+
+Before minting session or administrator keys, Keybroker checks LiteLLM's
+`/model/info`. If an external route has missing or zero prices, it calls
+`POST /reload/model_cost_map` once and rechecks before issuing anything. Every
+selected model must then have positive input and output pricing, unless its
+exact `api_base` is in `KEYBROKER_ALLOW_UNPRICED_LOCAL_MODEL_BASES` (default:
+the local `http://llama:8080/v1` service). This fails closed because LiteLLM
+zero-cost requests can bypass budget checks. Keep the exception list limited to
+genuinely local/free endpoints. For a custom paid model, set
+LiteLLM `model_info.base_model` to a priced catalog model or configure explicit
+`input_cost_per_token` and `output_cost_per_token` rates from the provider.
 
 Session records enforce uniqueness for each `(worker_id, run_id)`. A duplicate
 mint returns HTTP 409 and does not return another key; it attempts to revoke
@@ -145,6 +159,13 @@ API Guard deduplicates by event ID.
 All routes below require the dashboard bearer token:
 
 - `GET /v1/admin/keys` — safe key inventory rows; raw key fields are removed.
+- `GET /v1/admin/workers` — safe worker IDs, host labels, Tailnet source IPs,
+  session counts, and last session creation time; never returns credentials.
+- `GET /v1/admin/sessions?start=...&end=...&page=1&page_size=1000` — bounded,
+  paginated session metadata for the requested creation-time window. Responses
+  include worker/session IDs, a safe LiteLLM key identifier (token ID or hash),
+  alias, model, timestamps, and active/expired/revoked status. Raw key values
+  and run IDs are excluded.
 - `GET /v1/admin/spend-logs?start=...&end=...&page=1&page_size=1000` — paginated
   aggregate spend fields only; prompt/output and raw-key fields are removed.
 - `POST /v1/admin/keys/generate` — accepts `alias`, `models`,

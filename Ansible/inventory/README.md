@@ -82,7 +82,7 @@ ansible-inventory --host inkii
 ansible agent_workers -m ansible.builtin.ping
 ```
 
-The current workers are:
+Configured Ansible worker targets (inventory entries, not proof of deployment):
 
 | Host | Tailscale address | SSH user | Role |
 | --- | --- | --- | --- |
@@ -90,12 +90,19 @@ The current workers are:
 | `naruto` | `100.88.92.78` | `naruto` | `coder` |
 | `raphael` | `100.116.35.103` | `raphael` | `coder` |
 | `donatello` | `100.94.145.104` | `bgurrol4` | `coder` |
+| `michelangelo` | `100.70.246.104` | `dow_admin` | `coder` |
+| `sammy` (`dell-drd17c4`) | `100.79.110.117` | `dow_admin` | `coder` |
+
+All six inventory entries are now configured, but the worker runtime and
+systemd egress policy are not active on a host until its playbook run succeeds.
 
 The existing `inventory/worker-1.yml` is an optional single-worker inventory
 for isolated testing. Do not load it together with `hosts.yml` unless you
 intentionally want to maintain duplicate definitions for `inkii`.
 
-The worker runtime is installed by `playbooks/agent-workers.yml`. Add a laptop by uncommenting a host like `michelangelo` in `hosts.yml`, then run `ansible-playbook playbooks/agent-workers.yml --limit michelangelo --ask-become-pass`. Do not load `proxmox-guests.example.yml` beside `hosts.yml`.
+The worker runtime is installed by `playbooks/agent-workers.yml`. An allowlist
+entry alone does not install or secure a worker; verify the worker service and
+systemd egress policy after each successful playbook run.
 
 ## Proxmox guest template
 

@@ -42,6 +42,61 @@ Pattern matching is not a general-purpose secret scanner; keep provider master
 keys out of prompts and model context.
 
 
+## API Guard exposure incidents
+
+API Guard can POST signed exposure events to
+`/v1/webhooks/api-guard/exposure`. The receiver accepts only the six safe
+fields `event_id`, `worker_id`, `session_id`, `key_alias`, `reason`, and
+`occurred_at`, verifies `X-Darkfactory-Signature: sha256=<hex>`, rejects
+oversized or extra-field bodies, and commits the event before returning HTTP
+202. PostgreSQL uses `event_id` as the durable deduplication key. Persisted
+incidents and the admin-only Agent Manager dashboard contain no prompts, raw
+credentials, or run IDs.
+API Guard can also query `/v1/webhooks/api-guard/status` with
+`X-Darkfactory-Signature` signing the exact bytes
+`GET:/v1/webhooks/api-guard/status`. The response contains only booleans for
+the signed-event receiver, external notification URL, and acknowledgment
+callback configuration; it never returns secret values or URLs.
+
+
+Set `API_GUARD_ALERT_WEBHOOK_URL=http://agent-manager:8000/v1/webhooks/api-guard/exposure`
+and `API_GUARD_ALERT_WEBHOOK_SECRET` in API Guard's deployment. Set the same
+`API_GUARD_ALERT_WEBHOOK_SECRET` in Agent Manager. This signed-event secret
+must differ from `API_GUARD_EXPOSURE_WEBHOOK_SECRET`, which protects the
+separate OMP/Keybroker-to-API-Guard exposure endpoint. A human administrator
+can acknowledge incidents in the Agent Manager Operations dashboard; the
+local acknowledgment is persisted before the signed callback is queued.
+`API_GUARD_ALERT_ACK_URL` defaults to
+`http://api-guard:8000/api-guard/api/v1/webhooks/alerts/ack`, and
+`API_GUARD_ALERT_ACK_SECRET` must match API Guard's `API_GUARD_ALERT_ACK_SECRET`.
+Keep the acknowledgment secret distinct from both event-delivery secrets.
+Both event and callback outboxes retry failed deliveries durably.
+
+When configured, the existing `NOTIFICATION_WEBHOOK_URL` and optional
+`NOTIFICATION_WEBHOOK_TOKEN` deliver a safe incident event to the wider Forge
+or an existing relay. A successful HTTP response means only that the relay
+accepted the event; it is not a human acknowledgment. Both the initial event
+and each escalation carry a fixed `severity: "critical"` label set by Agent
+Manager; severity is not accepted from API Guard input. The dashboard reports
+Agent Manager receipt, external delivery, local human acknowledgment, and
+API Guard callback state separately. No external paging destination, on-call
+schedule, or paging credentials are supplied here, so deployment must not
+claim 24/7 paging or acknowledgment coverage until those are configured and
+operationally verified.
+
+Until a human administrator acknowledges an incident, Agent Manager resends
+it to the configured notification webhook every
+`API_GUARD_ALERT_ESCALATE_AFTER_SECONDS` (default 900 seconds) as
+`api_guard.exposure.escalated`, incrementing `escalation_level` for each new
+no-ack escalation. Failed delivery retries reuse the current level and use
+their own durable backoff, independent of initial-event delivery retries.
+A human acknowledgment stops future escalation; the separate signed callback
+to API Guard is still retried if that service is unavailable.
+
+The separate API Guard dashboard remains its own service and remains the
+credential inventory and exposure source of truth; this incident panel is in
+the wider Forge's Agent Manager dashboard.
+
 The dashboard's worker runtime view aggregates `RunRecord` start and completion
 timestamps by worker and UTC day. The
 `/v1/dashboard/worker-execution?from=YYYY-MM-DD&to=YYYY-MM-DD` endpoint returns
@@ -68,6 +123,14 @@ and audit history. This README covers the manager's dashboard, OAuth, webhook,
 task, and worker behavior. The Ansible
 [`Docker Compose deployment guide`](../../Ansible/README.md#docker-compose-deployment)
 covers deployment paths and operations.
+
+The Agents view presents the six canonical host names (Raphael, Inkii,
+Donatello, Naruto, Sammy, and Michelangelo) rather than duplicate historical
+worker IDs. Legacy heartbeat IDs are grouped under a known host or placed in a
+separate unregistered section; history is not deleted. Workers without a
+canonical heartbeat are visible but cannot be assigned to a task. Sammy and
+Michelangelo are in Ansible inventory; deploy their workers and verify heartbeats
+before treating them as ready.
 
 For an **existing central VM**, preserve its live credentials, NATS overrides,
 database volumes, Caddy routes, and manager image when applying manager-only

@@ -7,7 +7,7 @@ endpoint-security or model-escape detection system.
 
 ## Remote workers and credential lifecycle
 
-The active Ansible inventory and Keybroker IP map enroll four workers:
+The Keybroker trusted-source allowlist includes the six designated agent hosts:
 
 | Host | Worker ID | Tailnet IP |
 | --- | --- | --- |
@@ -15,16 +15,19 @@ The active Ansible inventory and Keybroker IP map enroll four workers:
 | Naruto | `worker-04` | `100.88.92.78` |
 | Raphael | `worker-01` | `100.116.35.103` |
 | Donatello | `worker-03` | `100.94.145.104` |
+| Sammy | `worker-05` | `100.79.110.117` |
+| Michelangelo | `worker-06` | `100.70.246.104` |
 
-Sammy and Michelangelo are not enrolled. Their owners must opt in, and their
-SSH/Tailscale identities must be added to both Ansible and Keybroker before
-they can use the session-key path. Do not assume all six hosts are protected
-by the current rollout.
+The checked-in Ansible inventory now contains all six designated hosts,
+including Sammy (`dell-drd17c4`, SSH user `dow_admin`) and Michelangelo (SSH
+user `dow_admin`). Inventory presence is configuration only: the worker
+runtime and egress policy take effect only after a successful Ansible run and
+host-side verification.
 
 The separate `Worker-Nodes/Pi-LiteLLM-Worker-setup.md` procedure still
 describes a manually installed static-key client. If that Pi setup is active,
-it is outside the four-host Keybroker enrollment and must be migrated or
-treated as a legacy long-lived-key exception.
+it is outside the six-host Keybroker allowlist and six-host Ansible inventory
+and must be migrated or treated as a legacy long-lived-key exception.
 
 For enrolled workers, Ansible verifies Keybroker over HTTPS, stops the legacy
 worker process, removes the old local `worker-api-key` file, and installs a
@@ -117,20 +120,20 @@ does not execute those generated artifacts or modify Forgejo repositories.
  **not sandboxed**; keep it disabled on hosts holding valuable data or
  credentials.
 - Caddy limits Keybroker and API Guard routes to Tailscale source addresses.
-Keybroker additionally requires Caddy's proxy token and maps the trusted client
-IP to an enrolled worker. API Guard has separate Forgejo OAuth and admin
-allowlisting.
-- The Ansible worker unit template configures `IPAddressDeny=any`, allowing only
-  the service VM (`100.94.49.45/32`), Tailscale DNS (`100.100.100.100/32`), and
-  loopback resolver addresses. This is a per-service policy and is not active
-  on a host until the updated unit is deployed and verified.
+  Keybroker additionally requires Caddy's proxy token and maps the trusted client
+  IP to one of the six allowlisted workers. API Guard has separate Forgejo OAuth
+  and admin allowlisting.
+- The Ansible worker unit configures `IPAddressDeny=any` and allows only the
+  service VM (`100.94.49.45/32`). Ansible pins the Keybroker TLS hostname to
+  that IP in the worker's `/etc/hosts`; the worker needs no DNS resolver
+  allowlist. This per-service policy is inactive until deployed and verified.
 
 ### Not implemented or not guaranteed
 
 - This systemd network filter is **per-service**, not host-wide. It does not
-  restrict other processes on the worker, prevent DNS tunneling through an
-  allowed resolver, or monitor network flows. A host-level firewall/Tailscale
-  ACL and endpoint monitoring still need separate deployment and verification.
+  restrict other processes on a worker or monitor network flows. The worker can
+  still reach permitted control-plane services; protect those services, maintain
+  Tailscale ACLs, and deploy host-level monitoring separately.
 - Pattern scanning catches only exact current-session-key echoes and listed
   key formats. It cannot detect arbitrary encodings, covert exfiltration,
   malicious model/tool behavior, or every provider credential format. A model
@@ -194,20 +197,22 @@ For a worker/session exposure:
 
 ## Rollout checks
 
-- Deploy Keybroker and API Guard with distinct random admin/proxy tokens and a
-  matching inbound exposure-webhook secret for OMP, Keybroker, and API Guard.
-  If configuring an external alert receiver, use a separate
-  `API_GUARD_ALERT_WEBHOOK_SECRET`; never reuse the inbound secret. Keep all
-  values in deployment `.env` files with restrictive permissions.
-- Set the same `KEYBROKER_PROXY_TOKEN` in the Caddy and Keybroker deployment
-  environments, then validate the Tailnet-only `/keybroker/healthz` route and
-  the authenticated worker-identity route.
-- Configure and test the optional alert receiver. Confirm its `2xx` response,
-  outbound signature validation, event-ID deduplication, delivery retry,
-  on-call acknowledgement, and after-hours escalation.
-- Run Ansible against one enrolled worker first. Verify
+- Deploy Keybroker, API Guard, and Agent Manager with distinct random admin,
+  proxy, inbound-exposure, alert-delivery, and acknowledgment secrets. Match
+  `API_GUARD_ALERT_WEBHOOK_SECRET` and `API_GUARD_ALERT_ACK_SECRET` between API
+  Guard and Agent Manager; never reuse the inbound exposure secret.
+- Configure Agent Manager's `NOTIFICATION_WEBHOOK_URL` and token to reach a real
+  monitored pager/Forge notification relay. The Agent Manager inbox is durable
+  but is not itself 24/7 on-call coverage.
+- Verify the signed Tailnet-only `/keybroker/healthz` and worker-identity routes.
+  API Guard's readiness check must report the Forge receiver, external notifier,
+  and acknowledgment callback as configured.
+- Exercise one exposure event end to end: Keybroker revokes the exact session,
+  Agent Manager stores and delivers it, a human acknowledges in Forge, and the
+  signed callback marks it acknowledged in API Guard. Also test failed delivery
+  retries and the pager's after-hours/no-ack escalation.
+- Run Ansible against one worker first. Verify
   `systemctl status dark-factory-agent-worker`, complete a low-budget model run,
-  confirm session revocation, then revoke that worker's legacy LiteLLM key in
-  API Guard. Repeat for the other three enrolled hosts.
-- Do not add Sammy or Michelangelo until their owners opt in and their Tailscale
-  IP, worker ID, SSH identity, and role are explicitly enrolled.
+  confirm session revocation and denied public/DNS egress, then revoke its legacy
+  LiteLLM key. Repeat for all six hosts; inventory entries alone do not prove
+  that a host has the worker service or egress boundary installed.

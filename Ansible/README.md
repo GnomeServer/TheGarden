@@ -153,13 +153,22 @@ The worker uses the Tailnet-only Caddy endpoint at
 `sudo systemctl status dark-factory-agent-worker` and
 `sudo journalctl -u dark-factory-agent-worker -n 100 --no-pager`.
 
-The worker unit also uses systemd IP filtering: it denies direct public-IP
-egress and allows only the service VM, Tailscale DNS, and loopback resolver
-addresses from `worker_egress_allow_ips`. This applies to the worker process and
-its children after the updated unit is deployed. Override the allowlist when
-the service VM or resolver address changes. It does not restrict unrelated
-processes on the laptop or prevent DNS tunneling; keep host Tailscale ACLs and
-firewall policy in scope.
+Ansible manages an `/etc/hosts` entry on each worker mapping
+`infra-lab-services.tail494f6d.ts.net` to `100.94.49.45`. Keybroker remains
+configured with the HTTPS hostname, so TLS SNI and certificate validation use
+the expected name without relying on worker DNS. NATS continues to use
+`nats://100.94.49.45:4222`.
+
+The systemd unit denies all network destinations except `100.94.49.45/32`;
+it does not allow Tailscale DNS or loopback resolvers, and only enables the
+IPv4 address family for network traffic. It also isolates devices, makes the
+home directory read-only except for the worker and workspace paths, and denies
+kernel/device controls the worker does not need. Deploy with
+`ansible-playbook playbooks/agent-workers.yml --limit inkii --ask-become-pass`
+to apply the hosts mapping and service unit; Ansible restarts the worker when
+either changes. These controls apply to the worker service and its children
+only; they do not restrict unrelated processes on the laptop or change host
+Tailscale ACLs, routing, or firewall policy.
 
 The worker process polls the shared durable `agent-workers-coder` consumer and
 sends a heartbeat every 15 seconds. The default `worker_nats_url` is
@@ -169,10 +178,11 @@ Mission artifacts are generated from the user's goal and saved under
 Manager/Open WebUI. This flow does not clone or push the configured Forgejo
 repository, and generated artifacts are not executed by mission runs.
 
-Only the four enrolled workers in `inventory/hosts.yml` receive Keybroker
-access. `michelangelo` and `sammy` remain unregistered until their owners opt
-in and their SSH/Tailscale identities are enrolled. Do not leave their old
-static keys active while they remain out of band.
+Keybroker and the Ansible inventory now include all six designated hosts.
+Inventory presence alone does not mean the worker runtime or systemd egress
+policy has been deployed. Run the playbook and verify
+`systemctl status dark-factory-agent-worker` on each host before sending jobs;
+do not leave legacy static keys active after migration.
 
 Use `--ask-become-pass` because package installation and system CA trust require
 privilege. `allow_generated_code` remains `false`; the separate
