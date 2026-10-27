@@ -1,6 +1,6 @@
 import unittest
 
-from agent_manager.crew_rules import crew_size, missing_requirements
+from agent_manager.crew_rules import crew_size, is_chat_turn
 
 
 class CrewSizeTests(unittest.TestCase):
@@ -18,33 +18,19 @@ class CrewSizeTests(unittest.TestCase):
         self.assertEqual(size["reviewers"], 2)
 
 
-class PlannerGateTests(unittest.TestCase):
-    def test_live_calculator_prompt_recognizes_operation_nouns_and_gerunds(self) -> None:
-        goal = (
-            "Could you generate a GUI of a calculator that computes differences, "
-            "additions, subtractions, multiplication, and dividing?"
-        )
-
-        self.assertIsNone(missing_requirements(goal))
-
-    def test_calculator_without_operations_requests_only_missing_detail(self) -> None:
-        gap = missing_requirements("Build a GUI calculator with buttons.")
-
-        self.assertEqual(
-            gap,
-            "The planner needs which operations the buttons should perform before a coder starts.",
-        )
-
-
-    def test_generic_gui_and_button_tasks_do_not_trigger_calculator_gate(self) -> None:
+class ConversationRoutingTests(unittest.TestCase):
+    def test_general_task_intents_route_to_a_worker(self) -> None:
         goals = (
+            "Could you generate a GUI of a calculator?",
             "Build a contact page with a submit button that shows a confirmation message.",
             "Create a tabbed dashboard GUI with buttons for navigating between reports.",
         )
         for goal in goals:
             with self.subTest(goal=goal):
-                self.assertIsNone(missing_requirements(goal))
+                self.assertFalse(is_chat_turn(goal))
 
+    def test_question_intents_remain_chat_turns(self) -> None:
+        self.assertTrue(is_chat_turn("How do I add a button to a web page?"))
 
 if __name__ == "__main__":
     unittest.main()

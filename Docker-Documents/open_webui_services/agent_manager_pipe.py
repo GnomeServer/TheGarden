@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 
 logger = logging.getLogger(__name__)
+REPOSITORY_ANSWER = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 class Pipe:
     class Valves(BaseModel):
@@ -161,26 +162,6 @@ class Pipe:
                 history.append((role, text))
         return history
 
-    @staticmethod
-    def _project_answer(text: str) -> tuple[str | None, str | None]:
-        stripped = text.strip()
-        named = re.match(
-            r"(?is)^(.+?)\s+is the project(?:\s+name)?\b(?:\s+and\s+)?(.*)$",
-            stripped,
-        )
-        if named:
-            extra = re.sub(r"(?i)^i want you to\s+", "", named.group(2).strip()).strip(" .")
-            return named.group(1).strip(" .")[:120] or None, extra or None
-        named = re.match(
-            r"(?is)^(?:the\s+)?project(?:\s+name)?\s+is\s+(.+?)(?:\s+and\s+(.*))?$",
-            stripped,
-        )
-        if named:
-            extra = re.sub(r"(?i)^i want you to\s+", "", (named.group(2) or "").strip()).strip(" .")
-            return named.group(1).strip(" .")[:120] or None, extra or None
-        if len(stripped) <= 120 and "\n" not in stripped:
-            return stripped, None
-        return None, stripped
 
     @classmethod
     def _resolve_turn(
@@ -194,25 +175,15 @@ class Pipe:
             (text for role, text in reversed(history[:-1]) if role == "assistant"),
             "",
         )
-        previous_user = next(
-            (text for role, text in reversed(history[:-1]) if role == "user"),
-            "",
-        )
-        if "What project name should this mission use?" in previous_assistant:
-            project_name, extra_goal = cls._project_answer(latest)
-            prior_goal = previous_user
-            prior_project = None
-            if previous_user:
-                try:
-                    prior_goal, prior_project = cls._extract_project_directive(previous_user)
-                except ValueError:
-                    prior_goal = previous_user
-            return extra_goal or prior_goal or latest, project_name or prior_project, repository
-        if "Which Forgejo repository should this mission use?" in previous_assistant:
-            try:
-                goal, project_name = cls._extract_project_directive(previous_user or latest)
-            except ValueError:
-                goal, project_name = previous_user or latest, None
+        if (
+            "Which Forgejo repository should this mission use?" in previous_assistant
+            and REPOSITORY_ANSWER.fullmatch(latest.strip())
+        ):
+            previous_user = next(
+                (text for role, text in reversed(history[:-1]) if role == "user"),
+                "",
+            )
+            goal, project_name = cls._extract_project_directive(previous_user)
             return goal, project_name, latest.strip()
         goal, project_name = cls._extract_project_directive(latest)
         return goal, project_name, repository

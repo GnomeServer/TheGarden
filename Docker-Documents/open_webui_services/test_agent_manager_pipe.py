@@ -21,6 +21,47 @@ class ProjectDirectiveTests(unittest.TestCase):
         prompt = "Script: audit_report.py\n\nBuild a report."
         self.assertEqual(Pipe._extract_project_directive(prompt), (prompt, None))
 
+    def test_new_task_after_repository_question_is_not_consumed_as_a_reply(self) -> None:
+        body = {
+            "messages": [
+                {"role": "user", "content": "Create a summary of the lab."},
+                {
+                    "role": "assistant",
+                    "content": "Which Forgejo repository should this mission use? For example owner/project.",
+                },
+                {
+                    "role": "user",
+                    "content": "Project: fresh-report\nBuild a report for the lab.",
+                },
+            ]
+        }
+
+        goal, project_name, repository = Pipe._resolve_turn(body, "default/repository")
+
+        self.assertEqual(goal, "Build a report for the lab.")
+        self.assertEqual(project_name, "fresh-report")
+        self.assertEqual(repository, "default/repository")
+
+    def test_valid_repository_reply_continues_the_waiting_task(self) -> None:
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Project: report\nBuild a summary of the lab.",
+                },
+                {
+                    "role": "assistant",
+                    "content": "Which Forgejo repository should this mission use? For example owner/project.",
+                },
+                {"role": "user", "content": "owner/repository"},
+            ]
+        }
+
+        goal, project_name, repository = Pipe._resolve_turn(body, "")
+
+        self.assertEqual(goal, "Build a summary of the lab.")
+        self.assertEqual(project_name, "report")
+        self.assertEqual(repository, "owner/repository")
 
 class ArtifactFormattingTests(unittest.TestCase):
     def test_signed_download_url_and_filename_are_preserved(self) -> None:
@@ -141,10 +182,6 @@ class FakeAgentManagerClient:
                 {"status": "queued", "summary": "Clarification received; resuming."}
             )
         self.request_body = request_body
-        if not request_body.get("project_name") and not request_body.get("parent_mission_id"):
-            return FakeResponse(
-                {"type": "question", "text": "What project name should this mission use?"}
-            )
         return FakeResponse(
             {
                 "type": "mission",
@@ -172,7 +209,7 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         pipe.valves.POLL_INTERVAL_SECONDS = 0.5
         return pipe
 
-    async def test_missing_project_is_a_question_not_a_run(self) -> None:
+    async def test_project_name_is_optional_and_manager_derives_title(self) -> None:
         pipe = self.configured_pipe()
         event_call = AsyncMock()
         client = FakeAgentManagerClient()
@@ -186,8 +223,8 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
 
         event_call.assert_not_awaited()
         self.assertTrue(client.url.endswith("/v1/omp/turns"))
-        self.assertNotIn("/v1/runs", client.url)
-        self.assertEqual(result, "What project name should this mission use?")
+        self.assertIsNone(client.request_body["project_name"])
+        self.assertIn("Mission `mission-1`", result)
         self.assertNotIn("script_name", client.request_body)
 
     async def test_script_directive_stays_in_goal_and_is_not_a_script_field(self) -> None:
@@ -204,17 +241,15 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.request_body["project_name"], "Quarterly Reports")
         self.assertNotIn("script_name", client.request_body)
 
-    async def test_project_reply_returns_download_link_without_product_source(self) -> None:
+    async def test_project_directive_returns_download_link_without_product_source(self) -> None:
         pipe = self.configured_pipe()
         client = FakeAgentManagerClient()
         event_emitter = AsyncMock()
         messages = [
-            {"role": "user", "content": "Write a short status note for the lab."},
-            {"role": "assistant", "content": "What project name should this mission use?"},
             {
                 "role": "user",
-                "content": "The Garden is the project name and I want you to write a short status note for the lab.",
-            },
+                "content": "Project: The Garden\nWrite a short status note for the lab.",
+            }
         ]
 
         with patch.object(agent_manager_pipe.httpx, "AsyncClient", return_value=client):
@@ -224,7 +259,7 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(client.request_body["project_name"], "The Garden")
-        self.assertEqual(client.request_body["goal"], "write a short status note for the lab")
+        self.assertEqual(client.request_body["goal"], "Write a short status note for the lab.")
         self.assertIn("Reviewer verdicts: 2/2 approved.", result)
         self.assertIn("Artifacts produced: 1.", result)
         self.assertIn(f"[calculator.html]({client.signed_url})", result)

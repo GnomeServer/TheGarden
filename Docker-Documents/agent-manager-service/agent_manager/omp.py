@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import secrets
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -29,7 +28,7 @@ from .dashboard import record_activity
 from .database import get_session
 from .models import ArtifactBlobRecord, RunRecord, UserRecord
 from .settings import settings
-from .crew_rules import attach_project_reply, crew_label, crew_size, is_chat_turn, missing_requirements
+from .crew_rules import crew_label, crew_size, is_chat_turn
 from .orchestrator import ask_model, dispatch_to_worker
 
 router = APIRouter()
@@ -38,8 +37,6 @@ logger = logging.getLogger("agent-manager.omp")
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 WORKER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 GREETING = re.compile(r"^(hi|hello|hey|yo|thanks|thank you|ok|okay)[.!?\s]*$", re.IGNORECASE)
-PENDING: dict[str, tuple[float, str]] = {}
-PENDING_SECONDS = 600.0
 
 class OmpTurn(BaseModel):
     goal: str = Field(default="", max_length=20000)
@@ -144,9 +141,6 @@ def omp_decision(body: OmpTurn) -> dict[str, str] | None:
         return question("What should the crew do?")
     if not body.forgejo_repository.strip():
         return question("Which Forgejo repository should this mission use? For example owner/project.")
-    project = (body.project_name or "").strip()
-    if not project:
-        return question("What project name should this mission use?")
     return None
 
 
@@ -180,19 +174,12 @@ async def accept_or_bounce(
         str(parent_metadata.get("project_name") or body.project_name or "").strip()
     )
     bounced = not REPO_PATTERN.match(repository)
-    gap = (
-        None
-        if bounced or parent_record
-        else missing_requirements(body.goal.strip())
-    )
     size = crew_size(body.goal.strip())
-    bounce = "Need a Forgejo repository in owner/project form." if bounced else gap
-    bounce_to = "omp" if bounce else "none"
+    bounce = "Need a Forgejo repository in owner/project form." if bounced else None
+    bounce_to = "omp" if bounced else "none"
     summary = (
         "Bounced to OMP. The repository was not usable."
         if bounced
-        else gap
-        if gap
         else f"Accepted. Crew {crew_label(size)}. Starting."
     )
     mission_id = str(body.mission_id or uuid.uuid4())
@@ -343,28 +330,14 @@ async def omp_turn(
             }
         )
     else:
-        pending = PENDING.get(actor.id)
-        pending_goal = (
-            pending[1]
-            if pending and time.monotonic() - pending[0] < PENDING_SECONDS
-            else None
-        )
-        goal, project_name = attach_project_reply(body.goal, pending_goal)
-        if project_name:
-            PENDING.pop(actor.id, None)
-            body = body.model_copy(update={"goal": goal, "project_name": project_name})
         if is_chat_turn(body.goal):
             return await answer_chat(
                 body.goal.strip(), actor, request, session, body.project_name
             )
-        gap = missing_requirements(body.goal)
-        if gap:
-            return question(gap)
         if not (body.project_name or "").strip():
             body = body.model_copy(
                 update={"project_name": chat_title(body.goal, None)}
             )
-
     reply = omp_decision(body)
     if reply is not None:
         return reply
