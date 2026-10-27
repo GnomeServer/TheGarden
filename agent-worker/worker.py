@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import ssl
 import stat
