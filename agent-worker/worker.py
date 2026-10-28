@@ -40,14 +40,14 @@ WORKER_CONSUMER = os.getenv(
     "WORKER_CONSUMER", f"agent-workers-{WORKER_ROLE}"
 )
 
-# MODEL_BASE_URL should include the OpenAI-compatible /v1 path, for example:
-# https://infra-lab-services.tail494f6d.ts.net/litellm/v1
-MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "").rstrip("/")
+KEYBROKER_URL = os.getenv(
+    "KEYBROKER_URL",
+    "https://infra-lab-services.tail494f6d.ts.net/keybroker",
+).rstrip("/")
+KEYBROKER_TIMEOUT = float(os.getenv("KEYBROKER_TIMEOUT", "15"))
 CADDY_HOST = "infra-lab-services.tail494f6d.ts.net"
 CADDY_TAILSCALE_IP = "100.94.49.45"
-MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
 MODEL_CA_FILE = os.getenv("MODEL_CA_FILE", "")
-MODEL_NAME = os.getenv("MODEL_NAME", "luna")
 OMP_WORKER_IMAGE = os.getenv("OMP_WORKER_IMAGE", "local/omp-worker:18.12.5")
 MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "120"))
 SCRIPT_TIMEOUT = float(os.getenv("SCRIPT_TIMEOUT", "300"))
@@ -59,7 +59,6 @@ ALLOW_GENERATED_CODE = os.getenv("ALLOW_GENERATED_CODE", "0").lower() in {
     "yes",
 }
 MODEL_TLS_INSECURE = os.getenv("MODEL_TLS_INSECURE", "0").lower() in {
-    "1",
     "true",
     "yes",
 }
@@ -75,6 +74,203 @@ def docker_model_host_args(base_url: str) -> list[str]:
         return ["--add-host", f"{CADDY_HOST}:{CADDY_TAILSCALE_IP}"]
     return []
 
+
+REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]"
+CREDENTIAL_PATTERN = re.compile(
+    r"sk-or-v1-[A-Fa-f0-9]{20,}|"
+    r"sk-ant-[A-Za-z0-9_-]{20,}|"
+    r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}|"
+    r"AIza[0-9A-Za-z_-]{35,}"
+)
+
+
+class CredentialExposure(RuntimeError):
+    """Raised after a credential-like value is detected in run text."""
+
+
+def redact_credentials(text: str, session_key: str | None = None) -> tuple[str, bool, bool]:
+    """Redact known credential forms and report whether the session key matched."""
+    session_key_match = bool(session_key and session_key in text)
+    found = session_key_match or CREDENTIAL_PATTERN.search(text) is not None
+    if session_key:
+        text = text.replace(session_key, REDACTED_CREDENTIAL)
+    return CREDENTIAL_PATTERN.sub(REDACTED_CREDENTIAL, text), found, session_key_match
+
+
+def keybroker_request(
+    method: str, path: str, payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    url = f"{KEYBROKER_URL}{path}"
+    if urlsplit(url).scheme != "https":
+        raise RuntimeError("KEYBROKER_URL must use HTTPS")
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    context = ssl.create_default_context(cafile=MODEL_CA_FILE.strip() or None)
+    try:
+        with urllib.request.urlopen(
+            request, timeout=KEYBROKER_TIMEOUT, context=context
+        ) as response:
+            response_body = response.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Keybroker returned HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("could not reach Keybroker") from None
+    if not response_body:
+        return {}
+    try:
+        response_data = json.loads(response_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("Keybroker returned an invalid response") from None
+    if not isinstance(response_data, dict):
+        raise RuntimeError("Keybroker returned an invalid response")
+    return response_data
+
+
+async def validate_keybroker_worker_identity() -> None:
+    identity = await asyncio.to_thread(
+        keybroker_request, "GET", "/v1/worker/identity"
+    )
+    if identity.get("worker_id") != WORKER_ID:
+        raise RuntimeError("Keybroker worker identity did not match WORKER_ID")
+
+
+async def request_keybroker_session(run_id: str, operation: str) -> dict[str, str]:
+    await validate_keybroker_worker_identity()
+    response = await asyncio.to_thread(
+        keybroker_request,
+        "POST",
+        "/v1/sessions",
+        {"run_id": run_id, "operation": operation},
+    )
+    required = (
+        "session_id",
+        "key",
+        "key_id",
+        "key_alias",
+        "expires_at",
+        "model_base_url",
+        "model",
+    )
+    if any(not isinstance(response.get(name), str) or not response[name] for name in required):
+        session_id = response.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            try:
+                await revoke_keybroker_session(session_id)
+            except Exception:
+                pass
+        raise RuntimeError("Keybroker returned an incomplete session")
+    session = {name: response[name] for name in required}
+    session["model_base_url"] = session["model_base_url"].rstrip("/")
+    return session
+
+
+async def revoke_keybroker_session(session_id: str) -> bool:
+    response = await asyncio.to_thread(
+        keybroker_request, "DELETE", f"/v1/sessions/{session_id}"
+    )
+    return response.get("revoked") is not False
+
+
+async def report_key_exposure(
+    session_id: str, *, session_key_match: bool
+) -> tuple[bool, bool | None]:
+    reason = (
+        "session_key_echo_detected"
+        if session_key_match
+        else "credential_pattern_detected"
+    )
+    response = await asyncio.to_thread(
+        keybroker_request,
+        "POST",
+        f"/v1/sessions/{session_id}/exposure",
+        {
+            "event_id": str(uuid.uuid4()),
+            "reason": reason,
+            "session_key_match": session_key_match,
+        },
+    )
+    revoked = response.get("revoked")
+    return (
+        response.get("stop_run") is True,
+        revoked if isinstance(revoked, bool) else None,
+    )
+
+
+async def inspect_value(value: Any, inspect_text: Any) -> None:
+    if isinstance(value, str):
+        await inspect_text(value)
+    elif isinstance(value, list):
+        for item in value:
+            await inspect_value(item, inspect_text)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str):
+                await inspect_text(key)
+            await inspect_value(item, inspect_text)
+
+
+def make_session_model_call(
+    session: dict[str, str],
+) -> tuple[Any, Any, dict[str, bool | None]]:
+    lock = asyncio.Lock()
+    exposure_detected = False
+    alert_state = {"reported": False, "revoked": None}
+    session_key = session.pop("key")
+
+    async def flag_exposure(session_key_match: bool) -> None:
+        nonlocal exposure_detected
+        exposure_detected = True
+        try:
+            stop_run, revoked = await report_key_exposure(
+                session["session_id"], session_key_match=session_key_match
+            )
+            alert_state["reported"] = stop_run
+            alert_state["revoked"] = revoked
+        except Exception:
+            # The session is also revoked by the caller's finally block.
+            pass
+        raise CredentialExposure("credential exposure detected")
+
+    async def inspect_text(text: str) -> str:
+        async with lock:
+            if exposure_detected:
+                raise CredentialExposure("credential exposure detected")
+            cleaned, found, session_key_match = redact_credentials(text, session_key)
+            if found:
+                await flag_exposure(session_key_match)
+            return cleaned
+
+    async def model_call(
+        system_prompt: str, user: str, max_tokens: int = 4000
+    ) -> str:
+        async with lock:
+            if exposure_detected:
+                raise CredentialExposure("credential exposure detected")
+            clean_system, system_found, system_match = redact_credentials(
+                system_prompt, session_key
+            )
+            clean_user, user_found, user_match = redact_credentials(user, session_key)
+            if system_found or user_found:
+                await flag_exposure(system_match or user_match)
+            response = await model_chat(
+                clean_system,
+                clean_user,
+                max_tokens,
+                api_key=session_key,
+                model_base_url=session["model_base_url"],
+                model=session["model"],
+            )
+            clean_response, found, session_key_match = redact_credentials(
+                response, session_key
+            )
+            if found:
+                await flag_exposure(session_key_match)
+            return clean_response
+
+    return model_call, inspect_text, alert_state
 
 
 def heartbeat_payload() -> dict[str, Any]:
@@ -141,12 +337,10 @@ artifacts in the current working directory.
 """
 
 
-def completions_url() -> str:
-    if not MODEL_BASE_URL:
-        raise RuntimeError("MODEL_BASE_URL is required for dynamic prompts")
-    if not MODEL_API_KEY:
-        raise RuntimeError("MODEL_API_KEY is required for dynamic prompts")
-    return f"{MODEL_BASE_URL}/chat/completions"
+def completions_url(model_base_url: str) -> str:
+    if not model_base_url:
+        raise RuntimeError("Keybroker session omitted the model endpoint")
+    return f"{model_base_url.rstrip('/')}/chat/completions"
 
 
 def extract_source(content: str) -> str:
@@ -168,10 +362,18 @@ def extract_source(content: str) -> str:
     return content + ("\n" if not content.endswith("\n") else "")
 
 
-def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> str:
-    url = completions_url()
+def model_chat_sync(
+    system_prompt: str,
+    user: str,
+    max_tokens: int,
+    *,
+    api_key: str,
+    model_base_url: str,
+    model: str,
+) -> str:
+    url = completions_url(model_base_url)
     payload = {
-        "model": MODEL_NAME,
+        "model": model,
         "temperature": 0.2,
         "max_tokens": max_tokens,
         "messages": [
@@ -184,7 +386,7 @@ def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> st
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Accept": "application/json",
-            "Authorization": f"Bearer {MODEL_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -198,16 +400,15 @@ def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> st
         ) as response:
             response_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        raise RuntimeError(f"model API returned HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"could not reach model API: {exc.reason}") from exc
+        raise RuntimeError(f"model API returned HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("could not reach model API") from None
 
     try:
         completion = json.loads(response_body)
         content = completion["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("model API returned an unexpected response") from exc
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        raise RuntimeError("model API returned an unexpected response") from None
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("model response content was empty or not text")
     if len(content) > MAX_SCRIPT_CHARS * 2:
@@ -215,15 +416,31 @@ def model_chat_sync(system_prompt: str, user: str, max_tokens: int = 4000) -> st
     return content.strip()
 
 
-async def model_chat(system_prompt: str, user: str, max_tokens: int = 4000) -> str:
-    return await asyncio.to_thread(model_chat_sync, system_prompt, user, max_tokens)
+async def model_chat(
+    system_prompt: str,
+    user: str,
+    max_tokens: int = 4000,
+    *,
+    api_key: str,
+    model_base_url: str,
+    model: str,
+) -> str:
+    return await asyncio.to_thread(
+        model_chat_sync,
+        system_prompt,
+        user,
+        max_tokens,
+        api_key=api_key,
+        model_base_url=model_base_url,
+        model=model,
+    )
 
 
-def generate_source_sync(goal: str) -> str:
-    return extract_source(model_chat_sync(SYSTEM_PROMPT, goal, 5000))
-
-
-async def generate_source(goal: str, metadata: dict[str, Any]) -> tuple[str, str]:
+async def generate_source(
+    goal: str,
+    metadata: dict[str, Any],
+    model_call: Any,
+) -> tuple[str, str]:
     # A supplied script is useful for deterministic pipeline tests. Dynamic
     # prompts use the model when metadata does not contain script content.
     supplied_script = metadata.get("script")
@@ -232,7 +449,7 @@ async def generate_source(goal: str, metadata: dict[str, Any]) -> tuple[str, str
             raise RuntimeError("metadata.script must be a non-empty string")
         return extract_source(supplied_script), "provided"
 
-    source = await asyncio.to_thread(generate_source_sync, goal)
+    source = extract_source(await model_call(SYSTEM_PROMPT, goal, 5000))
     return source, "model"
 
 
@@ -360,6 +577,21 @@ def collect_artifact_files(
             )
         collected.append((value, path, info.st_size))
     return collected
+
+
+async def inspect_mission_files(
+    work_dir: Path, relative_paths: Any, inspect_text: Any
+) -> None:
+    if not relative_paths:
+        return
+    files = await asyncio.to_thread(
+        collect_artifact_files, work_dir, relative_paths
+    )
+    for _relative, artifact_path, expected_size in files:
+        artifact_content = await asyncio.to_thread(artifact_path.read_bytes)
+        if len(artifact_content) != expected_size:
+            raise ValueError("artifact changed while scanning credentials")
+        await inspect_text(artifact_content.decode("utf-8", errors="ignore"))
 
 
 def package_artifacts(
@@ -801,8 +1033,48 @@ async def cancel_active_mission(run_id: str) -> bool:
     return True
 
 
-async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+async def run_mission_image(
+    event: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    model_session: dict[str, str] | None = None,
+    inspect_text: Any = None,
+) -> dict[str, Any]:
     """Run a cancellable OMP container, upload its product, then remove its workspace."""
+    session_key = (
+        model_session.pop("key", None)
+        if isinstance(model_session, dict)
+        else None
+    )
+    model_base_url = (
+        model_session.get("model_base_url")
+        if isinstance(model_session, dict)
+        else None
+    )
+    model = (
+        model_session.get("model")
+        if isinstance(model_session, dict)
+        else None
+    )
+    if (
+        not isinstance(session_key, str)
+        or not session_key
+        or not isinstance(model_base_url, str)
+        or not model_base_url
+        or not isinstance(model, str)
+        or not model
+    ):
+        return {
+            "status": "failed",
+            "summary": "The worker did not receive a complete Keybroker session.",
+        }
+    model_base_url = model_base_url.rstrip("/")
+    model = model.strip()
+    if not model_base_url or not model:
+        return {
+            "status": "failed",
+            "summary": "The worker did not receive a complete Keybroker session.",
+        }
     goal = event.get("goal") if isinstance(event.get("goal"), str) else ""
     run_id = event.get("run_id")
     if not isinstance(run_id, str) or not run_id:
@@ -881,12 +1153,7 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
             "status": "failed",
             "summary": "The worker cannot launch the OMP job image because Docker is unavailable.",
         }
-    if not MODEL_BASE_URL or not MODEL_API_KEY:
-        return {
-            "status": "failed",
-            "summary": "The worker OMP image is missing its LiteLLM URL or virtual key.",
-        }
-    if MODEL_BASE_URL.startswith("https://") and not ca_file.is_file():
+    if model_base_url.startswith("https://") and not ca_file.is_file():
         return {
             "status": "failed",
             "summary": "The worker cannot verify the HTTPS model endpoint because its Caddy root certificate is missing.",
@@ -907,6 +1174,8 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
         "parent_mission_id": parent_mission_id,
         "modifies_existing_artifact": artifact_input is not None,
     }
+    if inspect_text is not None:
+        await inspect_value(mission, inspect_text)
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="omp-mission-", dir=WORKSPACE) as temporary:
         run_dir = Path(temporary)
@@ -938,6 +1207,11 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
                         "summary": "The worker could not load the completed artifact for modification.",
                         "error": f"{type(exc).__name__}: {exc}"[:1000],
                     }
+        if inspect_text is not None:
+            workspace_files = await asyncio.to_thread(
+                _checkpoint_file_paths, work_dir
+            )
+            await inspect_mission_files(work_dir, workspace_files, inspect_text)
         mission_path.write_text(
             json.dumps(mission, ensure_ascii=False) + "\n", encoding="utf-8"
         )
@@ -950,9 +1224,9 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
         env_file.write_text(
             "\n".join(
                 [
-                    f"MODEL_BASE_URL={MODEL_BASE_URL}",
-                    f"MODEL_API_KEY={MODEL_API_KEY}",
-                    f"MODEL_NAME={MODEL_NAME}",
+                    f"MODEL_BASE_URL={model_base_url}",
+                    f"MODEL_API_KEY={session_key}",
+                    f"OMP_MODEL=worker-litellm/{model}",
                     "OMP_TIMEOUT_SECONDS=600",
                     "",
                 ]
@@ -960,6 +1234,7 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
             encoding="utf-8",
         )
         os.chmod(env_file, 0o600)
+        del session_key
 
         container_name = f"omp-mission-{uuid.uuid5(uuid.NAMESPACE_URL, run_id).hex[:20]}"
         cancellation = asyncio.Event()
@@ -979,7 +1254,7 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
             "--mount", f"type=bind,src={mission_path},dst=/mission.json,readonly",
             "--mount", f"type=bind,src={work_dir},dst=/work",
         ]
-        command.extend(docker_model_host_args(MODEL_BASE_URL))
+        command.extend(docker_model_host_args(model_base_url))
         command.extend([
             "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/caddy-root.crt",
             "--mount", f"type=bind,src={ca_file},dst=/etc/ssl/certs/caddy-root.crt,readonly",
@@ -1036,25 +1311,37 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
                     command,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
-                    stderr=None,
+                    stderr=subprocess.PIPE,
                     text=True,
                     timeout=660,
                     check=False,
                 )
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
+                if not cancellation.is_set():
+                    try:
+                        await asyncio.to_thread(
+                            stop_omp_container, container_name
+                        )
+                    except Exception:
+                        pass
+                if inspect_text is not None:
+                    for output in (exc.stdout, exc.stderr):
+                        if isinstance(output, bytes):
+                            output = output.decode("utf-8", errors="replace")
+                        if isinstance(output, str):
+                            await inspect_text(output)
                 if cancellation.is_set():
                     return {
                         "status": "cancelled",
                         "summary": "Mission cancelled at the user's request.",
                     }
-                try:
-                    await asyncio.to_thread(stop_omp_container, container_name)
-                except Exception:
-                    pass
                 return {
                     "status": "failed",
                     "summary": "The worker OMP image exceeded its 660-second limit.",
                 }
+            if inspect_text is not None:
+                await inspect_text(completed.stdout or "")
+                await inspect_text(completed.stderr or "")
             if cancellation.is_set():
                 return {
                     "status": "cancelled",
@@ -1094,9 +1381,18 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
                 }
             result["mission_id"] = run_id
             result.setdefault("summary", "Worker OMP finished.")
+            if inspect_text is not None:
+                await inspect_value(result, inspect_text)
             result.pop("script", None)
             result.pop("artifact", None)
             if result.get("status") == "needs_input":
+                if inspect_text is not None:
+                    checkpoint_files = await asyncio.to_thread(
+                        _checkpoint_file_paths, work_dir
+                    )
+                    await inspect_mission_files(
+                        work_dir, checkpoint_files, inspect_text
+                    )
                 if not resume_from_checkpoint:
                     save_mission_checkpoint(work_dir, run_id)
                 checkpoint_retained = True
@@ -1114,6 +1410,10 @@ async def run_mission_image(event: dict[str, Any], metadata: dict[str, Any]) -> 
                         "status": "cancelled",
                         "summary": "Mission cancelled at the user's request.",
                     }
+                if inspect_text is not None:
+                    await inspect_mission_files(
+                        work_dir, result.get("artifacts"), inspect_text
+                    )
                 filename, content_type, content = await asyncio.to_thread(
                     package_artifacts, work_dir, result.get("artifacts")
                 )
@@ -1146,9 +1446,7 @@ async def process_message(js: Any, message: Any) -> None:
     # consumer. A worker_id is still honored for explicitly targeted jobs.
     target_worker = metadata.get("worker_id")
     if target_worker and target_worker != WORKER_ID:
-        raise RuntimeError(
-            f"task is for {target_worker!r}, not {WORKER_ID!r}"
-        )
+        raise RuntimeError(f"task is for {target_worker!r}, not {WORKER_ID!r}")
 
     target_role = metadata.get("worker_role", WORKER_ROLE)
     if target_role != WORKER_ROLE:
@@ -1170,7 +1468,6 @@ async def process_message(js: Any, message: Any) -> None:
     }
     if run_event_expired(event):
         result.update({
-            "status": "failed",
             "summary": "The run expired before a worker could start it.",
             "error": "run delivery expired before worker pickup",
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -1181,6 +1478,12 @@ async def process_message(js: Any, message: Any) -> None:
         return
     result["started_at"] = datetime.now(timezone.utc).isoformat()
 
+    session: dict[str, str] | None = None
+    inspect_text = None
+    alert_state: dict[str, bool | None] = {"reported": False, "revoked": None}
+    security_exposed = False
+    revoke_failed = False
+    operation = metadata.get("operation")
 
     if metadata.get("operation") == "create-python-script":
         result["script"] = None
@@ -1193,8 +1496,26 @@ async def process_message(js: Any, message: Any) -> None:
         await js.publish("agent.runs.status", encoded_status)
         await js.publish("agent.runs.started", encoded_status)
 
-        if metadata.get("operation") == "mission":
-            mission_result = await run_mission_image(event, metadata)
+        if operation not in {"mission", "create-python-script"}:
+            raise RuntimeError("unsupported worker operation")
+        if operation == "create-python-script" and not ALLOW_GENERATED_CODE:
+            raise RuntimeError(
+                "refusing to execute generated code; set ALLOW_GENERATED_CODE=1 "
+                "only on a disposable/test worker"
+            )
+
+        session = dict(await request_keybroker_session(run_id, operation))
+        mission_session = dict(session) if operation == "mission" else None
+        model_call, inspect_text, alert_state = make_session_model_call(session)
+
+        if operation == "mission":
+            mission_result = await run_mission_image(
+                event,
+                metadata,
+                model_session=mission_session,
+                inspect_text=inspect_text,
+            )
+            mission_session.clear()
             if mission_result.get("status") == "bounced":
                 mission_result["error"] = (
                     mission_result.get("error")
@@ -1203,19 +1524,10 @@ async def process_message(js: Any, message: Any) -> None:
                 )
                 mission_result["status"] = "failed"
             result.update(mission_result)
-        elif metadata.get("operation") != "create-python-script":
-            raise RuntimeError("unsupported worker operation")
         else:
-            goal = event.get("goal")
-        if metadata.get("operation") != "mission":
             goal = event.get("goal")
             if not isinstance(goal, str) or not goal.strip():
                 raise RuntimeError("event is missing a non-empty goal")
-            if not ALLOW_GENERATED_CODE:
-                raise RuntimeError(
-                    "refusing to execute generated code; set ALLOW_GENERATED_CODE=1 "
-                    "only on a disposable/test worker"
-                )
             project_component = project_directory_name(metadata.get("project_name"))
             script_filename = python_script_filename(metadata.get("script_name"))
             execution_dir = (
@@ -1227,7 +1539,8 @@ async def process_message(js: Any, message: Any) -> None:
                 parents=True,
                 exist_ok=project_component is not None,
             )
-            source, source_origin = await generate_source(goal, metadata)
+            source, source_origin = await generate_source(goal, metadata, model_call)
+            source = await inspect_text(source)
             compile(source, str(execution_dir / script_filename), "exec")
             script_path = write_script_without_overwrite(
                 execution_dir, script_filename, source
@@ -1244,33 +1557,119 @@ async def process_message(js: Any, message: Any) -> None:
                     timeout=SCRIPT_TIMEOUT,
                     check=False,
                 )
+                stdout = await inspect_text(completed.stdout)
+                stderr = await inspect_text(completed.stderr)
                 result.update(
                     {
                         "status": "completed" if completed.returncode == 0 else "failed",
                         "returncode": completed.returncode,
-                        "stdout": completed.stdout[:MAX_OUTPUT_CHARS],
-                        "stderr": completed.stderr[:MAX_OUTPUT_CHARS],
+                        "stdout": stdout[:MAX_OUTPUT_CHARS],
+                        "stderr": stderr[:MAX_OUTPUT_CHARS],
                     }
                 )
             except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                stdout = await inspect_text(stdout)
+                stderr = await inspect_text(stderr)
                 result.update(
                     {
                         "status": "failed",
                         "returncode": None,
                         "error": f"script exceeded {SCRIPT_TIMEOUT:g} seconds",
-                        "stdout": str(exc.stdout or "")[:MAX_OUTPUT_CHARS],
-                        "stderr": str(exc.stderr or "")[:MAX_OUTPUT_CHARS],
+                        "stdout": stdout[:MAX_OUTPUT_CHARS],
+                        "stderr": stderr[:MAX_OUTPUT_CHARS],
                     }
                 )
             result["source"] = source_origin
+    except CredentialExposure:
+        security_exposed = True
+        result.update({
+            "status": "failed",
+            "script": None,
+            "summary": "Run stopped because a potential credential exposure was detected.",
+        })
+        for field in ("artifacts", "evidence", "stdout", "stderr", "source", "error"):
+            result.pop(field, None)
     except Exception as exc:
-        # Model, validation, and workspace failures must be terminal and visible.
-        detail = str(exc)[:1000]
-        result["error"] = detail
-        if metadata.get("operation") == "mission":
-            result["summary"] = f"Worker mission failed: {detail[:500]}"
-    result.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
+        detail = str(exc)
+        found = False
+        if inspect_text:
+            try:
+                detail = await inspect_text(detail)
+            except CredentialExposure:
+                found = True
+        else:
+            detail, found, _ = redact_credentials(detail)
+        if found:
+            security_exposed = True
+            result.update({
+                "status": "failed",
+                "script": None,
+                "summary": "Run stopped because a potential credential exposure was detected.",
+            })
+            for field in ("artifacts", "evidence", "stdout", "stderr", "source", "error"):
+                result.pop(field, None)
+        else:
+            result["error"] = detail[:1000]
+            if operation == "mission":
+                result["summary"] = f"Worker mission failed: {detail[:500]}"
 
+    finally:
+        if session:
+            if not security_exposed and inspect_text:
+                try:
+                    await inspect_value(result, inspect_text)
+                except CredentialExposure:
+                    security_exposed = True
+                    run_id_text, _, _ = redact_credentials(run_id)
+                    result = {
+                        "event": "run.completed",
+                        "run_id": run_id_text,
+                        "worker_id": WORKER_ID,
+                        "hostname": socket.gethostname(),
+                        "status": "failed",
+                        "script": None,
+                        "started_at": result.get("started_at"),
+                        "summary": "Run stopped because a potential credential exposure was detected.",
+                    }
+
+            try:
+                delete_confirmed = await revoke_keybroker_session(
+                    session["session_id"]
+                )
+                alert_state["revoked"] = (
+                    delete_confirmed or alert_state["revoked"] is True
+                )
+                revoke_failed = alert_state["revoked"] is not True
+            except Exception:
+                revoke_failed = alert_state["revoked"] is not True
+
+    if security_exposed:
+        notice = (
+            "Potential credential exposure detected. Further model calls were stopped."
+        )
+        if revoke_failed:
+            notice += " Session-key revocation could not be confirmed; an administrator must revoke it."
+        elif session:
+            notice += " The session key was revoked."
+        else:
+            notice += " No session key was issued."
+        if not alert_state["reported"]:
+            notice += " Administrator alert delivery could not be confirmed."
+        result["security_notice"] = notice
+    elif revoke_failed:
+        result.update({
+            "status": "failed",
+            "summary": "The run ended, but session-key revocation could not be confirmed.",
+            "security_notice": "An administrator must revoke the worker session key.",
+        })
+
+    result.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
     try:
         await js.publish("agent.runs.completed", json.dumps(result).encode("utf-8"))
         print(json.dumps(result, indent=2), flush=True)

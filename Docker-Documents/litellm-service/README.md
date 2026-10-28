@@ -56,20 +56,50 @@ LUNA_BACKEND_API_KEY=<key-accepted-by-the-inference-backend>
 `LUNA_MODEL` and `LUNA_API_BASE` describe the backend route. The public model
 name presented to clients remains `luna`.
 
-The worker reads `MODEL_API_KEY` from the environment. Ansible loads each
-worker-specific virtual key from `litellm_key_source`, installs it at
-`~/.config/litellm/worker-api-key`, and exports it when the worker starts.
+The checked-in `.env.example` points `LUNA_API_BASE` at the local llama service,
+so zero spend is expected for that default route. For a paid OpenAI route,
+`LUNA_MODEL` must identify the actual upstream model LiteLLM prices, or set
+`model_info.base_model` / explicit `input_cost_per_token` and
+`output_cost_per_token` rates in `config.yaml`. API Guard shows zero-priced
+requests by model ID. Before issuing a virtual key, Keybroker reloads LiteLLM's
+model cost map once and then blocks new keys if an external model still has
+missing or zero input/output pricing. Do not allowlist a paid provider URL as a
+free local model. See
+[LiteLLM custom pricing](https://docs.litellm.ai/docs/proxy/custom_pricing).
 
-Create separate restricted keys rather than sharing one key across laptops:
+The gateway config enforces a shared `$25,000` spend ceiling over `365d` across
+all LiteLLM traffic. Budget enforcement depends on the PostgreSQL database being
+available. The separate
+[`API Guard dashboard`](../api-guard-dashboard/README.md) compares rolling
+365-day spend with that limit and shows `$2,083.33` per month as a pacing
+target; monthly pacing is not an additional hard cap. Keep the matching
+`API_GUARD_ANNUAL_BUDGET_USD` value at `25000` unless the LiteLLM config changes
+with it.
+
+The ceiling only covers calls sent through this proxy. Set an independent
+upstream provider spend limit and alert (for example, on OpenRouter) and do not
+give the upstream provider key to workers or OMP. API Guard manages LiteLLM
+virtual keys; upstream provider credentials remain in LiteLLM's private
+deployment environment and must be rotated there.
+
+Ansible-managed Dark Factory agent workers obtain model-scoped keys from
+Keybroker for each run; the worker role no longer reads `MODEL_API_KEY` or
+installs `~/.config/litellm/worker-api-key`. After the Keybroker cutover is
+verified on a worker, revoke its legacy LiteLLM key in API Guard. Do not use the
+static-key instructions below for enrolled agent workers.
+
+`create-luna-key.sh` remains for manual clients that have not migrated to
+Keybroker. Create a separately restricted key per such client and keep its
+secret local:
 
 ```bash
 cd "$REPO_ROOT/Docker-Documents/litellm-service"
-KEY_ALIAS=worker-02 WORKER_ID=worker-02 KEY_FILE=.worker-02-api-key ./create-luna-key.sh
+KEY_ALIAS=manual-client KEY_FILE=.manual-client-api-key ./create-luna-key.sh
 ```
 
-Repeat with each worker ID and its matching `.worker-0N-api-key` file. The key
-is restricted to the `luna` model; never commit the generated files.
-
+Do not distribute those keys to the four Ansible-managed agent workers. The
+worker-role cutover removes the old `~/.config/litellm/worker-api-key` file but
+does not revoke the corresponding key in LiteLLM.
 ## Start the stack
 
 Caddy and the inference backend must be running first so the external

@@ -24,11 +24,12 @@ from .artifacts import (
     validate_artifact_id,
 )
 from .auth import require_run_submission
+from .crew_rules import attach_project_reply, crew_label, crew_size, is_chat_turn, missing_requirements
 from .dashboard import record_activity
 from .database import get_session
+from .exposure_delivery import queue_omp_exposure_event
 from .models import ArtifactBlobRecord, RunRecord, UserRecord
 from .settings import settings
-from .crew_rules import crew_label, crew_size, is_chat_turn
 from .orchestrator import ask_model, dispatch_to_worker
 
 router = APIRouter()
@@ -37,6 +38,59 @@ logger = logging.getLogger("agent-manager.omp")
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 WORKER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 GREETING = re.compile(r"^(hi|hello|hey|yo|thanks|thank you|ok|okay)[.!?\s]*$", re.IGNORECASE)
+
+SECRET_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"),
+    re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"),
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])"),
+    re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
+)
+SAFE_EXPOSURE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
+SAFE_EXPOSURE_KEY_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def redact_credentials(value: str, configured_key: str) -> tuple[str, str | None]:
+    reason = None
+    if configured_key and configured_key in value:
+        value = value.replace(configured_key, "[REDACTED API KEY]")
+        reason = "configured_credential_echo"
+    for pattern in SECRET_PATTERNS:
+        value, replacements = pattern.subn("[REDACTED API KEY]", value)
+        if replacements and reason is None:
+            reason = "credential_pattern_in_output"
+    return value, reason
+
+
+async def report_credential_exposure(reason: str, *, configured_key: bool) -> bool:
+    from .settings import settings
+
+    configured_credential = settings.model_api_key
+    key_alias = settings.model_api_key_alias if configured_key else "unmapped"
+    key_id = settings.model_api_key_id or None if configured_key else None
+    if (
+        not SAFE_EXPOSURE_ALIAS.fullmatch(key_alias)
+        or any(pattern.search(key_alias) for pattern in SECRET_PATTERNS)
+        or (configured_credential and configured_credential in key_alias)
+    ):
+        key_alias = "unmapped"
+    if key_id and (
+        not SAFE_EXPOSURE_KEY_ID.fullmatch(key_id)
+        or any(pattern.search(key_id) for pattern in SECRET_PATTERNS)
+        or (configured_credential and configured_credential in key_id)
+    ):
+        key_id = None
+    event = {
+        "event_id": str(uuid.uuid4()),
+        "key_id": key_id,
+        "key_alias": key_alias,
+        "source": "omp",
+        "reason": reason,
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        return await queue_omp_exposure_event(event)
+    except Exception:
+        return False
 
 class OmpTurn(BaseModel):
     goal: str = Field(default="", max_length=20000)
@@ -375,16 +429,45 @@ async def answer_chat(
     title = chat_title(goal, project_name)
     if not settings.model_api_key:
         return question("OMP cannot answer yet. The manager has no model key.")
+    alert_delivery_failed = False
+    safe_goal, prompt_reason = redact_credentials(goal, settings.model_api_key)
+    exposure_detected = prompt_reason is not None
+    if prompt_reason:
+        alert_delivery_failed |= not await report_credential_exposure(
+            prompt_reason,
+            configured_key=prompt_reason == "configured_credential_echo",
+        )
     try:
         text = await ask_model(
             "You are Luna, answering through OMP. Answer in a few sentences. Do not ask for a project name.",
-            goal,
+            safe_goal,
         )
     except Exception as exc:
         await record_chat(session, actor, request, title, "Luna did not answer.")
-        return question(f"OMP could not reach Luna ({type(exc).__name__}).")
+        notice = (
+            "\n\n[Security notice: credential-shaped text was redacted, but API Guard receipt is unconfirmed. Notify an administrator immediately; do not resend the credential.]"
+            if exposure_detected and alert_delivery_failed
+            else "\n\n[Security notice: credential-shaped text was redacted and recorded by API Guard. The alert still requires administrator review and key rotation; do not resend the credential.]"
+            if exposure_detected
+            else ""
+        )
+        return question(f"OMP could not reach Luna ({type(exc).__name__}).{notice}")
+    safe_text, output_reason = redact_credentials(text, settings.model_api_key)
+    if output_reason:
+        exposure_detected = True
+        alert_delivery_failed |= not await report_credential_exposure(
+            output_reason,
+            configured_key=output_reason == "configured_credential_echo",
+        )
     await record_chat(session, actor, request, title, "Luna answered through OMP.")
-    return question(text.strip()[:4000])
+    if exposure_detected:
+        notice = (
+            "[Security notice: credential-shaped text was redacted, but API Guard receipt is unconfirmed. Notify an administrator immediately; do not resend the credential.]"
+            if alert_delivery_failed
+            else "[Security notice: credential-shaped text was redacted and recorded by API Guard. The alert still requires administrator review and key rotation; do not resend the credential.]"
+        )
+        safe_text = f"{safe_text.strip()}\n\n{notice}"
+    return question(safe_text.strip()[:4000])
 
 
 async def record_chat(
@@ -472,6 +555,11 @@ async def mission_status(
         "reviewer_count": reviewer_count,
         "parent_mission_id": metadata.get("parent_mission_id"),
         "artifact": mission_artifact(metadata, record.id) if record.status == "completed" else None,
+        "security_notice": (
+            result.get("security_notice")
+            if isinstance(result.get("security_notice"), str)
+            else None
+        ),
     }
 
 

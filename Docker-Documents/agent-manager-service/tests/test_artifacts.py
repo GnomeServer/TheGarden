@@ -326,7 +326,17 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
         record = SimpleNamespace(
             id="run-1",
             status="completed",
-            run_metadata={"operation": "mission", "artifact": artifact, "ledger": {}},
+            error=None,
+            worker_id=None,
+            run_metadata={
+                "operation": "mission",
+                "artifact": artifact,
+                "ledger": {},
+                "result": {
+                    "evidence": {"artifacts": ["result.py"]},
+                    "artifacts": [{"path": "result.py", "content": "PRIVATE-SOURCE-CONTENT"}],
+                },
+            },
         )
         session = SimpleNamespace(get=AsyncMock(return_value=record))
         issued_at = int(time.time())
@@ -334,7 +344,11 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(status_out["artifact"]), {
             "id", "filename", "content_type", "size_bytes", "sha256", "download_url"
         })
+        self.assertEqual(status_out["artifact"]["filename"], "result.zip")
         self.assertNotIn("script", status_out)
+        self.assertEqual(status_out["evidence"], {"artifacts": ["result.py"]})
+        self.assertNotIn("artifacts", status_out)
+        self.assertNotIn("PRIVATE-SOURCE-CONTENT", str(status_out))
         query = parse_qs(urlparse(status_out["artifact"]["download_url"]).query)
         expires = int(query["expires"][0])
         self.assertIn(expires - issued_at, {DOWNLOAD_TTL_SECONDS, DOWNLOAD_TTL_SECONDS + 1})

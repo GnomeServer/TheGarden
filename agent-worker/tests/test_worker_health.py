@@ -71,7 +71,7 @@ class WorkerHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["hostname"], "donatello")
         self.assertEqual(event["status"], "busy")
         self.assertEqual(event["current_run_id"], "run-1")
-        self.assertEqual(event["capabilities"], [])
+        self.assertEqual(event["capabilities"], ["mission-crew"])
         self.assertNotIn("secret-output", json.dumps(event))
 
 

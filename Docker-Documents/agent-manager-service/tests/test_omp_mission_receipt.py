@@ -189,6 +189,8 @@ class MissionReceiptTests(unittest.IsolatedAsyncioTestCase):
         record = SimpleNamespace(
             id="mission-1",
             status="failed",
+            error=None,
+            worker_id=None,
             run_metadata={
                 "operation": "mission",
                 "result": {"reviewer_count": 3},
@@ -203,6 +205,8 @@ class MissionReceiptTests(unittest.IsolatedAsyncioTestCase):
         record = SimpleNamespace(
             id="mission-clarification",
             status="needs_input",
+            error=None,
+            worker_id=None,
             run_metadata={
                 "operation": "mission",
                 "result": {
@@ -229,6 +233,8 @@ class MissionReceiptTests(unittest.IsolatedAsyncioTestCase):
                 record = SimpleNamespace(
                     id="mission-1",
                     status="failed",
+                    error=None,
+                    worker_id=None,
                     run_metadata={
                         "operation": "mission",
                         "result": {"reviewer_count": value},

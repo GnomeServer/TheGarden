@@ -71,6 +71,8 @@ class Result:
 
     def all(self):
         return self.rows
+    def scalars(self):
+        return self
 
 
 class WorkerExecutionEndpointTests(unittest.IsolatedAsyncioTestCase):
@@ -109,6 +111,16 @@ class WorkerExecutionEndpointTests(unittest.IsolatedAsyncioTestCase):
             execute=AsyncMock(side_effect=[
                 Result([]),
                 Result([("completed", 1)]),
+                Result([
+                    SimpleNamespace(
+                        id="worker-03", hostname="donatello", last_seen_at=now,
+                        reported_status="busy",
+                    ),
+                    SimpleNamespace(
+                        id="donatello", hostname="donatello", last_seen_at=now,
+                        reported_status="busy",
+                    ),
+                ]),
                 Result([(
                     "worker-03",
                     "completed",
@@ -116,13 +128,13 @@ class WorkerExecutionEndpointTests(unittest.IsolatedAsyncioTestCase):
                     datetime(2026, 10, 21, 12, 5, tzinfo=timezone.utc),
                 )]),
             ]),
-            scalar=AsyncMock(side_effect=[1, 0]),
         )
 
         with patch("agent_manager.dashboard.utcnow", return_value=now):
             summary = await dashboard_summary(SimpleNamespace(), session)
 
         self.assertEqual(summary["worker_execution_seconds_today"], 300)
+        self.assertEqual(summary["workers"], {"online": 1, "busy": 1})
         self.assertEqual(summary["worker_runs_today"], 1)
         self.assertNotIn("observed_seconds_today", summary)
 

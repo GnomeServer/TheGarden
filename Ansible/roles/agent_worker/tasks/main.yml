@@ -1,21 +1,25 @@
 ---
-- name: Require a worker id and role
+- name: Require worker identity and fixed control-plane network configuration
   ansible.builtin.assert:
     that:
       - worker_id is defined
       - worker_id | length > 0
       - worker_role is defined
       - worker_role | length > 0
-    fail_msg: "Set worker_id and worker_role for {{ inventory_hostname }} before running this playbook."
+      - worker_control_plane_ip == '100.94.49.45'
+      - worker_control_plane_hostname == 'infra-lab-services.tail494f6d.ts.net'
+      - worker_nats_url is match('^nats://100[.]94[.]49[.]45:4222$')
+      - worker_keybroker_base_url is match('^https://infra-lab-services[.]tail494f6d[.]ts[.]net/keybroker/?$')
+    fail_msg: "Set worker_id and worker_role, and keep NATS and Keybroker on the configured control-plane service endpoint for {{ inventory_hostname }}."
 
-- name: Install Python, cron, CA certificates, and worker process-management packages
+- name: Install Python, cron, process-management tools, and CA certificates
   ansible.builtin.apt:
     name:
       - ca-certificates
+      - procps
+      - cron
       - python3
       - python3-venv
-      - cron
-      - procps
     state: present
   become: true
 
@@ -28,7 +32,6 @@
   loop:
     - "{{ ansible_user_dir }}/agent-worker"
     - "{{ ansible_user_dir }}/agent-workspace"
-    - "{{ ansible_user_dir }}/.config"
     - "{{ ansible_user_dir }}/.config/litellm"
 
 - name: Check Caddy root CA on the controller
@@ -37,7 +40,7 @@
   delegate_to: localhost
   register: caddy_root_ca_source_stat
 
-- name: Require the Caddy root CA for HTTPS worker model access
+- name: Require the Caddy root CA for worker HTTPS access
   ansible.builtin.assert:
     that:
       - caddy_root_ca_source_stat.stat.exists
@@ -46,7 +49,7 @@
       Export the active Caddy root certificate to {{ caddy_root_ca_source }}
       with scripts/export_caddy_root_ca.sh before deploying the worker.
 
-- name: Install the Caddy root CA for worker model requests
+- name: Install the Caddy root CA for worker HTTPS requests
   ansible.builtin.copy:
     src: "{{ caddy_root_ca_source }}"
     dest: "{{ ansible_user_dir }}/.config/litellm/caddy-root.crt"
@@ -125,33 +128,20 @@
     mode: "0700"
   notify: Restart agent worker
 
-- name: Check for a LiteLLM key on the controller
+- name: Check that the public Caddy root certificate is staged on the controller
   ansible.builtin.stat:
-    path: "{{ litellm_key_source | default('/does-not-exist') }}"
+    path: /tmp/thegarden-caddy-root.crt
+  register: caddy_root_certificate
   delegate_to: localhost
-  register: litellm_key_source_stat
+  run_once: true
 
-- name: Require a worker-scoped LiteLLM key for dynamic missions
+- name: Require the public Caddy root certificate before Keybroker cutover
   ansible.builtin.assert:
     that:
-      - worker_model_base_url | length == 0 or (litellm_key_source_stat.stat.exists | default(false))
-      - worker_model_base_url | length == 0 or (litellm_key_source_stat.stat.isreg | default(false))
-    fail_msg: "Dynamic worker missions require a worker-scoped LiteLLM key file in litellm_key_source."
-
-
-- name: Install the worker LiteLLM key
-  ansible.builtin.copy:
-    src: "{{ litellm_key_source }}"
-    dest: "{{ ansible_user_dir }}/.config/litellm/worker-api-key"
-    owner: "{{ ansible_user_id }}"
-    mode: "0600"
-  no_log: true
-  when:
-    - litellm_key_source is defined
-    - litellm_key_source | length > 0
-    - litellm_key_source_stat.stat.exists
-    - litellm_key_source_stat.stat.isreg
-  notify: Restart agent worker
+      - caddy_root_certificate.stat.exists
+      - caddy_root_certificate.stat.isreg
+    fail_msg: "Copy Caddy's public root.crt to /tmp/thegarden-caddy-root.crt on the Ansible controller. Never copy root.key."
+  run_once: true
 
 - name: Install Caddy root CA on the worker
   ansible.builtin.copy:
@@ -162,22 +152,57 @@
     mode: "0644"
   become: true
   register: worker_system_ca_copy
-  when: worker_model_base_url is match('^https://')
+  when: worker_keybroker_base_url is match('^https://') or worker_model_base_url is match('^https://')
 
 - name: Refresh worker CA trust store
   ansible.builtin.command: update-ca-certificates
   become: true
   changed_when: false
   when:
-    - worker_model_base_url is match('^https://')
+    - (worker_keybroker_base_url is match('^https://') or worker_model_base_url is match('^https://'))
     - worker_system_ca_copy.changed
 
-- name: Remove the legacy worker reboot cron job
+- name: Map the Keybroker hostname directly to the control-plane IP
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^\s*[^#].*\s{{ worker_control_plane_hostname | regex_escape }}(\s|$)'
+    line: "{{ worker_control_plane_ip }} {{ worker_control_plane_hostname }}"
+    state: present
+  become: true
+  notify: Restart agent worker
+
+- name: Verify Keybroker is ready before removing static worker keys
+  ansible.builtin.uri:
+    url: "{{ worker_keybroker_base_url.rstrip('/') }}/healthz"
+    method: GET
+    status_code: 200
+    ca_path: /usr/local/share/ca-certificates/thegarden-caddy-root.crt
+    validate_certs: true
+
+- name: Verify Keybroker recognizes this worker before removing its static key
+  ansible.builtin.uri:
+    url: "{{ worker_keybroker_base_url.rstrip('/') }}/v1/worker/identity"
+    method: GET
+    status_code: 200
+    ca_path: /usr/local/share/ca-certificates/thegarden-caddy-root.crt
+    validate_certs: true
+  register: worker_keybroker_identity
+  failed_when: >-
+    worker_keybroker_identity.status != 200 or
+    worker_keybroker_identity.json is not mapping or
+    worker_keybroker_identity.json.get('worker_id', '') != worker_id
+
+- name: Check whether the one-time Keybroker cutover marker exists
+  ansible.builtin.stat:
+    path: /var/lib/dark-factory-agent-worker/keybroker-cutover-v1
+  register: worker_keybroker_cutover
+
+- name: Remove the legacy reboot cron entry
   ansible.builtin.cron:
     name: thegarden-agent-worker
     special_time: reboot
-    job: "{{ ansible_user_dir }}/agent-worker/start-worker.sh"
     state: absent
+  become: true
 
 - name: Check whether the systemd worker service is active
   ansible.builtin.command:
@@ -185,10 +210,20 @@
       - systemctl
       - is-active
       - --quiet
-      - dark-factory-agent-worker
+      - dark-factory-agent-worker.service
   register: worker_service_active
   changed_when: false
   failed_when: false
+
+- name: Stop the systemd worker before the first Keybroker cutover
+  ansible.builtin.systemd_service:
+    name: dark-factory-agent-worker.service
+    state: stopped
+  become: true
+  when:
+    - not worker_keybroker_cutover.stat.exists
+    - ansible_facts['service_mgr'] == 'systemd'
+    - worker_service_active.rc == 0
 
 - name: Stop a legacy worker process before systemd takes over
   ansible.builtin.command:
@@ -204,25 +239,70 @@
   register: legacy_worker_stop
   changed_when: legacy_worker_stop.rc == 0
   failed_when: legacy_worker_stop.rc not in [0, 1]
-  when: worker_service_active.rc != 0
+  when:
+    - not worker_keybroker_cutover.stat.exists
+    - worker_service_active.rc != 0
 
-- name: Wait for legacy worker processes to exit
+- name: Verify no legacy worker process remains before deleting its key
   ansible.builtin.command:
     argv:
       - pgrep
-      - --uid
+      - -u
       - "{{ ansible_user_id }}"
-      - --full
-      - "{{ ansible_user_dir }}/agent-worker/(start-worker\\.sh|worker\\.py)"
-  register: legacy_worker_processes
+      - -f
+      - "{{ ansible_user_dir }}/agent-worker/[w]orker\\.py"
+  register: legacy_worker_process
   retries: 10
   delay: 1
-  until: legacy_worker_processes.rc == 1
+  until: legacy_worker_process.rc == 1
+  failed_when: legacy_worker_process.rc != 1
   changed_when: false
-  failed_when: legacy_worker_processes.rc not in [0, 1]
-  when: worker_service_active.rc != 0
+  when: not worker_keybroker_cutover.stat.exists
 
-- name: Install the worker systemd service
+- name: Verify no legacy worker launcher remains before deleting its key
+  ansible.builtin.command:
+    argv:
+      - pgrep
+      - -u
+      - "{{ ansible_user_id }}"
+      - -f
+      - "{{ ansible_user_dir }}/agent-worker/[s]tart-worker\\.sh"
+  register: legacy_worker_launcher
+  retries: 10
+  delay: 1
+  until: legacy_worker_launcher.rc == 1
+  failed_when: legacy_worker_launcher.rc != 1
+  changed_when: false
+  when: not worker_keybroker_cutover.stat.exists
+
+- name: Remove the obsolete long-lived worker LiteLLM key
+  ansible.builtin.file:
+    path: "{{ ansible_user_dir }}/.config/litellm/worker-api-key"
+    state: absent
+  no_log: true
+  when: not worker_keybroker_cutover.stat.exists
+
+- name: Create worker cutover marker directory
+  ansible.builtin.file:
+    path: /var/lib/dark-factory-agent-worker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  when: not worker_keybroker_cutover.stat.exists
+
+- name: Record completion of the one-time Keybroker cutover
+  ansible.builtin.file:
+    path: /var/lib/dark-factory-agent-worker/keybroker-cutover-v1
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: not worker_keybroker_cutover.stat.exists
+
+- name: Install the supervised worker systemd unit
   ansible.builtin.template:
     src: dark-factory-agent-worker.service.j2
     dest: /etc/systemd/system/dark-factory-agent-worker.service
@@ -230,11 +310,13 @@
     group: root
     mode: "0644"
   become: true
-  notify: Restart agent worker
+  notify:
+    - Reload systemd daemon
+    - Restart agent worker
 
 - name: Enable and start the worker service
-  ansible.builtin.systemd:
-    name: dark-factory-agent-worker
+  ansible.builtin.systemd_service:
+    name: dark-factory-agent-worker.service
     enabled: true
     state: started
     daemon_reload: true

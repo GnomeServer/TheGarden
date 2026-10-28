@@ -32,6 +32,8 @@ from .auth import api_token_user, require_run_submission, run_client
 from .dashboard import activity_out, record_activity, router as dashboard_router, worker_out
 from .database import SessionLocal, engine, get_session, initialise_database
 from .live import live_broker
+from .exposure_delivery import omp_exposure_delivery_loop
+from .incidents import incident_delivery_loop, router as incidents_router
 from .models import ActivityRecord, RunRecord, UserRecord, WorkerRecord
 from .settings import settings
 from .tracking import router as tracking_router, scan_deadline_notifications
@@ -846,6 +848,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(stale_run_reconciliation_loop()),
         asyncio.create_task(artifact_retention_loop()),
         asyncio.create_task(deadline_notification_loop()),
+        asyncio.create_task(omp_exposure_delivery_loop()),
+        asyncio.create_task(incident_delivery_loop()),
     ]
     app.state.background_tasks = tasks
     logger.info("agent manager started")
@@ -869,6 +873,7 @@ app.include_router(dashboard_router)
 app.include_router(tracking_router)
 app.include_router(artifacts_router)
 app.include_router(omp_router)
+app.include_router(incidents_router)
 app.mount("/metrics", make_asgi_app())
 static_dir = Path(__file__).with_name("static")
 app.mount("/dashboard/static", StaticFiles(directory=static_dir), name="dashboard-static")

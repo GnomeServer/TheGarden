@@ -1,5 +1,7 @@
 ---
-worker_nats_url: nats://100.94.49.45:4222
+worker_control_plane_ip: 100.94.49.45
+worker_control_plane_hostname: infra-lab-services.tail494f6d.ts.net
+worker_nats_url: "nats://{{ worker_control_plane_ip }}:4222"
 worker_role: coder
 worker_consumer: "agent-workers-{{ worker_role }}"
 # `create-python-script` executes as the laptop user; keep disabled by default.
@@ -7,3 +9,4 @@ allow_generated_code: false
 worker_model_name: luna
 worker_model_base_url: ""
 worker_omp_image: local/omp-worker:18.12.5
+worker_keybroker_base_url: "https://{{ worker_control_plane_hostname }}/keybroker"

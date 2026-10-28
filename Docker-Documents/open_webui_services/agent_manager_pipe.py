@@ -279,6 +279,9 @@ class Pipe:
         else:
             prefix = f"Mission `{mission_id}` has status `{status or 'unknown'}`."
         reply = f"{prefix} {summary}".strip()
+        security_notice = state.get("security_notice")
+        if isinstance(security_notice, str) and security_notice.strip():
+            reply += f"\n\nSecurity notice: {security_notice.strip()[:500]}"
         if status == "completed":
             reply += cls._format_artifacts(state.get("artifact"))
         return reply
@@ -593,6 +596,9 @@ class Pipe:
                         evidence_parts.append(f"Supervisor checks: {len(checks)}.")
                 if evidence_parts:
                     body += "\n\n" + " ".join(evidence_parts)
+                security_notice = state.get("security_notice")
+                if isinstance(security_notice, str) and security_notice.strip():
+                    body += f"\n\nSecurity notice: {security_notice.strip()[:500]}"
                 if status == "completed":
                     body += self._format_artifacts(state.get("artifact"))
                 return body

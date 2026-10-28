@@ -43,9 +43,20 @@ class WorkerNamingTests(unittest.IsolatedAsyncioTestCase):
             ack=AsyncMock(),
         )
         js = CapturingJetStream()
+        session = {
+            "session_id": "test-session",
+            "key": "opaque-session-key",
+            "key_id": "test-key-id",
+            "key_alias": "test-alias",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "model_base_url": "https://models.example/v1",
+            "model": "luna",
+        }
         with (
             patch.object(worker, "WORKSPACE", workspace),
             patch.object(worker, "ALLOW_GENERATED_CODE", True),
+            patch.object(worker, "request_keybroker_session", AsyncMock(return_value=session)),
+            patch.object(worker, "revoke_keybroker_session", AsyncMock(return_value=True)),
         ):
             await worker.process_message(js, message)
         message.ack.assert_awaited_once()
@@ -89,9 +100,20 @@ class WorkerNamingTests(unittest.IsolatedAsyncioTestCase):
             }
             message = SimpleNamespace(data=json.dumps(event).encode("utf-8"), ack=AsyncMock())
             js = CapturingJetStream()
+            session = {
+                "session_id": "test-session",
+                "key": "opaque-session-key",
+                "key_id": "test-key-id",
+                "key_alias": "test-alias",
+                "expires_at": "2030-01-01T00:00:00Z",
+                "model_base_url": "https://models.example/v1",
+                "model": "luna",
+            }
             with (
                 patch.object(worker, "WORKSPACE", Path(directory)),
                 patch.object(worker, "ALLOW_GENERATED_CODE", True),
+                patch.object(worker, "request_keybroker_session", AsyncMock(return_value=session)),
+                patch.object(worker, "revoke_keybroker_session", AsyncMock(return_value=True)),
             ):
                 await worker.process_message(js, message)
         subjects = [subject for subject, _payload in js.events]

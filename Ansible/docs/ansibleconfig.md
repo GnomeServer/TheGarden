@@ -115,20 +115,29 @@ variables, CA trust, and troubleshooting steps are documented in:
 TheGarden/agent-worker/README.md
 ```
 
-`playbooks/agent-workers.yml` installs Python, a virtualenv, cron, CA trust,
-and process-management tools; copies `worker.py`, requirements, and the OMP job
-image sources; builds the pinned image; installs each worker's LiteLLM key and
-Caddy root certificate; and manages the worker with systemd. Targets deploy one
+`playbooks/agent-workers.yml` installs Python, a virtualenv, the worker runtime,
+Caddy root certificate, and process-management tools; copies `worker.py`,
+requirements, and the OMP job image sources; builds the pinned image; configures
+the Keybroker endpoint; and manages the worker with systemd. Targets deploy one
 at a time. Source, environment, certificate, and image changes restart the
 service. The playbook removes the legacy cron entry and obsolete `mission.py`
-module. Mission output is uploaded to Agent Manager's PostgreSQL artifact store
-and returned as a signed download link; the temporary OMP workspace is removed
-after upload.
+module. After reviewer approval, mission output is uploaded to Agent Manager's
+PostgreSQL artifact store and returned as a signed download link; the temporary
+OMP workspace is removed after upload.
+
+Keybroker is verified over HTTPS and each worker's authenticated identity is
+checked before Ansible removes the legacy local LiteLLM key. Each run receives
+a model-scoped, budget-limited virtual key that is revoked at completion or
+expires through the Keybroker reaper. An administrator must separately revoke
+the old LiteLLM key after validating the new path. Stage only Caddy's public
+`root.crt` at `/tmp/thegarden-caddy-root.crt` on the Ansible controller; never
+distribute `root.key`.
 
 `allow_generated_code` is false by default. This blocks only the separate,
 unsandboxed `create-python-script` operation; OMP mission coding remains enabled.
 Only explicitly enable it on a worker if unsandboxed code execution is
-deliberately accepted. Each worker requires its own LiteLLM virtual key.
+deliberately accepted. Mission artifacts are returned without execution. Use
+`--ask-become-pass` for package installation and system CA trust.
 
 ## Proxmox validation
 

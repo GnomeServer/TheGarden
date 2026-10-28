@@ -7,7 +7,7 @@ This document explains the lab in two ways:
 
 These are not strict OSI layers. They are practical defense-in-depth boundaries for this pilot.
 
-Current repository state: the host is Proxmox VE 9 on Debian 13 (`server-debian`), and the service VM is `infra-lab-services`. Inventory names four workers: `inkii`, `naruto`, `raphael`, and `donatello`. `agent-worker/worker.py` consumes NATS mission events and uses a worker-scoped LiteLLM key for a model-backed planner/coder/reviewer flow. It returns generated files to Open WebUI and stores them under the worker workspace; it does not clone or push Forgejo repositories or execute generated files. The separate `create-python-script` operation remains unsandboxed and disabled by default.
+Current repository state: the host is Proxmox VE 9 on Debian 13 (`server-debian`), and the service VM is `infra-lab-services`. Ansible enrolls four remote workers: `inkii`, `naruto`, `raphael`, and `donatello`. `agent-worker/worker.py` consumes NATS mission events and requests a model-scoped, budgeted LiteLLM virtual key from Keybroker for each run; it revokes the session at completion, with TTL/reaper cleanup as a backstop. It returns generated files to Open WebUI and stores them under the worker workspace; it does not clone or push Forgejo repositories or execute generated mission artifacts. The separate `create-python-script` operation remains unsandboxed and disabled by default.
 
 ## 1. Functional layers
 

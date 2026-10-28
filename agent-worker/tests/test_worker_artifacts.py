@@ -20,6 +20,14 @@ worker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(worker)
 
 
+def valid_model_session() -> dict[str, str]:
+    return {
+        "key": "model-session-key",
+        "model_base_url": "https://models.example/v1",
+        "model": "luna",
+    }
+
+
 class ArtifactPackagingTests(unittest.TestCase):
     def test_single_file_is_uploaded_as_zip_and_preserves_its_relative_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -338,7 +346,13 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 env_path = Path(command[command.index("--env-file") + 1])
                 self.assertNotIn(secret, mission_path.read_text(encoding="utf-8"))
                 self.assertNotIn(secret, env_path.read_text(encoding="utf-8"))
+                env_contents = env_path.read_text(encoding="utf-8")
+                self.assertIn("MODEL_BASE_URL=https://models.example/v1", env_contents)
+                self.assertIn("MODEL_API_KEY=model-session-key", env_contents)
+                self.assertIn("OMP_MODEL=worker-litellm/luna", env_contents)
+                self.assertEqual(stat.S_IMODE(env_path.stat().st_mode), 0o600)
                 self.assertNotIn(secret, " ".join(command))
+                self.assertNotIn("model-session-key", " ".join(command))
                 output = {
                     "mission_id": "run-1",
                     "status": "completed",
@@ -375,8 +389,6 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch.object(worker, "WORKSPACE", workspace),
-                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
-                patch.object(worker, "MODEL_API_KEY", "model-key"),
                 patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
                 patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
                 patch.object(worker.subprocess, "run", side_effect=fake_docker),
@@ -402,6 +414,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         ),
                         "artifact_upload_token": secret,
                     },
+                    model_session=valid_model_session(),
                 )
 
             self.assertEqual(result["artifact"], descriptor)
@@ -452,8 +465,6 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch.object(worker, "WORKSPACE", workspace),
-                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
-                patch.object(worker, "MODEL_API_KEY", "model-key"),
                 patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
                 patch.object(worker, "CANCEL_POLL_INTERVAL_SECONDS", 0.01),
                 patch.object(worker, "ACTIVE_MISSIONS", {}),
@@ -465,6 +476,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 result = await worker.run_mission_image(
                     {"run_id": "cancel-run", "goal": "Create a result file"},
                     metadata,
+                    model_session=valid_model_session(),
                 )
 
         self.assertTrue(docker_started.is_set())
@@ -503,6 +515,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 result = await worker.run_mission_image(
                     {"run_id": "queued-run", "goal": "Create a result file"},
                     metadata,
+                    model_session=valid_model_session(),
                 )
 
         self.assertEqual(result["status"], "cancelled")
@@ -573,8 +586,6 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch.object(worker, "WORKSPACE", workspace),
-                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
-                patch.object(worker, "MODEL_API_KEY", "model-key"),
                 patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
                 patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
                 patch.object(
@@ -596,6 +607,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 first = await worker.run_mission_image(
                     {"run_id": run_id, "goal": "Build the requested interface."},
                     metadata,
+                    model_session=valid_model_session(),
                 )
                 checkpoint = worker.mission_checkpoint_path(run_id)
                 self.assertEqual(first["status"], "needs_input")
@@ -610,6 +622,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "reviewer_feedback": first["question"],
                         "reviewer_count_reset": 0,
                     },
+                    model_session=valid_model_session(),
                 )
 
         self.assertEqual(resumed["status"], "completed")
@@ -705,8 +718,6 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch.object(worker, "WORKSPACE", workspace),
-                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
-                patch.object(worker, "MODEL_API_KEY", "model-key"),
                 patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
                 patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
                 patch.object(worker, "download_parent_artifact", return_value=parent_archive),
@@ -735,6 +746,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "parent_mission_id": parent_id,
                         "artifact_input": source_descriptor,
                     },
+                    model_session=valid_model_session(),
                 )
 
         self.assertEqual(result["status"], "completed")
@@ -762,8 +774,6 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
             workspace = root / "worker-workspace"
             with (
                 patch.object(worker, "WORKSPACE", workspace),
-                patch.object(worker, "MODEL_BASE_URL", "https://models.example/v1"),
-                patch.object(worker, "MODEL_API_KEY", "model-key"),
                 patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
                 patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
                 patch.object(
@@ -791,6 +801,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "parent_mission_id": parent_id,
                         "artifact_input": {"parent_mission_id": parent_id},
                     },
+                    model_session=valid_model_session(),
                 )
 
         self.assertEqual(result["status"], "cancelled")

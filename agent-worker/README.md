@@ -1,21 +1,23 @@
 # Agent worker
 
 `worker.py` is the long-running Agent Manager queue consumer. It consumes
-`agent.runs.created`, publishes running and completion events, sends
-`agent.workers.heartbeat`, and answers `agent.workers.health.<role>`. The
-Manager stamps queued runs with an expiry; expired deliveries are rejected
-before model work starts.
+`agent.runs.created` from NATS JetStream, publishes run status on
+`agent.runs.status` and `agent.runs.started`, then publishes one
+`agent.runs.completed` event. It also sends `agent.workers.heartbeat` and
+answers `agent.workers.health.<role>`. The Manager stamps queued runs with an
+expiry; expired deliveries are rejected before model work starts.
 
 For `mission`, the worker launches the pinned OMP job image. Its planner
 coordinates the requested coder and reviewer agents and accepts a result only
 after explicit reviewer approval. The isolated image receives a temporary
-workspace, mission file, scoped LiteLLM key, and trusted Caddy certificate; it
-has no Docker socket. The host worker validates the artifact manifest, packages
-every result as a ZIP, including single-file results, and uploads it over
-verified TLS to Agent Manager using a run-scoped capability. Agent Manager
-stores the bytes in PostgreSQL and returns a signed download link; the temporary
-OMP workspace is removed after upload. The worker does not clone or push the
-configured Forgejo repository.
+workspace, mission file, a short-lived model key obtained from Keybroker for the
+run, and the trusted Caddy certificate; it has no Docker socket. The host worker
+validates the artifact manifest, packages every result as a ZIP, including
+single-file results, and uploads it over verified TLS to Agent Manager using a
+run-scoped capability. Agent Manager stores the bytes in PostgreSQL and returns
+a signed download link; the temporary OMP workspace is removed after upload.
+The worker does not clone or push the configured Forgejo repository, and
+mission artifacts are not executed.
 
 The separate legacy `create-python-script` operation remains disabled by
 default. If explicitly enabled, it executes generated Python unsandboxed as the
@@ -171,12 +173,13 @@ endpoint problem, not an empty JetStream queue.
 ## Install or update a worker
 
 The Ansible role is the preferred installer. It copies `worker.py`, the
-requirements, and the OMP image build context; installs the worker-scoped
-LiteLLM key and Caddy root certificate; builds the pinned image; and manages
-`dark-factory-agent-worker` with systemd. Relevant source, environment,
-certificate, and image changes restart the service. The one-time cutover stops
-legacy cron-started workers. For a manual install, copy the worker and image
-build context through a trusted SSH channel:
+requirements, and the OMP image build context; configures the Keybroker endpoint
+and Caddy root certificate; builds the pinned image; and manages
+`dark-factory-agent-worker` with systemd. It does not install a static LiteLLM
+virtual key on workers. Relevant source, environment, certificate, and image
+changes restart the service. The one-time cutover stops legacy cron-started
+workers. For a manual install, copy the worker and image build context through
+a trusted SSH channel:
 
 ```bash
 WORKER='<worker-id>@<tailnet-user-IP>'
@@ -215,14 +218,35 @@ export MODEL_NAME='luna'
 export MODEL_BASE_URL='https://infra-lab-services.tail494f6d.ts.net/litellm/v1'
 export MODEL_CA_FILE="$HOME/.config/litellm/caddy-root.crt"
 export OMP_WORKER_IMAGE='local/omp-worker:18.12.5'
-export MODEL_API_KEY="$(tr -d '\r\n' < "$HOME/.config/litellm/worker-api-key")"
+export KEYBROKER_URL='https://infra-lab-services.tail494f6d.ts.net/keybroker'
 ```
 
-Do not use `LITELLM_MASTER_KEY` or the LiteLLM backend key as
-`MODEL_API_KEY`. The public model name is `luna`; `openai/luna` is a LiteLLM
-backend/provider value. The Ansible start script loads the worker-scoped key
-from `~/.config/litellm/worker-api-key` into the host worker environment, and
-`worker.py` passes it to the OMP job container as `LITELLM_API_KEY`.
+For model-backed mission runs, the worker obtains a short-lived session key from
+Keybroker and passes it only to the OMP job for model requests, then revokes the
+session when processing ends. It does not read or store a static `MODEL_API_KEY`
+or LiteLLM master key. The Keybroker server controls the model alias, budget,
+and session TTL; mission input cannot override these policies.
+
+The Ansible-managed systemd unit denies all network destinations for the worker
+service and its child processes except the control-plane VM at
+`100.94.49.45/32`. Ansible pins `infra-lab-services.tail494f6d.ts.net` to that
+IP in `/etc/hosts`, preserving HTTPS SNI and certificate validation without
+allowing DNS resolver traffic. The rule is per-service, activates only after
+deployment, and does not restrict unrelated host processes or monitor flows.
+
+The worker scans prompts and model responses for an exact session-key echo and
+recognized OpenAI, OpenRouter, Anthropic, and Google key formats. A detected
+value is withheld from model calls and run outputs; the worker stops further
+calls, submits a secret-free exposure event, revokes the session, and returns
+a sanitized `security_notice`. These pattern checks are a safeguard for the
+listed formats, not a guarantee against arbitrary secret exposure or other
+forms of exfiltration. The API Guard dashboard is the administrator alert
+surface.
+
+The exposure report distinguishes an exact current-session key echo from a
+provider-key pattern. Pattern-only matches are flagged for investigation and
+do not revoke unrelated provider credentials; per-run cleanup still revokes
+the worker's own session key.
 
 The Tailnet-only Caddy endpoint is:
 
@@ -381,18 +405,17 @@ pgrep -af worker.py
 
 ### TLS certificate failure
 
-Extract the existing Caddy root certificate from the running Caddy container,
-copy only `root.crt` to the worker, and use the Caddy hostname in
-`MODEL_BASE_URL`. Never copy `root.key` and do not generate a second CA for the
-same Caddy deployment.
+Extract the existing Caddy root certificate from the running Caddy container
+and copy only `root.crt` to the worker. The worker calls Keybroker through
+`KEYBROKER_URL`; Keybroker supplies the model endpoint for each session. Never
+copy `root.key` and do not generate a second CA for the same Caddy deployment.
 
-### LiteLLM or model timeout
+### Keybroker, LiteLLM, or model timeout
 
-Test the LiteLLM `/v1/models` and `/v1/chat/completions` endpoints with the
-worker virtual key. If the local gateway request works but the external request
-fails, investigate Caddy/TLS. If both requests work but the worker times out,
-compare `MODEL_TIMEOUT` with LiteLLM's backend timeout and inspect the LiteLLM
-logs.
+Check Keybroker availability at the configured `KEYBROKER_URL`. The worker
+fails closed if it cannot create a session and never falls back to a stored
+LiteLLM key. If session creation succeeds but model calls time out, inspect
+Keybroker, Caddy/TLS, and LiteLLM logs on their respective hosts.
 
 ### Generated module or GUI failure
 

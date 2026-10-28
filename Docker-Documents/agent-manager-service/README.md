@@ -37,6 +37,76 @@ mission from the latest completed ZIP. The Manager accepts only a completed
 artifact owned by the authenticated run actor; the worker starts from those
 files and returns a new ZIP. The original mission and artifact remain unchanged.
 
+OMP chat sanitizes inbound text and model replies before forwarding them to the
+model or user. It redacts the configured model credential by exact match and
+recognized OpenRouter/OpenAI/Anthropic/Google key formats. When a match is
+found, OMP stores a signed, secret-free event in the manager database outbox
+and attempts delivery to the separate
+[`API Guard dashboard`](../api-guard-dashboard/README.md). Pending events retry
+with backoff if API Guard is unavailable. Configure
+`API_GUARD_EXPOSURE_WEBHOOK_URL` and the shared
+`API_GUARD_EXPOSURE_WEBHOOK_SECRET`; the raw key, prompt, and model output are
+never placed in the event. The manager's configured `MODEL_API_KEY` remains a
+longer-lived LiteLLM virtual key and requires manual rotation in API Guard.
+Pattern matching is not a general-purpose secret scanner; keep provider master
+keys out of prompts and model context.
+
+
+## API Guard exposure incidents
+
+API Guard can POST signed exposure events to
+`/v1/webhooks/api-guard/exposure`. The receiver accepts only the six safe
+fields `event_id`, `worker_id`, `session_id`, `key_alias`, `reason`, and
+`occurred_at`, verifies `X-Darkfactory-Signature: sha256=<hex>`, rejects
+oversized or extra-field bodies, and commits the event before returning HTTP
+202. PostgreSQL uses `event_id` as the durable deduplication key. Persisted
+incidents and the admin-only Agent Manager dashboard contain no prompts, raw
+credentials, or run IDs.
+API Guard can also query `/v1/webhooks/api-guard/status` with
+`X-Darkfactory-Signature` signing the exact bytes
+`GET:/v1/webhooks/api-guard/status`. The response contains only booleans for
+the signed-event receiver, external notification URL, and acknowledgment
+callback configuration; it never returns secret values or URLs.
+
+
+Set `API_GUARD_ALERT_WEBHOOK_URL=http://agent-manager:8000/v1/webhooks/api-guard/exposure`
+and `API_GUARD_ALERT_WEBHOOK_SECRET` in API Guard's deployment. Set the same
+`API_GUARD_ALERT_WEBHOOK_SECRET` in Agent Manager. This signed-event secret
+must differ from `API_GUARD_EXPOSURE_WEBHOOK_SECRET`, which protects the
+separate OMP/Keybroker-to-API-Guard exposure endpoint. A human administrator
+can acknowledge incidents in the Agent Manager Operations dashboard; the
+local acknowledgment is persisted before the signed callback is queued.
+`API_GUARD_ALERT_ACK_URL` defaults to
+`http://api-guard:8000/api-guard/api/v1/webhooks/alerts/ack`, and
+`API_GUARD_ALERT_ACK_SECRET` must match API Guard's `API_GUARD_ALERT_ACK_SECRET`.
+Keep the acknowledgment secret distinct from both event-delivery secrets.
+Both event and callback outboxes retry failed deliveries durably.
+
+When configured, the existing `NOTIFICATION_WEBHOOK_URL` and optional
+`NOTIFICATION_WEBHOOK_TOKEN` deliver a safe incident event to the wider Forge
+or an existing relay. A successful HTTP response means only that the relay
+accepted the event; it is not a human acknowledgment. Both the initial event
+and each escalation carry a fixed `severity: "critical"` label set by Agent
+Manager; severity is not accepted from API Guard input. The dashboard reports
+Agent Manager receipt, external delivery, local human acknowledgment, and
+API Guard callback state separately. No external paging destination, on-call
+schedule, or paging credentials are supplied here, so deployment must not
+claim 24/7 paging or acknowledgment coverage until those are configured and
+operationally verified.
+
+Until a human administrator acknowledges an incident, Agent Manager resends
+it to the configured notification webhook every
+`API_GUARD_ALERT_ESCALATE_AFTER_SECONDS` (default 900 seconds) as
+`api_guard.exposure.escalated`, incrementing `escalation_level` for each new
+no-ack escalation. Failed delivery retries reuse the current level and use
+their own durable backoff, independent of initial-event delivery retries.
+A human acknowledgment stops future escalation; the separate signed callback
+to API Guard is still retried if that service is unavailable.
+
+The separate API Guard dashboard remains its own service and remains the
+credential inventory and exposure source of truth; this incident panel is in
+the wider Forge's Agent Manager dashboard.
+
 The dashboard's worker runtime view aggregates `RunRecord` start and completion
 timestamps by worker and UTC day. The
 `/v1/dashboard/worker-execution?from=YYYY-MM-DD&to=YYYY-MM-DD` endpoint returns
@@ -59,13 +129,23 @@ window to allow redelivery before finalization.
 
 The human control surface is available at `/dashboard/` through Caddy. It
 tracks runs, deadline-aware tasks, Forgejo users and activity, worker presence,
-and audit history. Complete deployment, OAuth, webhook, task, worker, backup,
-and troubleshooting procedures are in
-[`../../docs/dark-factory-dashboard.md`](../../docs/dark-factory-dashboard.md).
-For an **existing central VM**, use the guarded manager-only
-[`central deployment procedure`](../../docs/central-dashboard-deployment.md), not
-the new-install commands below. It preserves live credentials, the NATS override,
-database volumes, Caddy routes, and the current manager image for recovery.
+and audit history. This README covers the manager's dashboard, OAuth, webhook,
+task, and worker behavior. The Ansible
+[`Docker Compose deployment guide`](../../Ansible/README.md#docker-compose-deployment)
+covers deployment paths and operations.
+
+The Agents view presents the six canonical host names (Raphael, Inkii,
+Donatello, Naruto, Sammy, and Michelangelo) rather than duplicate historical
+worker IDs. Legacy heartbeat IDs are grouped under a known host or placed in a
+separate unregistered section; history is not deleted. Workers without a
+canonical heartbeat are visible but cannot be assigned to a task. Sammy and
+Michelangelo are in Ansible inventory; deploy their workers and verify heartbeats
+before treating them as ready.
+
+For an **existing central VM**, preserve its live credentials, NATS overrides,
+database volumes, Caddy routes, and manager image when applying manager-only
+changes. The Ansible playbook deploys existing project directories; it does not
+copy source files or create secret `.env` files.
 Open WebUI integration is [opt-in](../open_webui_services/README.md#agent-manager-coder-function-manual-opt-in);
 `create-python-script` executes generated Python as the worker user and is not sandboxed; restrict it to disposable workers. The `mission` demo container has no network and retains no candidate files after exit.
 
@@ -348,15 +428,19 @@ Compose and `.env.example` set `MODEL_BASE_URL` to `http://llama:8080/v1`. The P
 
 ## Caddy routes and metrics
 
-The tracked Caddy configuration routes `/`, `/dashboard`, `/dashboard/*`,
-`/auth/*`, `/v1/*`, `/docs`, `/docs/*`, and `/openapi.json` to
+The tracked Caddy configuration routes Agent Manager pages and APIs to
 `agent-manager:8000` without stripping their prefixes. Human dashboard sessions
 use Forgejo OAuth; machine run and administrator APIs use bearer tokens. Keep
 tokens secret and prefer the internal `http://agent-manager:8000` endpoint for
 containers on `caddy_proxy`.
 
-These manager routes coexist with the captured `/llama/` and `/litellm/` model
-routes, `/grafana/`, `/forgejo/`, and the Proxmox fallback. Open WebUI remains
+The distinct API Guard application is served by `api-guard:8000` at
+`/api-guard/`; it has its own Forgejo OAuth application and allowlist. Caddy
+limits that path to Tailscale source addresses. It reads LiteLLM key/spend data
+server-side; it is not an Agent Manager route or part of its dashboard.
+
+These manager routes coexist with `/api-guard/`, `/llama/`, and `/litellm/`,
+`/grafana/`, `/forgejo/`, and the Proxmox fallback. Open WebUI remains
 available at `https://infra-lab-services.tail494f6d.ts.net:8443` through Caddy.
 The manager defaults to LiteLLM's internal URL rather than taking this external
 proxy path; an existing `.env` override must be changed deliberately to use the
@@ -415,33 +499,46 @@ The worker pool should use one shared durable consumer per role, such as
 The worker process must receive its variables in the same shell or service
 unit that starts it:
 
-Ansible provisions each worker with its unique NATS identity, model URL, and
-worker-scoped LiteLLM key. The runtime environment is:
+Ansible configures each worker's NATS identity and Keybroker HTTPS endpoint;
+workers no longer receive a static LiteLLM virtual key. Keybroker returns the
+approved model alias and LiteLLM URL with each run session. For example:
 
 ```text
 NATS_URL=nats://100.94.49.45:4222
 WORKER_ID=worker-03
 WORKER_ROLE=coder
 WORKER_CONSUMER=agent-workers-coder
-MODEL_BASE_URL=https://infra-lab-services.tail494f6d.ts.net/litellm/v1
-MODEL_NAME=luna
-MODEL_API_KEY=<worker-scoped-LiteLLM-key>
+KEYBROKER_URL=https://infra-lab-services.tail494f6d.ts.net/keybroker
 MODEL_TLS_INSECURE=0
 ALLOW_GENERATED_CODE=0
 ```
 
-Inventory worker IDs are `worker-01` through `worker-04`, not hostnames. Remote workers use the Tailnet-only Caddy endpoint
+Inventory worker IDs are `worker-01` through `worker-06`, not hostnames.
+Sammy is `worker-05` and Michelangelo is `worker-06`; they must be deployed and
+show a canonical heartbeat before they are treated as ready. Remote workers use
+the Tailnet-only Caddy endpoint
 `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`; do not use Docker-only
-`http://litellm:4000/v1` or the VM loopback address from a laptop. Workers must
-trust Caddy's root CA and use their worker-scoped LiteLLM key. Never use the
-LiteLLM master or backend key, and keep `MODEL_TLS_INSECURE=0`.
+`http://litellm:4000/v1` or the VM loopback address from a laptop. Each mission
+uses a model-scoped, budget-limited key returned by Keybroker for that run.
+Workers must trust Caddy's root CA and keep `MODEL_TLS_INSECURE=0`.
 
-Approved mission files are uploaded to Agent Manager's PostgreSQL-backed
+Ansible supervises the process with `dark-factory-agent-worker.service`. At run
+start, the worker obtains a model-scoped, budget-limited LiteLLM key from
+Keybroker, uses it only for that run, and revokes it in cleanup. Keybroker uses
+the worker's Tailnet identity; no provider or LiteLLM master key is sent to the
+worker or persisted in its environment. A TTL reaper handles crashed workers.
+The worker redacts recognized credential patterns, stops the run on exposure,
+and returns a sanitized security notice. Keybroker persists exposure events
+before forwarding them to API Guard; API Guard's optional notification outbox
+retries downstream delivery.
+
+Approved OMP mission files are uploaded to Agent Manager's PostgreSQL-backed
 artifact storage and returned as signed download links, not embedded in the
 mission status payload. The temporary OMP workspace is removed after upload.
-Mission jobs do not modify Forgejo. The separate `create-python-script`
-operation remains disabled by default because it runs generated Python
-unsandboxed.
+Mission jobs do not modify Forgejo, and mission artifacts are not executed. The
+separate `create-python-script` operation remains disabled by default because
+it runs generated Python unsandboxed.
+
 
 ### Duplicate completion events
 

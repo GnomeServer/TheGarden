@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" id="theme-color" content="#12151c">
   <title>TheGarden — Team dashboard</title>
-  <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.5.5">
-  <script src="/dashboard/static/app.js?v=1.5.11" defer></script>
+  <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.5.15">
+  <script src="/dashboard/static/app.js?v=1.5.17" defer></script>
 </head>
 <body>
   <section id="login" class="login-shell hidden" aria-labelledby="login-title">
@@ -46,7 +46,7 @@
         </section>
         <section class="content-section" aria-labelledby="reported-time-title">
           <div class="section-heading"><div><p class="eyebrow">OPTIONAL SELF-REPORT</p><h2 id="reported-time-title">Reported time</h2></div></div>
-          <p class="section-note">Optional self-reported human time, separate from measured worker execution. Rejected entries can be resubmitted or deleted.</p>
+          <p class="section-note">Optional self-reported human time. If a timer was left running, edit the start and stop times before submitting. Submitted and approved entries stay locked.</p>
           <article class="panel timer-panel">
             <div id="timer-current" class="timer-current" aria-live="polite"><p class="loading">Loading reported time…</p></div>
             <form id="timer-form" class="timer-form">
@@ -58,14 +58,9 @@
           <div id="work-sessions" class="table-wrap section-gap" aria-live="polite"><p class="loading">Loading reported entries…</p></div>
         </section>
         <section class="content-section" aria-labelledby="dashboard-time-title">
-          <div class="section-heading"><div><p class="eyebrow">DASHBOARD ACTIVITY</p><h2 id="dashboard-time-title">Dashboard time spent</h2></div><div class="date-filters"><label for="dashboard-time-from">From (UTC)</label><input id="dashboard-time-from" type="date"><label for="dashboard-time-to">To (UTC)</label><input id="dashboard-time-to" type="date"><button id="load-dashboard-time" class="button secondary" type="button">Update</button></div></div>
-          <p class="notice"><strong>Estimated foreground dashboard activity, not hours worked.</strong> Counts one minute per pulse while the page is visible and recently active. Worker execution is measured separately.</p>
-          <div id="dashboard-time" class="estimate-list" aria-live="polite"><p class="loading">Loading dashboard activity…</p></div>
-        </section>
-        <section class="content-section" aria-labelledby="worker-execution-title">
-          <div class="section-heading"><div><p class="eyebrow">WORKER EXECUTION</p><h2 id="worker-execution-title">Worker run time</h2></div><div class="date-filters"><label for="worker-run-from">From (UTC)</label><input id="worker-run-from" type="date"><label for="worker-run-to">To (UTC)</label><input id="worker-run-to" type="date"><button id="load-worker-runs" class="button secondary" type="button">Update</button></div></div>
-          <p class="notice"><strong>Measured worker execution, not human hours.</strong> Duration comes from run-start and run-completion timestamps; active runs accrue elapsed time.</p>
-          <div id="worker-execution" class="estimate-list" aria-live="polite"><p class="loading">Loading worker execution…</p></div>
+          <div class="section-heading"><div><p class="eyebrow">HOURS WORKED</p><h2 id="dashboard-time-title">Activity estimates</h2></div><div class="date-filters"><label for="dashboard-time-from">From (UTC)</label><input id="dashboard-time-from" type="date"><label for="dashboard-time-to">To (UTC)</label><input id="dashboard-time-to" type="date"><button id="load-dashboard-time" class="button secondary" type="button">Update</button></div></div>
+          <p class="notice"><strong>Human hours estimate for authority.</strong> One minute per pulse while this page is visible and in use. SSH sessions and worker runtime are not included. Self-reported timers above are the explicit record.</p>
+          <div id="dashboard-time" class="estimate-list" aria-live="polite"><p class="loading">Loading activity estimates…</p></div>
         </section>
       </section>
 
@@ -76,6 +71,11 @@
           <div class="section-heading"><div><p class="eyebrow">WORKER ASSIGNMENTS</p><h2 id="agent-assignments-title">Agent tasks</h2></div><div class="filters"><label class="visually-hidden" for="agent-task-status-filter">Filter agent tasks by status</label><select id="agent-task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select></div></div>
           <p class="section-note">Only tasks with a worker assignment appear here.</p>
           <div id="agent-task-board" class="task-board" aria-live="polite"><p class="loading">Loading agent tasks…</p></div>
+        </section>
+        <section id="api-guard-incidents" class="content-section hidden" aria-labelledby="api-guard-incidents-title">
+          <div class="section-heading"><div><p class="eyebrow">ADMIN ONLY</p><h2 id="api-guard-incidents-title">API Guard incidents</h2></div></div>
+          <p class="notice"><strong>Separate delivery from acknowledgment.</strong> External webhook delivery is not a human acknowledgment or a paging guarantee. Confirm that the exposed credential is handled before acknowledging; the local acknowledgment is saved even if API Guard is unreachable.</p>
+          <div id="api-guard-incident-list" class="identity-list" aria-live="polite"><p class="loading">Loading API Guard incidents…</p></div>
         </section>
         <section class="content-section" aria-labelledby="nodes-title">
           <div class="section-heading"><div><p class="eyebrow">INFRASTRUCTURE</p><h2 id="nodes-title">Node health</h2></div><div class="filters"><a id="grafana-overview-link" class="button ghost hidden" href="#" target="_blank" rel="noopener noreferrer">Grafana</a><a id="grafana-jetstream-link" class="button ghost hidden" href="#" target="_blank" rel="noopener noreferrer">NATS JetStream</a><a id="forgejo-link" class="button ghost" href="https://infra-lab-services.tail494f6d.ts.net/forgejo" target="_blank" rel="noopener noreferrer">Forgejo</a></div></div>

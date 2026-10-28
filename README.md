@@ -143,16 +143,22 @@ The role does not install Proxmox or modify networking. The staged installation 
 ### `Ansible/playbooks/agent-workers.yml`
 
 `playbooks/agent-workers.yml` provisions the queue consumer and manages it as a
-systemd service. It builds the pinned OMP job image and installs the
-worker-scoped LiteLLM key and Caddy root certificate. Approved output files are
-uploaded to Agent Manager's PostgreSQL artifact storage and returned as signed
-download links; the temporary OMP workspace is removed afterward. Missions do
-not modify Forgejo. The legacy `create-python-script` operation remains disabled
-by default and is unsandboxed if explicitly enabled.
+systemd service. It installs the Python worker runtime, Caddy root certificate,
+and Keybroker endpoint, then builds the pinned OMP job image. Approved output
+files are uploaded to Agent Manager's PostgreSQL artifact storage and returned
+as signed download links; the temporary OMP workspace is removed afterward.
+Each run receives a model-scoped, budget-limited LiteLLM virtual key from
+Keybroker that is revoked at completion or TTL expiry. Ansible stops legacy
+worker processes and removes their local static key file after Keybroker
+readiness and authenticated worker identity checks; an administrator must
+separately revoke the old LiteLLM key after verifying the new path. Missions do
+not modify Forgejo, and generated artifacts are not executed. The separate
+`create-python-script` operation remains disabled by default because it executes
+unsandboxed code.
 
 ## Inventory and Tailscale
 
-`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and worker hosts in `agent_workers`. The worker role installs the runtime and model connection; verify each laptop can reach the configured NATS and LiteLLM endpoints over Tailscale. `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated work and is not loaded separately by default. Remote Tailscale peers are a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`.
+`Ansible/inventory/hosts.yml` contains the Proxmox audit target `server-debian`, the local Docker target `infra-lab-services`, and six enrolled worker hosts in `agent_workers`. The worker role installs the runtime and Keybroker connection; verify each laptop can reach NATS, Keybroker, and LiteLLM over Tailscale. `Ansible/inventory/worker-1.yml` remains an optional single-worker inventory for isolated work and is not loaded separately by default. Remote Tailscale peers are a non-loaded template in `Ansible/inventory/tailscale-peers.example.yml`.
 
 Observed Tailscale nodes:
 
@@ -160,6 +166,8 @@ Observed Tailscale nodes:
 - `infra-lab-services` — `100.94.49.45` — active VM
 - `donatello` — `100.94.145.104` — active
 - `inkii` — `100.98.125.127` — coder worker
+- `dell-drd17c4` (Sammy) — `100.79.110.117` — coder worker
+- `michelangelo` — `100.70.246.104` — coder worker
 - `naruto-dell-pro-max-14-mc14250` — `100.88.92.78`
 - `raphael` — `100.116.35.103` — active
 
@@ -199,16 +207,35 @@ Repository Compose projects for the `infra-lab-services` VM:
 - llama.cpp (`Docker-Documents/llama_services`)
 - LiteLLM and its PostgreSQL database (`Docker-Documents/litellm-service`)
 - Grafana, Prometheus, and Node Exporter (`Docker-Documents/grafana_services`)
+- Keybroker and its private PostgreSQL database (`Docker-Documents/keybroker-service`)
 - Agent Manager, its PostgreSQL database, and NATS JetStream (`Docker-Documents/agent-manager-service`)
+- Separate API Guard budget and credential dashboard (`Docker-Documents/api-guard-dashboard`)
 
-The checked-in Caddyfile listens on ports 80 and 443, plus HTTPS port 8443 for Open WebUI. It routes `/dashboard/`, `/v1/*`, and `/auth/*` to Agent Manager; `/grafana/` to Grafana; `/forgejo/` to Forgejo; and `/litellm/` to LiteLLM for Tailscale source addresses only, requiring a worker-scoped virtual key. Unmatched paths on port 443 fall back to the Proxmox UI at `https://10.1.10.156:8006`; `/llama/` is not routed.
+Keybroker issues enrolled remote workers a model-scoped, budget-limited LiteLLM
+virtual key for each run and revokes it at completion or TTL expiry. It holds
+the LiteLLM master key; the upstream OpenAI provider key remains in LiteLLM.
+API Guard is a separate Tailscale-only administrator dashboard for usage,
+budgeting, key rotation, and signed exposure alerts. Its optional notification
+webhook needs an external Forge/paging relay for 24/7 human escalation; it does
+not send email or run an on-call schedule. See
+[`docs/dark-factory-security-boundaries.md`](docs/dark-factory-security-boundaries.md)
+for implemented controls and remaining model-escape risks.
 
-`Ansible/playbooks/docker-services.yml` deploys every project above except LiteLLM. LiteLLM is started from its own Compose directory. The base Agent Manager Compose file does not publish NATS; remote workers need `compose.worker-test.yml`. See [`Docker-Documents/README.md`](Docker-Documents/README.md) and [`Ansible/README.md`](Ansible/README.md).
+The standalone API Guard service at `/api-guard/` uses its own Forgejo OAuth
+application and allowlist. It reads LiteLLM spend and virtual-key metadata,
+accepts signed OMP exposure alerts, and issues budgeted replacement keys. JEV
+can provide an advisory review after a dedicated `jev` model route and virtual
+key are configured. See
+[`Docker-Documents/api-guard-dashboard/README.md`](Docker-Documents/api-guard-dashboard/README.md).
+
+The checked-in Caddyfile listens on ports 80 and 443, plus HTTPS port 8443 for Open WebUI. It routes `/dashboard/`, `/v1/*`, and `/auth/*` to Agent Manager; `/keybroker/` to the Tailscale-only Keybroker worker API; `/api-guard/` to the separate Tailscale-only API Guard service; `/grafana/` to Grafana; `/forgejo/` to Forgejo; and `/litellm/` to LiteLLM for Tailscale source addresses only. Remote workers use short-lived Keybroker-issued virtual keys. Unmatched paths on port 443 fall back to the Proxmox UI at `https://10.1.10.156:8006`; `/llama/` is not routed.
+
+`Ansible/playbooks/docker-services.yml` deploys every project above except LiteLLM. LiteLLM is started from its own Compose directory. Keybroker, API Guard, and Caddy each require their private deployment `.env` before Ansible runs. The base Agent Manager Compose file does not publish NATS; remote workers need `compose.worker-test.yml`. See [`Docker-Documents/README.md`](Docker-Documents/README.md), [`Ansible/README.md`](Ansible/README.md), and the [security-boundary guide](docs/dark-factory-security-boundaries.md).
 
 ## Not managed yet
 
 - SSH private keys, credentials, or vault passwords
-- Forgejo checkout, branch/PR creation, generated-code execution, browser validation, and JEV model routing remain to be implemented.
+- Forgejo checkout, branch/PR creation, generated-code execution, browser validation, and JEV routing for agent missions remain to be implemented; the separate API Guard JEV advisor is a budget/security review only.
 - Firewall rules
 - Tailscale ACLs, routes, or DNS settings
 - A complete package or service desired-state policy

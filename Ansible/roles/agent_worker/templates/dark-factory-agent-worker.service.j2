@@ -2,6 +2,8 @@
 Description=TheGarden agent worker ({{ worker_id }})
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=6
 
 [Service]
 Type=simple
@@ -15,6 +17,22 @@ RestartSec=5
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={{ ansible_user_dir }}/agent-worker {{ ansible_user_dir }}/agent-workspace
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET
+# The worker and its children can reach only the service VM; DNS resolvers are not allowed.
+IPAddressDeny=any
+IPAddressAllow={{ worker_control_plane_ip }}/32
 
 [Install]
 WantedBy=multi-user.target

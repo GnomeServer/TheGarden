@@ -45,6 +45,38 @@ router = APIRouter()
 TASK_STATUSES = {"todo", "in_progress", "blocked", "done", "cancelled"}
 TASK_PRIORITIES = {"low", "normal", "high", "urgent"}
 TERMINAL_TASK_STATUSES = {"done", "cancelled"}
+CANONICAL_WORKERS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "worker-01", "display_name": "Raphael", "hostname": "raphael",
+        "tailnet_ip": "100.116.35.103", "aliases": ("raphael",), "ansible_managed": True,
+    },
+    {
+        "id": "worker-02", "display_name": "Inkii", "hostname": "inkii",
+        "tailnet_ip": "100.98.125.127", "aliases": ("inkii", "worker-1", "worker-2"),
+        "ansible_managed": True,
+    },
+    {
+        "id": "worker-03", "display_name": "Donatello", "hostname": "donatello",
+        "tailnet_ip": "100.94.145.104", "aliases": ("donatello",), "ansible_managed": True,
+    },
+    {
+        "id": "worker-04", "display_name": "Naruto", "hostname": "naruto-dell-pro-max-14-mc14250",
+        "tailnet_ip": "100.88.92.78",
+        "aliases": ("naruto", "naruto-dell-pro-max-14-mc14250"), "ansible_managed": True,
+    },
+    {
+        "id": "worker-05", "display_name": "Sammy", "hostname": "dell-drd17c4",
+        "tailnet_ip": "100.79.110.117", "aliases": ("sammy", "dell-drd17c4"),
+        "ansible_managed": True,
+    },
+    {
+        "id": "worker-06", "display_name": "Michelangelo", "hostname": "michelangelo",
+        "tailnet_ip": "100.70.246.104", "aliases": ("michelangelo",),
+        "ansible_managed": True,
+    },
+)
+WORKER_SPECS_BY_ID = {worker["id"]: worker for worker in CANONICAL_WORKERS}
+
 
 
 
@@ -171,6 +203,100 @@ def worker_out(worker: WorkerRecord) -> dict[str, Any]:
         "version": worker.version,
         "capabilities": safe_capabilities,
     }
+
+
+def canonical_worker_id(worker: WorkerRecord) -> str | None:
+    worker_id = worker.id.casefold()
+    if worker_id in WORKER_SPECS_BY_ID:
+        return worker_id
+    hostname = (worker.hostname or "").casefold()
+    for spec in CANONICAL_WORKERS:
+        aliases = spec["aliases"]
+        if worker_id in aliases or hostname in aliases or hostname == spec["hostname"]:
+            return spec["id"]
+    return None
+
+
+async def canonical_worker_out(
+    spec: dict[str, Any],
+    candidates: list[WorkerRecord],
+    connection: Any,
+) -> dict[str, Any]:
+    canonical_id = spec["id"]
+    canonical_record = next((item for item in candidates if item.id == canonical_id), None)
+    record = max(candidates, key=lambda item: item.last_seen_at) if candidates else None
+
+    legacy_ids = sorted({item.id for item in candidates if item.id != canonical_id})
+    legacy_online_ids = sorted(
+        item.id for item in candidates
+        if item.id != canonical_id
+        and item.last_seen_at >= utcnow() - timedelta(seconds=settings.worker_offline_after_seconds)
+    )
+    if record is None:
+        return {
+            "id": canonical_id,
+            "display_name": spec["display_name"],
+            "role": "coder",
+            "hostname": spec["hostname"],
+            "tailnet_ip": spec["tailnet_ip"],
+            "status": "offline",
+            "presence_status": "offline",
+            "presence_source": "no_heartbeat",
+            "current_run_id": None,
+            "last_seen_at": None,
+            "version": None,
+            "capabilities": [],
+            "admission_status": "unavailable",
+            "admission_source": "none",
+            "is_roster_member": True,
+            "has_record": False,
+            "assignable": False,
+            "has_canonical_identity": False,
+            "ansible_managed": spec["ansible_managed"],
+            "enrollment_status": (
+                "Ansible inventory; awaiting worker heartbeat"
+                if spec["ansible_managed"]
+                else "Keybroker-only; SSH/Ansible onboarding pending"
+            ),
+            "reported_worker_ids": [],
+            "legacy_worker_ids": [],
+            "legacy_online_worker_ids": [],
+        }
+
+    item = worker_out(record)
+    item.update(
+        {
+            "id": canonical_id,
+            "display_name": spec["display_name"],
+            "record_id": record.id,
+            "hostname": record.hostname or spec["hostname"],
+            "tailnet_ip": spec["tailnet_ip"],
+            "is_roster_member": True,
+            "has_canonical_identity": canonical_record is not None,
+            "assignable": canonical_record is not None,
+            "ansible_managed": spec["ansible_managed"],
+            "enrollment_status": (
+                "Legacy heartbeat identity; migrate to canonical worker ID"
+                if canonical_record is None
+                else "Ansible inventory; egress policy not attested"
+                if spec["ansible_managed"]
+                else "Keybroker-only; no Ansible egress policy"
+            ),
+            "reported_worker_ids": sorted({candidate.id for candidate in candidates}),
+            "legacy_worker_ids": legacy_ids,
+            "legacy_online_worker_ids": legacy_online_ids,
+        }
+    )
+    if canonical_record is not None:
+        admission_status = await worker_admission_status(connection, canonical_record)
+        item["admission_status"] = admission_status
+        item["admission_source"] = (
+            "core_nats_health_probe" if admission_status != "unverified" else "unverified"
+        )
+    else:
+        item["admission_status"] = "legacy_identity"
+        item["admission_source"] = "not_canonical"
+    return item
 
 
 def _utc(value: datetime) -> datetime:
@@ -730,14 +856,20 @@ async def dashboard_summary(
             select(RunRecord.status, func.count()).group_by(RunRecord.status)
         )).all()
     )
-    workers_online = await session.scalar(
-        select(func.count()).select_from(WorkerRecord).where(WorkerRecord.last_seen_at >= offline_cutoff)
-    )
-    workers_busy = await session.scalar(
-        select(func.count()).select_from(WorkerRecord).where(
-            WorkerRecord.last_seen_at >= offline_cutoff, WorkerRecord.reported_status == "busy"
-        )
-    )
+    worker_records = (
+        await session.execute(select(WorkerRecord).order_by(WorkerRecord.last_seen_at.desc()))
+    ).scalars().all()
+    online_worker_ids: set[str] = set()
+    busy_worker_ids: set[str] = set()
+    for worker in worker_records:
+        worker_id = canonical_worker_id(worker)
+        if worker_id is None or worker.last_seen_at < offline_cutoff:
+            continue
+        online_worker_ids.add(worker_id)
+        if worker.reported_status == "busy":
+            busy_worker_ids.add(worker_id)
+    workers_online = len(online_worker_ids)
+    workers_busy = len(busy_worker_ids)
     worker_execution = await query_worker_execution(
         session, now.date(), now.date(), now=now
     )
@@ -833,6 +965,14 @@ async def list_workers(
 ) -> list[dict[str, Any]]:
     del user
     workers = (await session.execute(select(WorkerRecord).order_by(WorkerRecord.id))).scalars().all()
+    grouped: dict[str, list[WorkerRecord]] = {spec["id"]: [] for spec in CANONICAL_WORKERS}
+    unregistered: list[WorkerRecord] = []
+    for worker in workers:
+        worker_id = canonical_worker_id(worker)
+        if worker_id is None:
+            unregistered.append(worker)
+        else:
+            grouped[worker_id].append(worker)
     connection = getattr(request.app.state, "nats", None)
     if (
         connection is None
@@ -840,18 +980,33 @@ async def list_workers(
         or not getattr(connection, "is_connected", False)
     ):
         connection = None
-    admission = await asyncio.gather(
-        *(worker_admission_status(connection, worker) for worker in workers)
-    )
-    output = []
-    for worker, admission_status in zip(workers, admission):
-        item = worker_out(worker)
-        item["admission_status"] = admission_status
-        item["admission_source"] = (
-            "core_nats_health_probe" if admission_status != "unverified" else "unverified"
+    canonical = await asyncio.gather(
+        *(
+            canonical_worker_out(spec, grouped[spec["id"]], connection)
+            for spec in CANONICAL_WORKERS
         )
-        output.append(item)
-    return output
+    )
+    legacy = []
+    for worker in unregistered:
+        item = worker_out(worker)
+        item.update(
+            {
+                "display_name": f"Unregistered: {worker.id}",
+                "is_roster_member": False,
+                "has_record": True,
+                "has_canonical_identity": False,
+                "assignable": False,
+                "ansible_managed": False,
+                "enrollment_status": "Unregistered legacy heartbeat",
+                "reported_worker_ids": [worker.id],
+                "legacy_worker_ids": [],
+                "legacy_online_worker_ids": [],
+                "admission_status": "unavailable",
+                "admission_source": "unregistered",
+            }
+        )
+        legacy.append(item)
+    return [*canonical, *legacy]
 
 
 def safe_run_label(value: Any, allowed: set[str]) -> str | None:

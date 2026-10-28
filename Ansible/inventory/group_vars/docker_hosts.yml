@@ -4,6 +4,10 @@ docker_compose_projects:
     path: /home/infra-lab-user/caddy-service
     build: never
 
+  - name: keybroker
+    path: /home/infra-lab-user/TheGarden/Docker-Documents/keybroker-service
+    build: always
+
   - name: forgejo
     path: /home/infra-lab-user/forgejo-service
     build: never
@@ -22,4 +26,8 @@ docker_compose_projects:
 
   - name: agent-manager
     path: /home/infra-lab-user/agent-manager-service
+    build: always
+
+  - name: api-guard-dashboard
+    path: /home/infra-lab-user/TheGarden/Docker-Documents/api-guard-dashboard
     build: always

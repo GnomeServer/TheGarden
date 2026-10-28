@@ -64,12 +64,30 @@ class WorkerExecutionNamingTests(unittest.IsolatedAsyncioTestCase):
             nak=AsyncMock(),
         )
         js = CapturingJetStream()
+        session = {
+            "session_id": "session-42",
+            "key": "model-session-key",
+            "key_id": "key-42",
+            "key_alias": "worker-test",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "model_base_url": "https://models.example/v1",
+            "model": "luna",
+        }
+        session_request = AsyncMock(return_value=session)
+        revoke_request = AsyncMock(return_value=True)
         with (
             patch.object(worker, "WORKSPACE", workspace),
+            patch.object(worker, "WORKER_ROLE", "coder"),
             patch.object(worker, "ALLOW_GENERATED_CODE", True),
+            patch.object(worker, "request_keybroker_session", session_request),
+            patch.object(worker, "revoke_keybroker_session", revoke_request),
         ):
             await worker.process_message(js, message)
         message.ack.assert_awaited_once()
+        session_request.assert_awaited_once_with(
+            "run-42", "create-python-script"
+        )
+        revoke_request.assert_awaited_once_with("session-42")
         started_events = [
             payload for subject, payload, _ in js.events
             if subject == "agent.runs.status"
@@ -77,11 +95,13 @@ class WorkerExecutionNamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(started_events), 1)
         self.assertEqual(started_events[0]["run_id"], "run-42")
         self.assertEqual(started_events[0]["status"], "running")
-        return next(
+        completion = next(
             payload
             for subject, payload, _ in js.events
             if subject == "agent.runs.completed"
         )
+        self.assertNotIn(session["key"], json.dumps(completion))
+        return completion
 
     async def test_project_directory_replaces_run_id_and_script_executes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
