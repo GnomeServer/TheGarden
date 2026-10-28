@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import math
@@ -47,6 +48,11 @@ class Settings(BaseSettings):
     keybroker_dashboard_token: str = Field(default="", validation_alias="KEYBROKER_DASHBOARD_TOKEN")
     alert_webhook_url: str = Field(default="", validation_alias="API_GUARD_ALERT_WEBHOOK_URL")
     alert_webhook_secret: str = Field(default="", validation_alias="API_GUARD_ALERT_WEBHOOK_SECRET")
+    alert_status_url: str = Field(
+        default="http://agent-manager:8000/v1/webhooks/api-guard/status",
+        validation_alias="API_GUARD_ALERT_STATUS_URL",
+    )
+    alert_ack_secret: str = Field(default="", validation_alias="API_GUARD_ALERT_ACK_SECRET")
     exposure_webhook_secret: str = Field(default="", validation_alias="API_GUARD_EXPOSURE_WEBHOOK_SECRET")
     openai_admin_api_key: str = Field(default="", validation_alias="API_GUARD_OPENAI_ADMIN_API_KEY")
     openai_project_id: str = Field(default="", validation_alias="API_GUARD_OPENAI_PROJECT_ID")
@@ -72,7 +78,10 @@ ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
 KNOWN_CREDENTIAL_PATTERN = re.compile(
     r"(?:sk-(?:proj-|live-|or-v1-)?[A-Za-z0-9_-]{20,}|sk-ant-api\d{2}-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{30,})"
 )
+MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 MAX_SPEND_LOG_PAGES = 10
+MAX_WORKER_SESSION_PAGES = 10
+MAX_WORKER_SESSION_DISPLAY = 200
 MAX_OPENAI_COST_PAGES = 4
 
 
@@ -108,6 +117,11 @@ def db_connect():
             "attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL, "
             "created_at TEXT NOT NULL, delivered_at TEXT, last_error TEXT)"
         )
+        alert_columns = {row["name"] for row in connection.execute("PRAGMA table_info(alert_deliveries)")}
+        if "acknowledged_at" not in alert_columns:
+            connection.execute("ALTER TABLE alert_deliveries ADD COLUMN acknowledged_at TEXT")
+        if "acknowledged_by" not in alert_columns:
+            connection.execute("ALTER TABLE alert_deliveries ADD COLUMN acknowledged_by TEXT")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS ix_alert_deliveries_due "
             "ON alert_deliveries(status, next_attempt_at)"
@@ -234,6 +248,29 @@ class ResolveEvent(BaseModel):
     event_id: str = Field(min_length=1, max_length=128)
 
 
+
+class AlertAcknowledgement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1, max_length=128)
+    acknowledged_by: str = Field(min_length=1, max_length=100)
+    acknowledged_at: datetime
+
+    @field_validator("event_id")
+    @classmethod
+    def validate_event_id(cls, value: str) -> str:
+        if not KEY_ID_PATTERN.fullmatch(value) or KNOWN_CREDENTIAL_PATTERN.search(value):
+            raise ValueError("event_id must be a safe identifier")
+        return value
+
+    @field_validator("acknowledged_by")
+    @classmethod
+    def validate_acknowledger(cls, value: str) -> str:
+        value = value.strip()
+        if not ALIAS_PATTERN.fullmatch(value) or KNOWN_CREDENTIAL_PATTERN.search(value):
+            raise ValueError("acknowledged_by must be a safe account name")
+        return value
+
 async def keybroker_request(
     method: str,
     path: str,
@@ -259,6 +296,19 @@ async def keybroker_request(
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="Keybroker is unavailable") from exc
     if response.status_code >= 400:
+        safe_pricing_errors = {
+            "LiteLLM pricing is missing or zero; virtual-key issuance is blocked",
+            "LiteLLM model pricing metadata is unavailable; virtual-key issuance is blocked",
+            "LiteLLM pricing is missing or zero after model-cost-map refresh; virtual-key issuance is blocked",
+        }
+        detail = ""
+        try:
+            payload = response.json()
+            detail = payload.get("detail", "") if isinstance(payload, dict) else ""
+        except ValueError:
+            pass
+        if response.status_code == 503 and detail in safe_pricing_errors:
+            raise HTTPException(status_code=503, detail=detail)
         raise HTTPException(status_code=502, detail="Keybroker rejected the dashboard request")
     try:
         return response.json()
@@ -361,6 +411,210 @@ async def fetch_spend_logs(start: datetime, end: datetime) -> tuple[list[dict[st
             break
         page += 1
     return rows, truncated
+
+
+def safe_worker_session(row: dict[str, Any]) -> dict[str, Any]:
+    key_id = row.get("key_id")
+    if (
+        not isinstance(key_id, str)
+        or not KEY_ID_PATTERN.fullmatch(key_id)
+        or key_id.casefold().startswith("sk-")
+        or KNOWN_CREDENTIAL_PATTERN.search(key_id)
+    ):
+        key_id = None
+    session_id = row.get("session_id")
+    if (
+        not isinstance(session_id, str)
+        or not KEY_ID_PATTERN.fullmatch(session_id)
+        or session_id.casefold().startswith("sk-")
+        or KNOWN_CREDENTIAL_PATTERN.search(session_id)
+    ):
+        session_id = "unknown-session"
+    worker_id = row.get("worker_id")
+    if (
+        not isinstance(worker_id, str)
+        or not ALIAS_PATTERN.fullmatch(worker_id)
+        or worker_id.casefold().startswith("sk-")
+        or KNOWN_CREDENTIAL_PATTERN.search(worker_id)
+    ):
+        worker_id = "unmapped"
+    status = row.get("status")
+    if status not in {"active", "expired", "revoked"}:
+        status = "unknown"
+    return {
+        "session_id": session_id,
+        "worker_id": worker_id,
+        "key_id": key_id,
+        "key_id_suffix": key_id[-8:] if key_id else "",
+        "alias": safe_key_alias({"alias": row.get("alias")}),
+        "model": safe_key_alias({"alias": row.get("model")}) if row.get("model") else None,
+        "created_at": row.get("created_at") if isinstance(row.get("created_at"), str) else None,
+        "expires_at": row.get("expires_at") if isinstance(row.get("expires_at"), str) else None,
+        "revoked_at": row.get("revoked_at") if isinstance(row.get("revoked_at"), str) else None,
+        "usage_attribution": "no usage" if key_id else "unmapped",
+        "status": status,
+    }
+
+
+async def fetch_worker_sessions(start: datetime, end: datetime) -> tuple[list[dict[str, Any]], bool]:
+    rows: list[dict[str, Any]] = []
+    page = 1
+    total_pages = 1
+    truncated = False
+    while page <= MAX_WORKER_SESSION_PAGES:
+        payload = await keybroker_request(
+            "GET",
+            "/v1/admin/sessions",
+            params={
+                "start": start.strftime("%Y-%m-%d %H:%M:%S"),
+                "end": end.strftime("%Y-%m-%d %H:%M:%S"),
+                "page": page,
+                "page_size": 1000,
+            },
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise HTTPException(status_code=502, detail="Keybroker returned invalid worker session history")
+        rows.extend(
+            safe_worker_session(row)
+            for row in payload["data"]
+            if isinstance(row, dict)
+        )
+        total_pages = max(1, int(_number(payload.get("total_pages"))))
+        truncated |= bool(payload.get("total_is_capped")) or total_pages > MAX_WORKER_SESSION_PAGES
+        if page >= total_pages or page >= MAX_WORKER_SESSION_PAGES:
+            break
+        page += 1
+    return rows, truncated
+
+
+async def fetch_worker_roster() -> list[dict[str, Any]]:
+    payload = await keybroker_request("GET", "/v1/admin/workers")
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise HTTPException(status_code=502, detail="Keybroker returned invalid worker roster")
+    workers = []
+    for row in payload["data"][:100]:
+        if not isinstance(row, dict):
+            continue
+        worker_id = row.get("worker_id")
+        if (
+            not isinstance(worker_id, str)
+            or not KEY_ID_PATTERN.fullmatch(worker_id)
+            or KNOWN_CREDENTIAL_PATTERN.search(worker_id)
+        ):
+            worker_id = "unmapped"
+        host = safe_key_alias({"alias": row.get("host")})
+        ip_value = row.get("tailnet_ip")
+        if not isinstance(ip_value, str):
+            tailnet_ip = "unknown"
+        else:
+            try:
+                tailnet_ip = str(ipaddress.ip_address(ip_value))
+            except ValueError:
+                tailnet_ip = "unknown"
+        last_session = row.get("last_session_at")
+        if isinstance(last_session, str):
+            try:
+                parsed = datetime.fromisoformat(last_session.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                last_session = parsed.astimezone(timezone.utc).isoformat()
+            except ValueError:
+                last_session = None
+        else:
+            last_session = None
+        workers.append(
+            {
+                "worker_id": worker_id,
+                "host": host,
+                "tailnet_ip": tailnet_ip,
+                "session_count": max(0, int(_number(row.get("session_count")))),
+                "last_session_at": last_session,
+            }
+        )
+    workers.sort(key=lambda item: (item["host"], item["worker_id"]))
+    return workers
+
+
+def attribute_worker_usage(
+    log_rows: list[dict[str, Any]],
+    sessions: list[dict[str, Any]],
+    known_key_ids: set[str],
+    month_start: datetime,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
+    sessions_by_key: dict[str, list[dict[str, Any]]] = {}
+    for item in sessions:
+        key_id = item.get("key_id")
+        if key_id:
+            sessions_by_key.setdefault(key_id, []).append(item)
+
+    usage_by_key: dict[str, dict[str, float | int]] = {}
+    for row in log_rows:
+        started = log_started_at(row)
+        key_id = row.get("api_key")
+        if (
+            started is None
+            or started > now
+            or not isinstance(key_id, str)
+            or not KEY_ID_PATTERN.fullmatch(key_id)
+            or key_id.casefold().startswith("sk-")
+            or KNOWN_CREDENTIAL_PATTERN.search(key_id)
+        ):
+            continue
+        usage = usage_by_key.setdefault(
+            key_id,
+            {
+                "spend_365d_usd": 0.0,
+                "tokens_365d": 0,
+                "spend_monthly_usd": 0.0,
+                "tokens_monthly": 0,
+            },
+        )
+        spend = _number(row.get("spend"))
+        tokens = max(0, int(_number(row.get("total_tokens"))))
+        if not tokens:
+            tokens = max(0, int(_number(row.get("prompt_tokens")))) + max(
+                0, int(_number(row.get("completion_tokens")))
+            )
+        usage["spend_365d_usd"] += spend
+        usage["tokens_365d"] += tokens
+        if started >= month_start:
+            usage["spend_monthly_usd"] += spend
+            usage["tokens_monthly"] += tokens
+
+    ambiguous = {
+        key_id for key_id, matches in sessions_by_key.items() if len(matches) != 1
+    }
+    for key_id, matches in sessions_by_key.items():
+        if len(matches) != 1:
+            for item in matches:
+                item["usage_attribution"] = "ambiguous"
+            continue
+        usage = usage_by_key.get(key_id, {})
+        matches[0].update(
+            {
+                "spend_365d_usd": round(float(usage.get("spend_365d_usd", 0)), 6),
+                "tokens_365d": int(usage.get("tokens_365d", 0)),
+                "spend_monthly_usd": round(float(usage.get("spend_monthly_usd", 0)), 6),
+                "tokens_monthly": int(usage.get("tokens_monthly", 0)),
+                "usage_attribution": "matched" if usage else "no usage",
+            }
+        )
+    for item in sessions:
+        item.pop("key_id", None)
+
+    unmatched = [
+        {
+            "key_id_suffix": key_id[-8:],
+            "spend_365d_usd": round(float(usage.get("spend_365d_usd", 0)), 6),
+            "tokens_365d": int(usage.get("tokens_365d", 0)),
+            "spend_monthly_usd": round(float(usage.get("spend_monthly_usd", 0)), 6),
+            "tokens_monthly": int(usage.get("tokens_monthly", 0)),
+        }
+        for key_id, usage in usage_by_key.items()
+        if key_id not in known_key_ids and key_id not in sessions_by_key
+    ]
+    return sessions, unmatched[:20], len(ambiguous), len(unmatched)
 
 
 async def openai_cost_report(
@@ -524,7 +778,7 @@ def aggregate_spend_logs(
             monthly["zero_cost_tokens"] += total
         monthly["total_tokens"] += total
         key_id = row.get("api_key")
-        if isinstance(key_id, str) and KEY_ID_PATTERN.fullmatch(key_id) and not key_id.startswith("sk-"):
+        if isinstance(key_id, str) and KEY_ID_PATTERN.fullmatch(key_id) and not key_id.casefold().startswith("sk-"):
             usage = by_key.setdefault(key_id, {"spend_usd": 0.0, "tokens_monthly": 0})
             usage["spend_usd"] += spend
             usage["tokens_monthly"] += total
@@ -535,13 +789,56 @@ def aggregate_spend_logs(
     return rolling, monthly, by_key
 
 
+def safe_model_label(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not MODEL_PATTERN.fullmatch(value)
+        or value.casefold().startswith(("sk-", "AIza"))
+        or KNOWN_CREDENTIAL_PATTERN.search(value)
+    ):
+        return "unmapped"
+    return value
+
+
+def zero_cost_model_breakdown(
+    rows: list[dict[str, Any]],
+    month_start: datetime,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    by_model: dict[str, dict[str, int]] = {}
+    for row in rows:
+        started = log_started_at(row)
+        spend = _number(row.get("spend"))
+        total = max(0, int(_number(row.get("total_tokens"))))
+        if not total:
+            total = max(0, int(_number(row.get("prompt_tokens")))) + max(
+                0, int(_number(row.get("completion_tokens")))
+            )
+        if started is None or started < month_start or started > now or spend != 0 or total <= 0:
+            continue
+        model = safe_model_label(row.get("model"))
+        bucket = by_model.setdefault(model, {"requests": 0, "tokens": 0})
+        bucket["requests"] += 1
+        bucket["tokens"] += total
+    return [
+        {"model": model, **usage}
+        for model, usage in sorted(
+            by_model.items(),
+            key=lambda item: (item[1]["tokens"], item[1]["requests"]),
+            reverse=True,
+        )
+    ][:10]
+
+
 def event_rows() -> list[dict[str, Any]]:
     with db_connect() as connection:
         rows = connection.execute(
             "SELECT e.event_id, e.key_id, e.key_alias, e.source, e.reason, e.occurred_at, "
             "e.received_at, e.status, e.worker_id, e.session_id, "
             "COALESCE(a.status, 'not_configured') AS notification_status, "
-            "COALESCE(a.attempts, 0) AS notification_attempts "
+            "COALESCE(a.attempts, 0) AS notification_attempts, "
+            "a.acknowledged_at AS notification_acknowledged_at, "
+            "a.acknowledged_by AS notification_acknowledged_by "
             "FROM exposure_events AS e LEFT JOIN alert_deliveries AS a ON a.event_id=e.event_id "
             "ORDER BY e.received_at DESC LIMIT 100"
         ).fetchall()
@@ -551,9 +848,11 @@ def event_rows() -> list[dict[str, Any]]:
 def pending_alert_count() -> int:
     with db_connect() as connection:
         row = connection.execute(
-            "SELECT COUNT(*) AS count FROM alert_deliveries WHERE status='pending'"
+            "SELECT COUNT(*) AS count FROM alert_deliveries "
+            "WHERE status IN ('pending','awaiting_ack')"
         ).fetchone()
     return int(row["count"])
+
 
 def find_key(rows: list[dict[str, Any]], key_id: str | None, alias: str | None = None) -> dict[str, Any] | None:
     for row in rows:
@@ -567,32 +866,72 @@ def find_key(rows: list[dict[str, Any]], key_id: str | None, alias: str | None =
 
 
 async def send_alert_notification(payload: bytes) -> None:
-    if not settings.alert_webhook_url or not settings.alert_webhook_secret:
-        raise RuntimeError("alert endpoint or signing secret is not configured")
+    if not settings.alert_webhook_url or not settings.alert_webhook_secret or not settings.alert_ack_secret:
+        raise RuntimeError("alert delivery or acknowledgement is not configured")
     signature = hmac.new(
         settings.alert_webhook_secret.encode(), payload, hashlib.sha256
     ).hexdigest()
-    headers = {
-        "Content-Type": "application/json",
-        "X-Darkfactory-Signature": f"sha256={signature}",
-    }
     async with httpx.AsyncClient(timeout=5) as client:
         response = await client.post(
             settings.alert_webhook_url,
             content=payload,
-            headers=headers,
+            headers={
+                "Content-Type": "application/json",
+                "X-Darkfactory-Signature": f"sha256={signature}",
+            },
         )
         response.raise_for_status()
 
 
+async def alert_receiver_readiness() -> dict[str, bool]:
+    result = {
+        "available": False,
+        "receiver_configured": False,
+        "external_notification_configured": False,
+        "ack_callback_configured": False,
+    }
+    if (
+        not settings.alert_webhook_url
+        or not settings.alert_webhook_secret
+        or not settings.alert_ack_secret
+        or not settings.alert_status_url
+    ):
+        return result
+    proof = b"GET:/v1/webhooks/api-guard/status"
+    signature = hmac.new(
+        settings.alert_webhook_secret.encode("utf-8"), proof, hashlib.sha256
+    ).hexdigest()
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            response = await client.get(
+                settings.alert_status_url,
+                headers={"X-Darkfactory-Signature": f"sha256={signature}"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    result["available"] = True
+    for field in (
+        "receiver_configured",
+        "external_notification_configured",
+        "ack_callback_configured",
+    ):
+        result[field] = payload.get(field) is True
+    return result
+
+
 async def deliver_pending_alerts() -> int:
-    if not settings.alert_webhook_url or not settings.alert_webhook_secret:
+    if not settings.alert_webhook_url or not settings.alert_webhook_secret or not settings.alert_ack_secret:
         return 0
     now = utcnow()
     with db_connect() as connection:
         rows = connection.execute(
             "SELECT event_id, payload, attempts FROM alert_deliveries "
-            "WHERE status='pending' AND next_attempt_at<=? ORDER BY created_at LIMIT 25",
+            "WHERE status IN ('pending','awaiting_ack') AND next_attempt_at<=? "
+            "ORDER BY created_at LIMIT 25",
             (now.isoformat(),),
         ).fetchall()
     delivered = 0
@@ -605,16 +944,19 @@ async def deliver_pending_alerts() -> int:
             retry_at = (utcnow() + timedelta(seconds=delay_seconds)).isoformat()
             with db_connect() as connection:
                 connection.execute(
-                    "UPDATE alert_deliveries SET attempts=?, next_attempt_at=?, "
-                    "last_error='delivery_failed' WHERE event_id=? AND status='pending'",
+                    "UPDATE alert_deliveries SET status='pending', attempts=?, next_attempt_at=?, "
+                    "last_error='delivery_failed' WHERE event_id=? AND status IN ('pending','awaiting_ack')",
                     (attempts, retry_at, row["event_id"]),
                 )
         else:
+            accepted_at = utcnow()
+            retry_at = (accepted_at + timedelta(minutes=5)).isoformat()
             with db_connect() as connection:
                 connection.execute(
-                    "UPDATE alert_deliveries SET status='sent', attempts=attempts+1, "
-                    "delivered_at=?, last_error=NULL WHERE event_id=? AND status='pending'",
-                    (utcnow().isoformat(), row["event_id"]),
+                    "UPDATE alert_deliveries SET status='awaiting_ack', attempts=attempts+1, "
+                    "next_attempt_at=?, delivered_at=COALESCE(delivered_at,?), last_error=NULL "
+                    "WHERE event_id=? AND status IN ('pending','awaiting_ack')",
+                    (retry_at, accepted_at.isoformat(), row["event_id"]),
                 )
             delivered += 1
     return delivered
@@ -749,12 +1091,51 @@ async def overview(request: Request) -> dict[str, Any]:
     rolling_start = now - timedelta(days=365)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     log_rows, usage_truncated = await fetch_spend_logs(rolling_start, now)
+    worker_sessions, sessions_truncated = await fetch_worker_sessions(rolling_start, now)
+    worker_roster = await fetch_worker_roster()
+    alert_receiver = await alert_receiver_readiness()
+    alert_delivery_configured = bool(
+        settings.alert_webhook_url
+        and settings.alert_webhook_secret
+        and settings.alert_ack_secret
+        and alert_receiver["available"]
+        and alert_receiver["receiver_configured"]
+        and alert_receiver["external_notification_configured"]
+        and alert_receiver["ack_callback_configured"]
+    )
     provider_costs = await openai_cost_report(rolling_start, month_start, now)
     annual, monthly, per_key = aggregate_spend_logs(log_rows, rolling_start, month_start, now)
+    zero_cost_models_monthly = zero_cost_model_breakdown(log_rows, month_start, now)
     month_target = settings.annual_budget_usd / 12
     keys = [safe_key_out(row, now) for row in rows]
-    active_key_ids = {key["key_id"] for key in keys if key["key_id"]}
-    unmatched_usage_key_count = sum(1 for key_id in per_key if key_id not in active_key_ids)
+    known_key_ids = {key["key_id"] for key in keys if key["key_id"]}
+    active_key_ids = {
+        key["key_id"] for key in keys if key["key_id"] and not key["blocked"]
+    }
+    active_session_key_ids = {
+        session["key_id"]
+        for session in worker_sessions
+        if session["status"] == "active" and session.get("key_id")
+    }
+    unmanaged_active_keys = [
+        {
+            "alias": key["alias"],
+            "key_id_suffix": key["key_id"][-8:],
+            "age_days": key["age_days"],
+        }
+        for key in keys
+        if key["key_id"]
+        and key["key_id"] in active_key_ids
+        and key["key_id"] not in active_session_key_ids
+    ]
+    if sessions_truncated:
+        unmanaged_active_keys = []
+    unmanaged_active_key_count = (
+        None if sessions_truncated else len(unmanaged_active_keys)
+    )
+    worker_sessions, unmatched_usage_keys, ambiguous_session_key_count, unmatched_usage_key_count = (
+        attribute_worker_usage(log_rows, worker_sessions, known_key_ids, month_start, now)
+    )
     for key in keys:
         usage = per_key.get(key["key_id"] or "", {})
         key["tokens_monthly"] = usage.get("tokens_monthly", 0)
@@ -784,14 +1165,33 @@ async def overview(request: Request) -> dict[str, Any]:
             "zero_cost_requests_monthly": monthly["zero_cost_requests"],
             "zero_cost_tokens_monthly": monthly["zero_cost_tokens"],
             "zero_cost_requests_rolling": annual["zero_cost_requests"],
+            "zero_cost_models_monthly": zero_cost_models_monthly,
         },
         "openai_costs": provider_costs,
         "rotation_days": settings.rotation_days,
         "usage_truncated": usage_truncated,
+        "worker_session_history_truncated": sessions_truncated,
+        "worker_sessions_display_truncated": len(worker_sessions) > MAX_WORKER_SESSION_DISPLAY,
+        "worker_session_count": len(worker_sessions),
+        "worker_roster": worker_roster,
+        "worker_roster_count": len(worker_roster),
+        "worker_sessions": worker_sessions[:MAX_WORKER_SESSION_DISPLAY],
+        "worker_session_status_counts": {
+            status: sum(1 for item in worker_sessions if item["status"] == status)
+            for status in ("active", "expired", "revoked", "unknown")
+        },
+        "unblocked_key_count": len(active_key_ids),
+        "unmanaged_active_key_count": unmanaged_active_key_count,
+        "unmanaged_active_keys": unmanaged_active_keys[:20],
+        "known_key_count": len(known_key_ids),
+        "ambiguous_session_key_count": ambiguous_session_key_count,
         "unmatched_usage_key_count": unmatched_usage_key_count,
+        "unmatched_usage_keys": unmatched_usage_keys,
+        "unmatched_usage_keys_truncated": unmatched_usage_key_count > len(unmatched_usage_keys),
         "keys": keys,
         "exposure_events": events,
-        "alert_notifications_configured": bool(settings.alert_webhook_url and settings.alert_webhook_secret),
+        "alert_delivery": alert_receiver,
+        "alert_notifications_configured": alert_delivery_configured,
         "alert_notification_pending_count": pending_alert_count(),
         "jev_configured": bool(settings.jev_api_key),
         "jev_model": settings.jev_model,
@@ -943,7 +1343,12 @@ async def exposure_webhook(request: Request) -> dict[str, Any]:
                 event.session_id,
             ),
         ).rowcount
-        if inserted and settings.alert_webhook_url and settings.alert_webhook_secret:
+        if (
+            inserted
+            and settings.alert_webhook_url
+            and settings.alert_webhook_secret
+            and settings.alert_ack_secret
+        ):
             connection.execute(
                 "INSERT INTO alert_deliveries "
                 "(event_id,payload,status,attempts,next_attempt_at,created_at) "
@@ -955,9 +1360,55 @@ async def exposure_webhook(request: Request) -> dict[str, Any]:
         "event_id": event.event_id,
         "flagged": True,
         "notification_queued": bool(
-            inserted and settings.alert_webhook_url and settings.alert_webhook_secret
+            inserted
+            and settings.alert_webhook_url
+            and settings.alert_webhook_secret
+            and settings.alert_ack_secret
         ),
     }
+
+
+@app.post("/api-guard/api/v1/webhooks/alerts/ack", status_code=202)
+async def alert_acknowledgement_webhook(request: Request) -> dict[str, Any]:
+    if not settings.alert_ack_secret:
+        raise HTTPException(status_code=503, detail="Alert acknowledgement is not configured")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 4096:
+            raise HTTPException(status_code=413, detail="Acknowledgement body is too large")
+    raw = bytes(raw)
+    supplied = request.headers.get("X-Darkfactory-Signature", "")
+    expected = hmac.new(settings.alert_ack_secret.encode(), raw, hashlib.sha256).hexdigest()
+    normalized = supplied.removeprefix("sha256=")
+    if not normalized or not hmac.compare_digest(normalized.lower(), expected):
+        raise HTTPException(status_code=403, detail="Invalid acknowledgement signature")
+    try:
+        acknowledgement = AlertAcknowledgement.model_validate_json(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid alert acknowledgement") from exc
+    if acknowledgement.acknowledged_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="acknowledged_at must include a timezone")
+    acknowledged_at = acknowledgement.acknowledged_at.astimezone(timezone.utc).isoformat()
+    with db_connect() as connection:
+        row = connection.execute(
+            "SELECT status FROM alert_deliveries WHERE event_id=?",
+            (acknowledgement.event_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Alert delivery not found")
+        if row["status"] != "acknowledged":
+            connection.execute(
+                "UPDATE alert_deliveries SET status='acknowledged', acknowledged_at=?, "
+                "acknowledged_by=?, next_attempt_at=?, last_error=NULL WHERE event_id=?",
+                (
+                    acknowledged_at,
+                    acknowledgement.acknowledged_by,
+                    acknowledged_at,
+                    acknowledgement.event_id,
+                ),
+            )
+    return {"accepted": True, "event_id": acknowledgement.event_id}
 
 
 @app.post("/api-guard/api/v1/decision-review")

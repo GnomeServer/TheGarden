@@ -31,6 +31,36 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ",
         ),
     ),
+    (
+        4,
+        (
+            "CREATE INDEX IF NOT EXISTS ix_api_guard_incidents_received "
+            "ON api_guard_incidents (received_at)",
+            "CREATE INDEX IF NOT EXISTS ix_api_guard_incidents_notification_due "
+            "ON api_guard_incidents (notification_status, notification_next_attempt_at)",
+            "CREATE INDEX IF NOT EXISTS ix_api_guard_incidents_ack_callback_due "
+            "ON api_guard_incidents (ack_callback_status, ack_callback_next_attempt_at)",
+        ),
+    ),
+    (
+        5,
+        (
+            "ALTER TABLE api_guard_incidents ADD COLUMN IF NOT EXISTS "
+            "escalation_status VARCHAR(32) NOT NULL DEFAULT 'waiting_for_delivery'",
+            "ALTER TABLE api_guard_incidents ADD COLUMN IF NOT EXISTS "
+            "escalation_level INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE api_guard_incidents ADD COLUMN IF NOT EXISTS "
+            "escalation_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE api_guard_incidents ADD COLUMN IF NOT EXISTS "
+            "escalation_next_attempt_at TIMESTAMPTZ",
+            "ALTER TABLE api_guard_incidents ADD COLUMN IF NOT EXISTS "
+            "escalation_delivered_at TIMESTAMPTZ",
+            "UPDATE api_guard_incidents SET escalation_status = 'acknowledged', "
+            "escalation_next_attempt_at = NULL WHERE acknowledged_at IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS ix_api_guard_incidents_escalation_due "
+            "ON api_guard_incidents (escalation_status, escalation_next_attempt_at)",
+        ),
+    ),
 )
 
 

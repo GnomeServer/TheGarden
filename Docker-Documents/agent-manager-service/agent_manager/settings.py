@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     notification_scan_seconds: int = Field(
         default=60, ge=15, le=3600, validation_alias="NOTIFICATION_SCAN_SECONDS"
     )
+    api_guard_alert_escalate_after_seconds: int = Field(
+        default=900,
+        ge=1,
+        validation_alias="API_GUARD_ALERT_ESCALATE_AFTER_SECONDS",
+    )
     model_base_url: str = Field(
         default="http://litellm:4000/v1", validation_alias="MODEL_BASE_URL"
     )
@@ -91,6 +96,16 @@ class Settings(BaseSettings):
     model_api_key_id: str = Field(default="", validation_alias="MODEL_API_KEY_ID")
     exposure_webhook_url: str = Field(default="", validation_alias="API_GUARD_EXPOSURE_WEBHOOK_URL")
     exposure_webhook_secret: str = Field(default="", validation_alias="API_GUARD_EXPOSURE_WEBHOOK_SECRET")
+    api_guard_alert_webhook_secret: str = Field(
+        default="", validation_alias="API_GUARD_ALERT_WEBHOOK_SECRET"
+    )
+    api_guard_alert_ack_url: str = Field(
+        default="http://api-guard:8000/api-guard/api/v1/webhooks/alerts/ack",
+        validation_alias="API_GUARD_ALERT_ACK_URL",
+    )
+    api_guard_alert_ack_secret: str = Field(
+        default="", validation_alias="API_GUARD_ALERT_ACK_SECRET"
+    )
     model_name: str = Field(default="gpt-5.6-luna", validation_alias="MODEL_NAME")
     reasoning_effort: str = Field(default="medium", validation_alias="REASONING_EFFORT")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
@@ -98,6 +113,19 @@ class Settings(BaseSettings):
     def separate_service_credentials(self) -> "Settings":
         if self.openwebui_token and self.openwebui_token == self.api_token:
             raise ValueError("AGENT_MANAGER_OPENWEBUI_TOKEN must differ from the administrator token")
+        alert_secrets = [
+            secret
+            for secret in (
+                self.exposure_webhook_secret,
+                self.api_guard_alert_webhook_secret,
+                self.api_guard_alert_ack_secret,
+            )
+            if secret
+        ]
+        if len(alert_secrets) != len(set(alert_secrets)):
+            raise ValueError(
+                "API Guard exposure, alert, and acknowledgment secrets must be distinct"
+            )
         return self
 
     @property

@@ -140,13 +140,14 @@ or distribute Caddy's `root.key`.
 Keybroker URL, and a supervised `dark-factory-agent-worker.service`. Workers
 obtain a model-scoped, budget-limited key per run, then revoke it on completion;
 the service does not receive a persistent LiteLLM key. Before the one-time
-cutover, Ansible checks Keybroker readiness and authenticates each host through
-`/v1/worker/identity` over HTTPS, then stops the old cron/systemd worker,
-removes `~/.config/litellm/worker-api-key`, verifies that the old process is
-gone, and records a cutover marker. It does not revoke the old LiteLLM key:
-after confirming each worker is using session keys, revoke legacy worker keys
-in API Guard. Subsequent playbook runs restart the service only when its code
-or configuration changes.
+cutover, each worker verifies Keybroker readiness and its authenticated
+`/v1/worker/identity` over HTTPS after installing Caddy's root CA and its
+control-plane hostname mapping. The playbook then stops the old cron/systemd
+worker, removes `~/.config/litellm/worker-api-key`, verifies that the old
+process is gone, and records a cutover marker. It does not revoke the old
+LiteLLM key: after confirming each worker is using session keys, revoke legacy
+worker keys in API Guard. Subsequent playbook runs restart the service only
+when its code or configuration changes.
 
 The worker uses the Tailnet-only Caddy endpoint at
 `https://infra-lab-services.tail494f6d.ts.net/keybroker`. Check a host with

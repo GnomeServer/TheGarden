@@ -7,7 +7,16 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import HTTPException
 
-from agent_manager.dashboard import TaskUpdate, task_snapshot, update_task
+from agent_manager.dashboard import (
+    CANONICAL_WORKERS,
+    WORKER_SPECS_BY_ID,
+    TaskUpdate,
+    canonical_worker_id,
+    canonical_worker_out,
+    list_workers,
+    task_snapshot,
+    update_task,
+)
 from agent_manager.main import apply_worker_event
 from agent_manager.models import ActivityRecord, AccessEventRecord, TaskAuditRecord, WorkerRecord
 from agent_manager.tracking import (
@@ -207,6 +216,148 @@ class IdentityAndIngestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.scalar.await_count, 2)
 
 
+
+class CanonicalWorkerRosterTests(unittest.IsolatedAsyncioTestCase):
+    def test_legacy_heartbeat_ids_group_under_the_physical_host(self) -> None:
+        self.assertEqual(
+            canonical_worker_id(SimpleNamespace(id="inkii", hostname="inkii")),
+            "worker-02",
+        )
+        self.assertEqual(
+            canonical_worker_id(SimpleNamespace(id="worker-1", hostname="inkii")),
+            "worker-02",
+        )
+        self.assertIsNone(
+            canonical_worker_id(SimpleNamespace(id="factory-test-worker", hostname="6bf83f")),
+        )
+        self.assertEqual(
+            {worker["display_name"] for worker in CANONICAL_WORKERS},
+            {"Donatello", "Raphael", "Naruto", "Inkii", "Sammy", "Michelangelo"},
+        )
+
+    async def test_canonical_worker_card_keeps_legacy_ids_as_metadata(self) -> None:
+        now = datetime.now(timezone.utc)
+        canonical = SimpleNamespace(
+            id="worker-02",
+            role="coder",
+            hostname="inkii",
+            last_seen_at=now,
+            capabilities=["mission"],
+            reported_status="idle",
+            current_run_id=None,
+            version="test",
+        )
+        legacy = SimpleNamespace(
+            id="inkii",
+            role="coder",
+            hostname="inkii",
+            last_seen_at=now - timedelta(days=2),
+        )
+        with patch(
+            "agent_manager.dashboard.worker_admission_status",
+            new=AsyncMock(return_value="available"),
+        ):
+            result = await canonical_worker_out(
+                WORKER_SPECS_BY_ID["worker-02"], [legacy, canonical], None
+            )
+        self.assertEqual(result["id"], "worker-02")
+        self.assertEqual(result["display_name"], "Inkii")
+        self.assertEqual(result["reported_worker_ids"], ["inkii", "worker-02"])
+        self.assertEqual(result["legacy_worker_ids"], ["inkii"])
+        self.assertTrue(result["assignable"])
+
+
+    async def test_fresh_legacy_heartbeat_supplies_presence_without_losing_canonical_admission(self) -> None:
+        now = datetime.now(timezone.utc)
+        canonical = SimpleNamespace(
+            id="worker-02",
+            role="coder",
+            hostname="inkii",
+            last_seen_at=now - timedelta(days=2),
+            capabilities=["mission-crew"],
+            reported_status="idle",
+            current_run_id=None,
+            version="canonical",
+        )
+        legacy = SimpleNamespace(
+            id="inkii",
+            role="coder",
+            hostname="inkii",
+            last_seen_at=now,
+            capabilities=["create-python-script"],
+            reported_status="idle",
+            current_run_id=None,
+            version="legacy-current",
+        )
+        with patch(
+            "agent_manager.dashboard.worker_admission_status",
+            new=AsyncMock(return_value="available"),
+        ) as admission:
+            result = await canonical_worker_out(
+                WORKER_SPECS_BY_ID["worker-02"], [canonical, legacy], None
+            )
+        self.assertEqual(result["id"], "worker-02")
+        self.assertEqual(result["version"], "legacy-current")
+        self.assertEqual(result["capabilities"], ["create-python-script"])
+        self.assertEqual(result["presence_status"], "online")
+        self.assertEqual(result["legacy_online_worker_ids"], ["inkii"])
+        self.assertTrue(result["has_canonical_identity"])
+        self.assertTrue(result["assignable"])
+        admission.assert_awaited_once_with(None, canonical)
+    async def test_worker_endpoint_returns_six_friendly_hosts_and_groups_old_ids(self) -> None:
+        now = datetime.now(timezone.utc)
+        workers = [
+            SimpleNamespace(
+                id="worker-02",
+                role="coder",
+                hostname="inkii",
+                last_seen_at=now,
+                capabilities=["mission"],
+                reported_status="idle",
+                current_run_id=None,
+                version="new",
+            ),
+            SimpleNamespace(
+                id="inkii",
+                role="coder",
+                hostname="inkii",
+                last_seen_at=now - timedelta(days=2),
+                capabilities=["create-python-script"],
+                reported_status="idle",
+                current_run_id=None,
+                version="legacy",
+            ),
+            SimpleNamespace(
+                id="factory-test-worker",
+                role="coder",
+                hostname="6bf83f057a6c",
+                last_seen_at=now - timedelta(days=5),
+                capabilities=["mission"],
+                reported_status="idle",
+                current_run_id=None,
+                version="test",
+            ),
+        ]
+        session = SimpleNamespace(execute=AsyncMock(return_value=Result(workers)))
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(nats=None)))
+        with patch(
+            "agent_manager.dashboard.worker_admission_status",
+            new=AsyncMock(return_value="available"),
+        ):
+            output = await list_workers(request, SimpleNamespace(), session)
+        roster = [worker for worker in output if worker["is_roster_member"]]
+        legacy = [worker for worker in output if not worker["is_roster_member"]]
+        self.assertEqual(len(roster), 6)
+        self.assertEqual(len({worker["id"] for worker in roster}), 6)
+        inkii = next(worker for worker in roster if worker["id"] == "worker-02")
+        self.assertEqual(inkii["display_name"], "Inkii")
+        self.assertEqual(inkii["reported_worker_ids"], ["inkii", "worker-02"])
+        self.assertEqual(inkii["legacy_worker_ids"], ["inkii"])
+        self.assertTrue(inkii["assignable"])
+        sammy = next(worker for worker in roster if worker["id"] == "worker-05")
+        self.assertFalse(sammy["has_record"])
+        self.assertFalse(sammy["assignable"])
+        self.assertEqual(legacy[0]["id"], "factory-test-worker")
 
 class WorkerHeartbeatTests(unittest.IsolatedAsyncioTestCase):
     async def test_heartbeat_persists_presence_without_exposing_errors(self):

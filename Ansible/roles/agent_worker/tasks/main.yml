@@ -1,18 +1,16 @@
 ---
-- name: Require a worker id and role
+- name: Require worker identity and fixed control-plane network configuration
   ansible.builtin.assert:
     that:
       - worker_id is defined
       - worker_id | length > 0
       - worker_role is defined
       - worker_role | length > 0
-      - worker_keybroker_base_url is defined
-      - worker_keybroker_base_url is match('^https://')
-      - worker_egress_allow_ips is defined
-      - worker_egress_allow_ips | length > 0
-      - "'0.0.0.0/0' not in worker_egress_allow_ips"
-      - "'::/0' not in worker_egress_allow_ips"
-    fail_msg: "Set worker_id, worker_role, an HTTPS Keybroker URL, and a non-global worker_egress_allow_ips allowlist for {{ inventory_hostname }}."
+      - worker_control_plane_ip == '100.94.49.45'
+      - worker_control_plane_hostname == 'infra-lab-services.tail494f6d.ts.net'
+      - worker_nats_url is match('^nats://100[.]94[.]49[.]45:4222$')
+      - worker_keybroker_base_url is match('^https://infra-lab-services[.]tail494f6d[.]ts[.]net/keybroker/?$')
+    fail_msg: "Set worker_id and worker_role, and keep NATS and Keybroker on the configured control-plane service endpoint for {{ inventory_hostname }}."
 
 
 - name: Install Python, virtualenv, procps, and CA certificates
@@ -104,16 +102,22 @@
   changed_when: false
   when: worker_keybroker_base_url is match('^https://')
 
+- name: Map the Keybroker hostname directly to the control-plane IP
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^\s*[^#].*\s{{ worker_control_plane_hostname | regex_escape }}(\s|$)'
+    line: "{{ worker_control_plane_ip }} {{ worker_control_plane_hostname }}"
+    state: present
+  become: true
+  notify: Restart dark-factory-agent-worker
+
 - name: Verify Keybroker is ready before removing static worker keys
   ansible.builtin.uri:
     url: "{{ worker_keybroker_base_url.rstrip('/') }}/healthz"
     method: GET
     status_code: 200
-    ca_path: /tmp/thegarden-caddy-root.crt
+    ca_path: /usr/local/share/ca-certificates/thegarden-caddy-root.crt
     validate_certs: true
-  delegate_to: localhost
-  run_once: true
-
 - name: Verify Keybroker recognizes this worker before removing its static key
   ansible.builtin.uri:
     url: "{{ worker_keybroker_base_url.rstrip('/') }}/v1/worker/identity"

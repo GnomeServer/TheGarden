@@ -289,9 +289,9 @@ async def answer_chat(
     except Exception as exc:
         await record_chat(session, actor, request, title, "Luna did not answer.")
         notice = (
-            "\n\n[Credential text was redacted. API Guard receipt is unconfirmed; notify an administrator now.]"
+            "\n\n[Security notice: credential-shaped text was redacted, but API Guard receipt is unconfirmed. Notify an administrator immediately; do not resend the credential.]"
             if exposure_detected and alert_delivery_failed
-            else "\n\n[Credential text was redacted; API Guard accepted the alert.]"
+            else "\n\n[Security notice: credential-shaped text was redacted and recorded by API Guard. The alert still requires administrator review and key rotation; do not resend the credential.]"
             if exposure_detected
             else ""
         )
@@ -306,9 +306,9 @@ async def answer_chat(
     await record_chat(session, actor, request, title, "Luna answered through OMP.")
     if exposure_detected:
         notice = (
-            "[Credential text was redacted. API Guard receipt is unconfirmed; notify an administrator now.]"
+            "[Security notice: credential-shaped text was redacted, but API Guard receipt is unconfirmed. Notify an administrator immediately; do not resend the credential.]"
             if alert_delivery_failed
-            else "[Credential text was redacted; API Guard accepted the alert.]"
+            else "[Security notice: credential-shaped text was redacted and recorded by API Guard. The alert still requires administrator review and key rotation; do not resend the credential.]"
         )
         safe_text = f"{safe_text.strip()}\n\n{notice}"
     return question(safe_text.strip()[:4000])

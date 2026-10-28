@@ -11,10 +11,12 @@ from agent_manager.models import ActivityRecord, WorkSessionRecord
 from agent_manager.dashboard import activity_out
 from agent_manager.tracking import (
     WorkSessionDecision,
+    WorkSessionEdit,
     WorkSessionNotes,
     WorkSessionStart,
     decide_work_session,
     discard_work_session,
+    edit_work_session,
     start_work_session,
     stop_work_session,
     submit_work_session,
@@ -409,6 +411,85 @@ class UndoWorkSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.status_code, 409)
         self.assertEqual(record.status, "submitted")
         self.assertEqual(session.commits, 0)
+
+
+class WorkSessionEditTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_can_stop_a_forgotten_timer_with_an_end_time(self) -> None:
+        started_at = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        ended_at = started_at + timedelta(hours=2)
+        now = started_at + timedelta(hours=5)
+        record = make_record(started_at=started_at)
+        session = FakeSession(record)
+
+        with (
+            patch("agent_manager.tracking.utcnow", return_value=now),
+            patch("agent_manager.tracking.live_broker.publish", new_callable=AsyncMock),
+        ):
+            result = await edit_work_session(
+                "timer-1",
+                WorkSessionEdit(ended_at=ended_at),
+                actor=make_actor(),
+                session=session,
+            )
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(record.status, "stopped")
+        self.assertEqual(record.ended_at, ended_at)
+        self.assertEqual(record.duration_seconds, 7200)
+        self.assertEqual(activity_events(session)[0].event_type, "time.edited")
+
+    async def test_owner_can_correct_stopped_times(self) -> None:
+        started_at = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        record = make_record(status="stopped", started_at=started_at)
+        record.ended_at = started_at + timedelta(hours=8)
+        record.duration_seconds = 28800
+        session = FakeSession(record)
+        new_end = started_at + timedelta(hours=1)
+
+        with (
+            patch("agent_manager.tracking.utcnow", return_value=started_at + timedelta(hours=9)),
+            patch("agent_manager.tracking.live_broker.publish", new_callable=AsyncMock),
+        ):
+            result = await edit_work_session(
+                "timer-1",
+                WorkSessionEdit(started_at=started_at, ended_at=new_end),
+                actor=make_actor(),
+                session=session,
+            )
+
+        self.assertEqual(result["duration_seconds"], 3600)
+        self.assertEqual(record.duration_seconds, 3600)
+        self.assertEqual(record.status, "stopped")
+
+    async def test_submitted_and_approved_entries_cannot_be_edited(self) -> None:
+        for status in ("submitted", "approved"):
+            with self.subTest(status=status):
+                record = make_record(status=status)
+                session = FakeSession(record)
+                with self.assertRaises(HTTPException) as raised:
+                    await edit_work_session(
+                        "timer-1",
+                        WorkSessionEdit(ended_at=datetime(2026, 10, 13, 13, 0, tzinfo=timezone.utc)),
+                        actor=make_actor(),
+                        session=session,
+                    )
+                self.assertEqual(raised.exception.status_code, 409)
+                self.assertEqual(session.commits, 0)
+
+    async def test_owner_cannot_edit_another_persons_timer(self) -> None:
+        record = make_record(user_id="owner")
+        session = FakeSession(record)
+        with self.assertRaises(HTTPException) as raised:
+            await edit_work_session(
+                "timer-1",
+                WorkSessionEdit(ended_at=datetime(2026, 10, 13, 13, 0, tzinfo=timezone.utc)),
+                actor=make_actor(user_id="other"),
+                session=session,
+            )
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertEqual(record.status, "running")
+        self.assertEqual(session.commits, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

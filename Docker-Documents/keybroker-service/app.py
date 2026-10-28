@@ -7,6 +7,7 @@ import ipaddress
 import json
 import logging
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import DateTime, Index, JSON, String, UniqueConstraint, create_engine, select, text, update
+from sqlalchemy import DateTime, Index, JSON, String, UniqueConstraint, create_engine, func, select, text, update
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -28,11 +29,26 @@ WORKER_IPS = {
     "100.88.92.78": "worker-04",  # naruto
     "100.116.35.103": "worker-01",  # raphael
     "100.94.145.104": "worker-03",  # donatello
+    "100.79.110.117": "worker-05",  # sammy
+    "100.70.246.104": "worker-06",  # michelangelo
+}
+WORKER_NAMES = {
+    "worker-01": "raphael",
+    "worker-02": "inkii",
+    "worker-03": "donatello",
+    "worker-04": "naruto",
+    "worker-05": "sammy",
+    "worker-06": "michelangelo",
 }
 logger = logging.getLogger("keybroker")
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SAFE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
+SAFE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+SAFE_MODEL_SECRET = re.compile(
+    r"(?:sk-(?:or-v1-|ant-api\d{2}-)?[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{30,})",
+    re.IGNORECASE,
+)
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 DURATION = re.compile(r"^[1-9][0-9]{0,4}[smhd]$")
 
@@ -55,6 +71,9 @@ class Settings(BaseSettings):
     model_base_url: str = "https://infra-lab-services.tail494f6d.ts.net/litellm/v1"
     default_model: str = "luna"
     allowed_models: list[str] = Field(default_factory=lambda: ["luna"])
+    allow_unpriced_local_model_bases: list[str] = Field(
+        default_factory=lambda: ["http://llama:8080/v1"]
+    )
     session_max_budget_usd: float = 25.0
     admin_max_budget_usd: float = 25000.0
     session_ttl_seconds: int = 3600
@@ -82,6 +101,16 @@ class Settings(BaseSettings):
         if not models or any(not SAFE_ALIAS.fullmatch(model) or model.lower().startswith("sk-") for model in models):
             raise ValueError("allowed_models must contain configured model aliases")
         return models
+
+    @field_validator("allow_unpriced_local_model_bases")
+    @classmethod
+    def validate_unpriced_local_model_bases(cls, value: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(base.rstrip("/") for base in value if base.strip()))
+        for base in normalized:
+            parsed = httpx.URL(base)
+            if parsed.scheme not in {"http", "https"} or not parsed.host or parsed.username or parsed.password:
+                raise ValueError("allow_unpriced_local_model_bases must contain HTTP(S) URLs without credentials")
+        return normalized
 
     @model_validator(mode="after")
     def validate_policy(self) -> Settings:
@@ -405,6 +434,60 @@ def safe_number(value: Any) -> float:
         return 0.0
 
 
+MODEL_PRICING_CACHE_TTL_SECONDS = 30.0
+MODEL_PRICING_CACHE: dict[str, tuple[float, bool]] = {}
+
+
+def model_rows_have_budgetable_pricing(rows: list[dict[str, Any]]) -> bool:
+    for row in rows:
+        info = row.get("model_info") if isinstance(row.get("model_info"), dict) else {}
+        params = row.get("litellm_params") if isinstance(row.get("litellm_params"), dict) else {}
+        input_cost = safe_number(info.get("input_cost_per_token", row.get("input_cost_per_token")))
+        output_cost = safe_number(info.get("output_cost_per_token", row.get("output_cost_per_token")))
+        if input_cost > 0 and output_cost > 0:
+            continue
+        api_base = params.get("api_base") or row.get("api_base")
+        normalized_base = api_base.rstrip("/") if isinstance(api_base, str) else ""
+        if normalized_base not in settings.allow_unpriced_local_model_bases:
+            return False
+    return True
+
+
+async def require_budgetable_model(model: str) -> None:
+    cached = MODEL_PRICING_CACHE.get(model)
+    now_monotonic = time.monotonic()
+    if cached and now_monotonic - cached[0] < MODEL_PRICING_CACHE_TTL_SECONDS:
+        if cached[1]:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="LiteLLM pricing is missing or zero; virtual-key issuance is blocked",
+        )
+
+    rows = key_rows(await litellm_request("GET", "/model/info"))
+    matching = [row for row in rows if row.get("model_name") == model]
+    if not matching:
+        raise HTTPException(
+            status_code=503,
+            detail="LiteLLM model pricing metadata is unavailable; virtual-key issuance is blocked",
+        )
+
+    if not model_rows_have_budgetable_pricing(matching):
+        try:
+            await litellm_request("POST", "/reload/model_cost_map")
+            rows = key_rows(await litellm_request("GET", "/model/info"))
+            matching = [row for row in rows if row.get("model_name") == model]
+        except HTTPException:
+            matching = []
+        if not matching or not model_rows_have_budgetable_pricing(matching):
+            MODEL_PRICING_CACHE[model] = (now_monotonic, False)
+            raise HTTPException(
+                status_code=503,
+                detail="LiteLLM pricing is missing or zero after model-cost-map refresh; virtual-key issuance is blocked",
+            )
+
+    MODEL_PRICING_CACHE[model] = (now_monotonic, True)
+
 def key_rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         rows = payload.get("keys", payload.get("data", []))
@@ -449,6 +532,42 @@ def safe_key_row(row: dict[str, Any], now: datetime) -> dict[str, Any]:
     }
 
 
+def safe_session_row(record: SessionRecord, now: datetime) -> dict[str, Any]:
+    token_id = record.token_id
+    token_hash = record.token_hash
+    key_id = (
+        token_id
+        if isinstance(token_id, str) and SAFE_ID.fullmatch(token_id) and not token_id.lower().startswith("sk-")
+        else token_hash
+        if isinstance(token_hash, str) and SAFE_ID.fullmatch(token_hash) and not token_hash.lower().startswith("sk-")
+        else None
+    )
+    alias = record.key_alias
+    if not isinstance(alias, str) or not SAFE_ALIAS.fullmatch(alias) or alias.lower().startswith("sk-"):
+        alias = "restricted-session"
+    policy = record.policy if isinstance(record.policy, dict) else {}
+    model = policy.get("model") if isinstance(policy.get("model"), str) else None
+    if model and (not SAFE_ALIAS.fullmatch(model) or model.lower().startswith("sk-")):
+        model = None
+    expires_at = normalize_datetime(record.expires_at)
+    created_at = normalize_datetime(record.created_at)
+    revoked_at = normalize_datetime(record.revoked_at) if record.revoked_at else None
+    status = "revoked" if revoked_at else "expired" if expires_at <= now else "active"
+    return {
+        "session_id": record.session_id,
+        "worker_id": record.worker_id if SAFE_ID.fullmatch(record.worker_id) else "unmapped",
+        "key_id": key_id,
+        "alias": alias,
+        "model": model,
+        "max_budget_usd": safe_number(policy.get("max_budget_usd")),
+        "budget_duration": policy.get("budget_duration") if isinstance(policy.get("budget_duration"), str) else None,
+        "created_at": created_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "revoked_at": revoked_at.isoformat() if revoked_at else None,
+        "status": status,
+    }
+
+
 def parse_spend_time(value: str, field_name: str) -> str:
     try:
         try:
@@ -475,6 +594,14 @@ def spend_rows(payload: Any) -> tuple[list[dict[str, Any]], int, bool]:
         api_key = row.get("api_key")
         if isinstance(api_key, str) and SAFE_ID.fullmatch(api_key) and not api_key.lower().startswith("sk-"):
             safe_row["api_key"] = api_key
+        model = row.get("model")
+        if (
+            isinstance(model, str)
+            and SAFE_MODEL.fullmatch(model)
+            and not model.casefold().startswith(("sk-", "AIza"))
+            and not SAFE_MODEL_SECRET.search(model)
+        ):
+            safe_row["model"] = model
         safe.append(safe_row)
     try:
         total_pages = max(1, int(payload.get("total_pages", 1)))
@@ -695,6 +822,7 @@ async def create_session(body: SessionRequest, request: Request, response: Respo
     alias = f"session-{worker_id}-{session_id[:12]}"
     ttl = settings.session_ttl_seconds
     model = settings.default_model
+    await require_budgetable_model(model)
     budget = settings.session_max_budget_usd
     policy = {
         "model": model,
@@ -833,6 +961,38 @@ async def report_exposure(body: ExposureRequest, session_id: str, request: Reque
     }
 
 
+@app.get("/v1/admin/workers")
+def admin_list_workers(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    require_dashboard(authorization)
+    with Session(engine) as session:
+        usage = session.execute(
+            select(
+                SessionRecord.worker_id,
+                func.count(SessionRecord.session_id).label("session_count"),
+                func.max(SessionRecord.created_at).label("last_session_at"),
+            ).group_by(SessionRecord.worker_id)
+        ).all()
+    sessions_by_worker = {
+        row.worker_id: {
+            "session_count": int(row.session_count),
+            "last_session_at": normalize_datetime(row.last_session_at).isoformat()
+            if row.last_session_at
+            else None,
+        }
+        for row in usage
+    }
+    workers = [
+        {
+            "worker_id": worker_id,
+            "host": WORKER_NAMES.get(worker_id, "unmapped"),
+            "tailnet_ip": address,
+            **sessions_by_worker.get(worker_id, {"session_count": 0, "last_session_at": None}),
+        }
+        for address, worker_id in settings.worker_ip_map.items()
+    ]
+    workers.sort(key=lambda row: row["host"])
+    return {"data": workers, "total": len(workers)}
+
 @app.get("/v1/admin/keys")
 async def admin_list_keys(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
     require_dashboard(authorization)
@@ -840,6 +1000,47 @@ async def admin_list_keys(authorization: str | None = Header(default=None)) -> l
     now = utcnow()
     return [safe_key_row(row, now) for row in rows]
 
+
+@app.get("/v1/admin/sessions")
+def admin_list_sessions(
+    start: str = Query(min_length=1, max_length=64),
+    end: str = Query(min_length=1, max_length=64),
+    page: int = Query(default=1, ge=1, le=10000),
+    page_size: int = Query(default=1000, ge=1, le=1000),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    require_dashboard(authorization)
+    start_value = datetime.strptime(
+        parse_spend_time(start, "start"), "%Y-%m-%d %H:%M:%S"
+    ).replace(tzinfo=timezone.utc)
+    end_value = datetime.strptime(
+        parse_spend_time(end, "end"), "%Y-%m-%d %H:%M:%S"
+    ).replace(tzinfo=timezone.utc)
+    if end_value < start_value:
+        raise HTTPException(status_code=422, detail="end must not precede start")
+    conditions = (
+        SessionRecord.created_at >= start_value,
+        SessionRecord.created_at <= end_value,
+    )
+    with Session(engine) as session:
+        total = session.scalar(
+            select(func.count()).select_from(SessionRecord).where(*conditions)
+        ) or 0
+        records = session.scalars(
+            select(SessionRecord)
+            .where(*conditions)
+            .order_by(SessionRecord.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    now = utcnow()
+    return {
+        "data": [safe_session_row(record, now) for record in records],
+        "total": total,
+        "total_pages": total_pages,
+        "total_is_capped": False,
+    }
 
 @app.get("/v1/admin/spend-logs")
 async def admin_spend_logs(
@@ -878,6 +1079,8 @@ async def admin_generate_key(body: AdminKeyGenerate, response: Response, authori
         raise HTTPException(status_code=422, detail="Requested key budget exceeds the configured administrator limit")
     if any(model not in settings.allowed_models for model in body.models):
         raise HTTPException(status_code=422, detail="Requested model is not allowed by Keybroker policy")
+    for model in body.models:
+        await require_budgetable_model(model)
     result = await litellm_request(
         "POST",
         "/key/generate",

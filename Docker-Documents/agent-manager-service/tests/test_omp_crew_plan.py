@@ -141,7 +141,7 @@ class OmpCredentialExposureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret, model.await_args.args[1])
         self.assertNotIn(secret, reply["text"])
         self.assertEqual(reply["text"].count("[REDACTED API KEY]"), 1)
-        self.assertIn("API Guard accepted the alert", reply["text"])
+        self.assertIn("recorded by API Guard", reply["text"])
         self.assertEqual(exposure.await_count, 2)
         self.assertTrue(all(call.kwargs["configured_key"] for call in exposure.await_args_list))
 

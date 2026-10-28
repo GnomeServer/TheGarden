@@ -28,6 +28,8 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
             "keybroker_dashboard_token": api_guard.settings.keybroker_dashboard_token,
             "alert_webhook_url": api_guard.settings.alert_webhook_url,
             "alert_webhook_secret": api_guard.settings.alert_webhook_secret,
+            "alert_ack_secret": api_guard.settings.alert_ack_secret,
+            "alert_status_url": api_guard.settings.alert_status_url,
             "annual_budget_usd": api_guard.settings.annual_budget_usd,
             "openai_admin_api_key": api_guard.settings.openai_admin_api_key,
             "openai_project_id": api_guard.settings.openai_project_id,
@@ -40,6 +42,8 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         api_guard.settings.keybroker_dashboard_token = "dashboard-only-test-token"
         api_guard.settings.alert_webhook_url = ""
         api_guard.settings.alert_webhook_secret = ""
+        api_guard.settings.alert_ack_secret = ""
+        api_guard.settings.alert_status_url = ""
         api_guard.settings.annual_budget_usd = 25_000.0
         api_guard.settings.openai_admin_api_key = ""
         api_guard.settings.openai_project_id = ""
@@ -111,6 +115,27 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.detail, "Keybroker is unavailable")
         self.assertNotIn("remote credential", error.exception.detail)
 
+        class UnpricedResponse:
+            status_code = 503
+
+            def json(self) -> dict[str, str]:
+                return {
+                    "detail": "LiteLLM pricing is missing or zero; virtual-key issuance is blocked"
+                }
+
+        class UnpricedClient(FakeClient):
+            async def request(self, *_args, **_kwargs):
+                return UnpricedResponse()
+
+        with patch("app.httpx.AsyncClient", UnpricedClient):
+            with self.assertRaises(api_guard.HTTPException) as blocked:
+                await api_guard.keybroker_request("POST", "/v1/admin/keys/generate")
+        self.assertEqual(blocked.exception.status_code, 503)
+        self.assertEqual(
+            blocked.exception.detail,
+            "LiteLLM pricing is missing or zero; virtual-key issuance is blocked",
+        )
+
     async def test_legacy_exposure_database_migrates_worker_metadata_columns(self) -> None:
         with sqlite3.connect(api_guard.settings.state_db) as connection:
             connection.execute(
@@ -129,16 +154,67 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
 
         with api_guard.db_connect() as connection:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(exposure_events)")}
+            alert_columns = {row["name"] for row in connection.execute("PRAGMA table_info(alert_deliveries)")}
         self.assertIn("worker_id", columns)
         self.assertIn("session_id", columns)
+        self.assertIn("acknowledged_at", alert_columns)
+        self.assertIn("acknowledged_by", alert_columns)
         legacy = api_guard.event_rows()[0]
         self.assertEqual(legacy["event_id"], "legacy-event")
         self.assertIsNone(legacy["worker_id"])
         self.assertIsNone(legacy["session_id"])
 
+    async def test_forge_alert_readiness_requires_authenticated_receiver_status(self) -> None:
+        api_guard.settings.alert_webhook_url = "http://agent-manager.test/v1/webhooks/api-guard/exposure"
+        api_guard.settings.alert_webhook_secret = "distinct-event-secret"
+        api_guard.settings.alert_ack_secret = "distinct-ack-secret"
+        api_guard.settings.alert_status_url = "http://agent-manager.test/v1/webhooks/api-guard/status"
+        captured: dict[str, Any] = {}
+
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "receiver_configured": True,
+                    "external_notification_configured": False,
+                    "ack_callback_configured": True,
+                }
+
+        class FakeClient:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url, *, headers):
+                captured.update(url=url, headers=headers)
+                return FakeResponse()
+
+        with patch("app.httpx.AsyncClient", FakeClient):
+            result = await api_guard.alert_receiver_readiness()
+        expected = hmac.new(
+            b"distinct-event-secret",
+            b"GET:/v1/webhooks/api-guard/status",
+            hashlib.sha256,
+        ).hexdigest()
+        self.assertEqual(
+            captured["headers"]["X-Darkfactory-Signature"], f"sha256={expected}"
+        )
+        self.assertTrue(result["available"])
+        self.assertTrue(result["receiver_configured"])
+        self.assertFalse(result["external_notification_configured"])
+        self.assertTrue(result["ack_callback_configured"])
+
     async def test_exposure_notification_contains_only_safe_metadata(self) -> None:
         api_guard.settings.alert_webhook_url = "https://notify.example/hook"
         api_guard.settings.alert_webhook_secret = "distinct-outbound-alert-secret"
+        api_guard.settings.alert_ack_secret = "distinct-human-ack-secret"
         captured: list[dict[str, Any]] = []
 
         class FakeResponse:
@@ -202,8 +278,39 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         ).hexdigest()
         self.assertNotEqual(expected, inbound_signature)
         delivered = api_guard.event_rows()[0]
-        self.assertEqual(delivered["notification_status"], "sent")
+        self.assertEqual(delivered["notification_status"], "awaiting_ack")
         self.assertEqual(delivered["notification_attempts"], 1)
+        self.assertEqual(api_guard.pending_alert_count(), 1)
+        acknowledgement = {
+            "event_id": "worker-alert-1",
+            "acknowledged_by": "ops-admin",
+            "acknowledged_at": api_guard.utcnow().isoformat(),
+        }
+        ack_body = json.dumps(acknowledgement, separators=(",", ":")).encode()
+        denied_ack = await self.client.post(
+            "/api-guard/api/v1/webhooks/alerts/ack",
+            content=ack_body,
+        )
+        self.assertEqual(denied_ack.status_code, 403)
+        ack_signature = hmac.new(
+            api_guard.settings.alert_ack_secret.encode(), ack_body, hashlib.sha256
+        ).hexdigest()
+        accepted_ack = await self.client.post(
+            "/api-guard/api/v1/webhooks/alerts/ack",
+            content=ack_body,
+            headers={"X-Darkfactory-Signature": f"sha256={ack_signature}"},
+        )
+        self.assertEqual(accepted_ack.status_code, 202)
+        duplicate_ack = await self.client.post(
+            "/api-guard/api/v1/webhooks/alerts/ack",
+            content=ack_body,
+            headers={"X-Darkfactory-Signature": f"sha256={ack_signature}"},
+        )
+        self.assertEqual(duplicate_ack.status_code, 202)
+        delivered = api_guard.event_rows()[0]
+        self.assertEqual(delivered["notification_status"], "acknowledged")
+        self.assertEqual(delivered["notification_acknowledged_by"], "ops-admin")
+        self.assertEqual(api_guard.pending_alert_count(), 0)
         duplicate = await self.client.post(
             "/api-guard/api/v1/webhooks/exposure",
             content=body,
@@ -239,6 +346,7 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_notification_outbox_retries_until_delivered(self) -> None:
         api_guard.settings.alert_webhook_url = "https://notify.example/hook"
         api_guard.settings.alert_webhook_secret = "distinct-outbound-alert-secret"
+        api_guard.settings.alert_ack_secret = "distinct-human-ack-secret"
         event = {
             "event_id": "retry-event",
             "key_alias": "worker-session-key",
@@ -296,9 +404,20 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.httpx.AsyncClient", SuccessfulClient):
             self.assertEqual(await api_guard.deliver_pending_alerts(), 1)
         delivered = api_guard.event_rows()[0]
-        self.assertEqual(delivered["notification_status"], "sent")
+        self.assertEqual(delivered["notification_status"], "awaiting_ack")
         self.assertEqual(delivered["notification_attempts"], 2)
-        self.assertEqual(api_guard.pending_alert_count(), 0)
+        self.assertEqual(api_guard.pending_alert_count(), 1)
+        with api_guard.db_connect() as connection:
+            connection.execute(
+                "UPDATE alert_deliveries SET next_attempt_at=? WHERE event_id='retry-event'",
+                ((api_guard.utcnow() - timedelta(seconds=1)).isoformat(),),
+            )
+        with patch("app.httpx.AsyncClient", SuccessfulClient):
+            self.assertEqual(await api_guard.deliver_pending_alerts(), 1)
+        awaiting_ack = api_guard.event_rows()[0]
+        self.assertEqual(awaiting_ack["notification_status"], "awaiting_ack")
+        self.assertEqual(awaiting_ack["notification_attempts"], 3)
+        self.assertEqual(api_guard.pending_alert_count(), 1)
 
     async def test_openai_cost_report_uses_scoped_admin_billing_api(self) -> None:
         api_guard.settings.openai_admin_api_key = "organization-admin-read-key"
@@ -448,6 +567,35 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
                     "budget_duration": "30d",
                     "created_at": "2026-10-01T00:00:00Z",
                 }]
+            if path == "/v1/admin/workers":
+                return {
+                    "data": [
+                        {"worker_id": "worker-01", "host": "raphael", "tailnet_ip": "100.116.35.103", "session_count": 1, "last_session_at": None},
+                        {"worker_id": "worker-02", "host": "inkii", "tailnet_ip": "100.98.125.127", "session_count": 2, "last_session_at": None},
+                        {"worker_id": "worker-03", "host": "donatello", "tailnet_ip": "100.94.145.104", "session_count": 3, "last_session_at": None},
+                        {"worker_id": "worker-04", "host": "naruto", "tailnet_ip": "100.88.92.78", "session_count": 4, "last_session_at": None},
+                        {"worker_id": "worker-05", "host": "sammy", "tailnet_ip": "100.79.110.117", "session_count": 0, "last_session_at": None},
+                        {"worker_id": "worker-06", "host": "michelangelo", "tailnet_ip": "100.70.246.104", "session_count": 0, "last_session_at": None},
+                    ],
+                    "total": 6,
+                }
+            if path == "/v1/admin/sessions":
+                now = api_guard.utcnow()
+                return {
+                    "data": [{
+                        "session_id": "worker-session-001",
+                        "worker_id": "worker-02",
+                        "key_id": "retired-key-hash",
+                        "alias": "worker-02-job",
+                        "model": "luna",
+                        "created_at": (now - timedelta(seconds=10)).isoformat(),
+                        "expires_at": (now + timedelta(minutes=50)).isoformat(),
+                        "revoked_at": now.isoformat(),
+                        "status": "revoked",
+                    }],
+                    "total_pages": 1,
+                    "total_is_capped": False,
+                }
             if path == "/v1/admin/spend-logs":
                 page = params["page"]
                 now = api_guard.utcnow()
@@ -472,14 +620,26 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
                         },
                     ]
                 else:
-                    entries = [{
-                        "api_key": "retired-key-hash",
-                        "spend": 0,
-                        "prompt_tokens": 40,
-                        "completion_tokens": 10,
-                        "total_tokens": 50,
-                        "startTime": (now - timedelta(seconds=10)).isoformat(),
-                    }]
+                    entries = [
+                        {
+                            "api_key": "retired-key-hash",
+                            "model": "gpt-5.6-luna",
+                            "spend": 0,
+                            "prompt_tokens": 40,
+                            "completion_tokens": 10,
+                            "total_tokens": 50,
+                            "startTime": (now - timedelta(seconds=10)).isoformat(),
+                        },
+                        {
+                            "api_key": "legacy-token-76543210",
+                            "model": "openai/luna",
+                            "spend": 0,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 0,
+                            "total_tokens": 10,
+                            "startTime": (now - timedelta(days=60)).isoformat(),
+                        },
+                    ]
                 return {"data": entries, "total_pages": 2, "total_is_capped": False}
             raise AssertionError(f"Unexpected Keybroker endpoint: {path}")
 
@@ -498,18 +658,72 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["budget"]["monthly_spend_usd"], 12.5)
         self.assertEqual(result["budget"]["monthly_target_usd"], 2_083.33)
         self.assertEqual(result["keys"][0]["key_id"], "abcdef0123456789")
+        self.assertEqual(result["unmanaged_active_key_count"], 1)
+        self.assertEqual(result["unmanaged_active_keys"][0]["alias"], "worker-one")
+        self.assertEqual(result["unmanaged_active_keys"][0]["key_id_suffix"], "23456789")
+        self.assertIsNotNone(result["unmanaged_active_keys"][0]["age_days"])
         self.assertEqual(result["budget"]["monthly_tokens"], 173)
-        self.assertEqual(result["budget"]["annual_tokens"], 203)
+        self.assertEqual(result["budget"]["annual_tokens"], 213)
         self.assertEqual(result["budget"]["zero_cost_requests_monthly"], 1)
         self.assertEqual(result["budget"]["zero_cost_tokens_monthly"], 50)
+        self.assertEqual(
+            result["budget"]["zero_cost_models_monthly"],
+            [{"model": "gpt-5.6-luna", "requests": 1, "tokens": 50}],
+        )
         self.assertEqual(result["keys"][0]["tokens_monthly"], 123)
         self.assertEqual(result["unmatched_usage_key_count"], 1)
-        self.assertFalse(result["usage_truncated"])
+        self.assertEqual(result["unmatched_usage_keys"][0]["key_id_suffix"], "76543210")
+        self.assertEqual(result["worker_session_status_counts"]["revoked"], 1)
+        self.assertEqual(result["worker_sessions"][0]["worker_id"], "worker-02")
+        self.assertEqual(result["worker_sessions"][0]["alias"], "worker-02-job")
+        self.assertEqual(result["worker_sessions"][0]["key_id_suffix"], "key-hash")
+        self.assertEqual(result["worker_sessions"][0]["status"], "revoked")
+        self.assertEqual(result["worker_sessions"][0]["spend_365d_usd"], 0)
+        self.assertEqual(result["worker_sessions"][0]["tokens_365d"], 50)
+        self.assertNotIn("retired-key-hash", response.text)
+        self.assertEqual(result["worker_roster_count"], 6)
+        self.assertEqual(
+            {worker["host"] for worker in result["worker_roster"]},
+            {"donatello", "raphael", "naruto", "inkii", "sammy", "michelangelo"},
+        )
+        self.assertEqual(
+            next(worker for worker in result["worker_roster"] if worker["host"] == "sammy")["tailnet_ip"],
+            "100.79.110.117",
+        )
         self.assertFalse(result["openai_costs"]["configured"])
 
         self.assertNotIn("sk-masked-secret-must-not-leave-server", response.text)
         self.assertNotIn("sk-request-secret-must-not-reach-the-browser", response.text)
         self.assertEqual(response.headers["cache-control"], "no-store")
+
+    async def test_worker_session_history_is_bounded_and_redacts_credential_shaped_ids(self) -> None:
+        secret = "sk-or-v1-" + "a" * 32
+        calls: list[dict[str, Any]] = []
+
+        async def fake_broker(method: str, path: str, *, params=None, body=None):
+            calls.append({"method": method, "path": path, "params": params})
+            rows = [{
+                "session_id": secret,
+                "worker_id": secret,
+                "key_id": secret,
+                "alias": secret,
+                "model": "luna",
+                "status": "revoked",
+            }] if params["page"] == 1 else []
+            return {"data": rows, "total_pages": 11, "total_is_capped": False}
+
+        now = api_guard.utcnow()
+        with patch.object(api_guard, "keybroker_request", new=AsyncMock(side_effect=fake_broker)):
+            rows, truncated = await api_guard.fetch_worker_sessions(now - timedelta(days=365), now)
+        self.assertTrue(truncated)
+        self.assertEqual(len(calls), api_guard.MAX_WORKER_SESSION_PAGES)
+        self.assertEqual([call["params"]["page"] for call in calls], list(range(1, 11)))
+        self.assertTrue(all(call["params"]["page_size"] == 1000 for call in calls))
+        self.assertEqual(rows[0]["session_id"], "unknown-session")
+        self.assertEqual(rows[0]["worker_id"], "unmapped")
+        self.assertEqual(rows[0]["key_id"], None)
+        self.assertEqual(rows[0]["key_id_suffix"], "")
+        self.assertNotIn(secret, repr(rows))
 
     async def test_spend_log_page_cap_is_explicitly_reported(self) -> None:
         async def capped_logs(*_args, **_kwargs):

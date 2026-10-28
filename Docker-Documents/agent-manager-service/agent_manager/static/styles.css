@@ -1069,6 +1069,21 @@ dialog footer {
   min-height: 34px;
   padding: .4rem .6rem;
 }
+.time-edit-form {
+  align-items: end;
+  display: grid;
+  gap: .8rem;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+.time-edit-form label {
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 600;
+}
+.time-edit-form input {
+  width: 100%;
+}
+
 .time-running {
   background: var(--amber-bg);
   color: var(--amber);

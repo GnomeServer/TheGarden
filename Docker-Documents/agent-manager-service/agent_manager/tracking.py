@@ -143,6 +143,21 @@ class WorkSessionDecision(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class WorkSessionEdit(BaseModel):
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    notes: str | None = Field(default=None, max_length=10000)
+
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("time must include a timezone")
+        return value.astimezone(timezone.utc)
+
+
 def credential_out(record: NodeCredentialRecord) -> dict[str, Any]:
     return {
         "id": record.id,
@@ -966,6 +981,68 @@ async def discard_work_session(
     await live_broker.publish("activity", activity_out(activity))
     return Response(status_code=204, headers={"X-Undo-ID": activity.id})
 
+
+MAX_EDITED_DURATION_SECONDS = 7 * 24 * 3600
+
+
+@router.patch("/v1/work-sessions/{session_id}")
+async def edit_work_session(
+    session_id: str,
+    body: WorkSessionEdit,
+    actor: UserRecord = Depends(require_session_csrf),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    require_time_entry_member(actor)
+    record = await load_owned_session(session, session_id, actor, manager_allowed=False)
+    if record.source != "timer":
+        raise HTTPException(status_code=409, detail="Only a self-reported timer can be edited")
+    if record.status not in {"running", "stopped", "rejected"}:
+        raise HTTPException(status_code=409, detail="Submitted or approved time cannot be edited")
+    if body.started_at is None and body.ended_at is None and body.notes is None:
+        raise HTTPException(status_code=422, detail="Provide a start time, end time, or notes")
+    before = work_session_snapshot(record)
+    now = utcnow()
+    started = body.started_at or record.started_at
+    ended = record.ended_at if body.ended_at is None else body.ended_at
+    if started > now:
+        raise HTTPException(status_code=422, detail="Start time cannot be in the future")
+    if ended is not None:
+        if ended > now:
+            raise HTTPException(status_code=422, detail="End time cannot be in the future")
+        if ended < started:
+            raise HTTPException(status_code=422, detail="End time cannot be before start time")
+        duration = max(0, int((ended - started).total_seconds()))
+        if duration > MAX_EDITED_DURATION_SECONDS:
+            raise HTTPException(status_code=422, detail="Edited duration cannot exceed 7 days")
+        record.ended_at = ended
+        record.duration_seconds = duration
+        if record.status == "running":
+            record.status = "stopped"
+    else:
+        if record.status != "running":
+            raise HTTPException(status_code=422, detail="Stopped time needs an end time")
+        record.ended_at = None
+        record.duration_seconds = None
+    record.started_at = started
+    if body.notes is not None:
+        record.notes = body.notes
+    activity = await record_work_session_activity(
+        session,
+        record,
+        actor,
+        event_type="time.edited",
+        source_event_id=f"timer-edited:{record.id}:{uuid.uuid4()}",
+        summary="edited a work timer",
+        occurred_at=now,
+        previous_status=before["status"],
+        undo={"kind": "work_session", "before": before, "after": work_session_snapshot(record)},
+    )
+    await session.commit()
+    await session.refresh(record)
+    output = work_session_out(record)
+    await live_broker.publish("time", output)
+    await live_broker.publish("activity", activity_out(activity))
+    return {**output, "undo_id": activity.id}
 
 
 @router.post("/v1/work-sessions/{session_id}/submit")

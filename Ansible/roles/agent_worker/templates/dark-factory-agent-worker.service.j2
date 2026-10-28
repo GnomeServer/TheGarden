@@ -15,15 +15,22 @@ RestartSec=10
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
+ProtectHome=read-only
 ReadWritePaths={{ ansible_user_dir }}/agent-worker {{ ansible_user_dir }}/agent-workspace
-RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-# Worker and subprocess network access is limited to the service VM and DNS.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET
+# The worker and its children can reach only the service VM; DNS resolvers are not allowed.
 IPAddressDeny=any
-{% for address in worker_egress_allow_ips %}
-IPAddressAllow={{ address }}
-{% endfor %}
+IPAddressAllow={{ worker_control_plane_ip }}/32
 
 [Install]
 WantedBy=multi-user.target

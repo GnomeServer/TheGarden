@@ -26,6 +26,7 @@ def test_client(tmp_path, monkeypatch):
             "worker_ip_map": dict(keybroker.WORKER_IPS),
             "default_model": "luna",
             "allowed_models": ["luna"],
+            "allow_unpriced_local_model_bases": ["http://llama:8080/v1"],
             "session_max_budget_usd": 25.0,
             "admin_max_budget_usd": 25000.0,
             "session_ttl_seconds": 3600,
@@ -41,8 +42,10 @@ def test_client(tmp_path, monkeypatch):
     )
     test_engine = create_engine(test_settings.sqlalchemy_url(), connect_args={"check_same_thread": False})
     monkeypatch.setattr(keybroker, "engine", test_engine)
+    keybroker.MODEL_PRICING_CACHE.clear()
     with TestClient(keybroker.app) as client:
         yield client
+    keybroker.MODEL_PRICING_CACHE.clear()
     test_engine.dispose()
 
 
@@ -68,6 +71,17 @@ def install_litellm_stub(monkeypatch, calls: list[tuple[str, str, dict | None]] 
 
     async def fake_request(method, path, *, params=None, body=None, allow_404=False):
         request_log.append((method, path, body))
+        if path == "/model/info":
+            return {
+                "data": [{
+                    "model_name": "luna",
+                    "litellm_params": {"api_base": "http://llama:8080/v1"},
+                    "model_info": {
+                        "input_cost_per_token": 0,
+                        "output_cost_per_token": 0,
+                    },
+                }]
+            }
         if path == "/key/generate":
             return {"key": "sk-one-time-secret", "token_id": "token-id-123", "token_hash": "safe-hash-456"}
         if path == "/key/list":
@@ -96,6 +110,7 @@ def install_litellm_stub(monkeypatch, calls: list[tuple[str, str, dict | None]] 
                         "completion_tokens": 4,
                         "total_tokens": 14,
                         "api_key": "token-id-123",
+                        "model": "gpt-5.6-luna",
                         "prompt": "private user content",
                         "response": "private model output",
                         "raw_key": "sk-must-not-escape",
@@ -119,17 +134,112 @@ def test_worker_identity_preflight_requires_trusted_proxy_headers(test_client):
     accepted = test_client.get("/v1/worker/identity", headers=worker_headers())
     assert accepted.status_code == 200
     assert accepted.json() == {"worker_id": "worker-02"}
+    for address, worker_id in (
+        ("100.70.246.104", "worker-06"),
+        ("100.79.110.117", "worker-05"),
+    ):
+        response = test_client.get(
+            "/v1/worker/identity",
+            headers=worker_headers(address),
+        )
+        assert response.status_code == 200
+        assert response.json() == {"worker_id": worker_id}
     denied = test_client.get(
         "/v1/worker/identity",
-        headers={"X-Darkfactory-Client-IP": "100.70.246.104", "X-Darkfactory-Proxy-Token": "proxy-test-token"},
+        headers=worker_headers("100.70.246.103"),
     )
     assert denied.status_code == 403
 
-def test_default_enrollment_contains_only_four_active_workers():
-    assert set(keybroker.WORKER_IPS.values()) == {"worker-01", "worker-02", "worker-03", "worker-04"}
-    assert "100.70.246.104" not in keybroker.WORKER_IPS
-    assert "100.79.110.117" not in keybroker.WORKER_IPS
+def test_default_enrollment_contains_all_six_requested_workers():
+    assert set(keybroker.WORKER_IPS.values()) == {
+        "worker-01", "worker-02", "worker-03", "worker-04", "worker-05", "worker-06"
+    }
+    assert keybroker.WORKER_NAMES["worker-05"] == "sammy"
+    assert keybroker.WORKER_NAMES["worker-06"] == "michelangelo"
 
+
+def test_key_issuance_blocks_unpriced_external_model(test_client, monkeypatch):
+    calls: list[str] = []
+
+    async def unpriced_external(method, path, *, params=None, body=None, allow_404=False):
+        calls.append(path)
+        return {
+            "data": [{
+                "model_name": "luna",
+                "litellm_params": {
+                    "model": "openai/custom-luna",
+                    "api_base": "https://api.openai.com/v1",
+                },
+                "model_info": {
+                    "input_cost_per_token": 0,
+                    "output_cost_per_token": 0,
+                },
+            }]
+        }
+
+    monkeypatch.setattr(keybroker, "litellm_request", unpriced_external)
+    worker_result = test_client.post(
+        "/v1/sessions",
+        headers=worker_headers(),
+        json={"run_id": "unpriced-run", "operation": "coding"},
+    )
+    assert worker_result.status_code == 503
+    assert "pricing is missing or zero" in worker_result.json()["detail"]
+    admin_result = test_client.post(
+        "/v1/admin/keys/generate",
+        headers={"Authorization": "Bearer dashboard-test-token"},
+        json={"alias": "unpriced-admin", "models": ["luna"], "max_budget_usd": 20},
+    )
+    assert admin_result.status_code == 503
+    assert calls == ["/model/info", "/reload/model_cost_map", "/model/info"]
+    with keybroker.Session(keybroker.engine) as session:
+        assert session.query(keybroker.SessionRecord).count() == 0
+
+    keybroker.MODEL_PRICING_CACHE.clear()
+
+    async def priced_external(method, path, *, params=None, body=None, allow_404=False):
+        return {
+            "data": [{
+                "model_name": "luna",
+                "litellm_params": {"model": "openai/gpt-5.5", "api_base": "https://api.openai.com/v1"},
+                "model_info": {
+                    "input_cost_per_token": 0.000001,
+                    "output_cost_per_token": 0.000005,
+                },
+            }]
+        }
+
+    monkeypatch.setattr(keybroker, "litellm_request", priced_external)
+    asyncio.run(keybroker.require_budgetable_model("luna"))
+
+
+def test_keybroker_reloads_litellm_cost_map_before_blocking_model(test_client, monkeypatch):
+    calls: list[str] = []
+    refreshed = False
+
+    async def fake_request(method, path, *, params=None, body=None, allow_404=False):
+        nonlocal refreshed
+        calls.append(path)
+        if path == "/reload/model_cost_map":
+            refreshed = True
+            return {"models_count": 100}
+        return {
+            "data": [{
+                "model_name": "luna",
+                "litellm_params": {
+                    "model": "openai/gpt-5.6-luna",
+                    "api_base": "https://api.openai.com/v1",
+                },
+                "model_info": {
+                    "input_cost_per_token": 0.0000002 if refreshed else 0,
+                    "output_cost_per_token": 0.0000012 if refreshed else 0,
+                },
+            }]
+        }
+
+    monkeypatch.setattr(keybroker, "litellm_request", fake_request)
+    asyncio.run(keybroker.require_budgetable_model("luna"))
+    assert calls == ["/model/info", "/reload/model_cost_map", "/model/info"]
 
 def test_session_policy_is_server_owned_and_raw_key_is_not_persisted(test_client, monkeypatch):
     calls = install_litellm_stub(monkeypatch)
@@ -220,11 +330,18 @@ def test_worker_authentication_uses_proxy_identity_and_not_body_worker_id(test_c
         headers={**worker_headers(), "X-Darkfactory-Proxy-Token": "wrong"},
         json={"run_id": "run-123", "operation": "coding"},
     ).status_code == 403
-    assert test_client.post(
-        "/v1/sessions",
-        headers={"X-Darkfactory-Client-IP": "100.70.246.104", "X-Darkfactory-Proxy-Token": "proxy-test-token"},
-        json={"run_id": "run-123", "operation": "coding"},
-    ).status_code == 403
+    for address, worker_id in (
+        ("100.70.246.104", "worker-06"),
+        ("100.79.110.117", "worker-05"),
+    ):
+        admitted = test_client.post(
+            "/v1/sessions",
+            headers=worker_headers(address),
+            json={"run_id": "run-123", "operation": "coding"},
+        )
+        assert admitted.status_code == 200
+        record = keybroker.get_session(admitted.json()["session_id"])
+        assert record is not None and record.worker_id == worker_id
     assert test_client.post(
         "/v1/sessions",
         headers=worker_headers(),
@@ -419,6 +536,34 @@ def test_exposure_outbox_retries_after_api_guard_unavailable(test_client, monkey
         assert delivered is not None and delivered.delivered_at is not None
         assert delivered.attempts == 2
 
+
+def test_admin_session_history_is_safe_and_keeps_revocation_state(test_client, monkeypatch):
+    install_litellm_stub(monkeypatch)
+    created = mint(test_client)
+    deleted = test_client.delete(
+        f"/v1/sessions/{created['session_id']}", headers=worker_headers()
+    )
+    assert deleted.status_code == 200
+
+    history = test_client.get(
+        "/v1/admin/sessions?start=2026-10-01T00%3A00%3A00Z&end=2026-10-31T23%3A59%3A59Z",
+        headers={"Authorization": "Bearer dashboard-test-token"},
+    )
+    assert history.status_code == 200
+    result = history.json()
+    assert result["total"] == 1
+    row = result["data"][0]
+    assert row["session_id"] == created["session_id"]
+    assert row["worker_id"] == "worker-02"
+    assert row["key_id"] == "token-id-123"
+    assert row["alias"] == created["key_alias"]
+    assert row["status"] == "revoked"
+    assert "key" not in row
+    assert "token_id" not in row
+    assert "token_hash" not in row
+    assert "run_id" not in row
+    assert "sk-one-time-secret" not in history.text
+
 def test_admin_routes_require_bearer_and_strip_raw_keys_and_content(test_client, monkeypatch):
     install_litellm_stub(monkeypatch)
     assert test_client.get("/v1/admin/keys").status_code == 403
@@ -429,6 +574,15 @@ def test_admin_routes_require_bearer_and_strip_raw_keys_and_content(test_client,
     assert "key" not in keys.json()[0]
     assert "sk-must-not-escape" not in keys.text
 
+    assert test_client.get("/v1/admin/workers").status_code == 403
+    roster = test_client.get("/v1/admin/workers", headers=headers)
+    assert roster.status_code == 200
+    assert roster.json()["total"] == 6
+    sammy = next(row for row in roster.json()["data"] if row["host"] == "sammy")
+    assert sammy["worker_id"] == "worker-05"
+    assert sammy["tailnet_ip"] == "100.79.110.117"
+    assert "sk-must-not-escape" not in roster.text
+
     logs = test_client.get(
         "/v1/admin/spend-logs?start=2026-10-01T00%3A00%3A00Z&end=2026-10-02T00%3A00%3A00Z&page=2&page_size=50",
         headers=headers,
@@ -437,9 +591,17 @@ def test_admin_routes_require_bearer_and_strip_raw_keys_and_content(test_client,
     assert logs.json()["total_pages"] == 3
     row = logs.json()["data"][0]
     assert row["api_key"] == "token-id-123"
+    assert row["model"] == "gpt-5.6-luna"
     assert "prompt" not in row and "response" not in row and "raw_key" not in row
     assert "private user content" not in logs.text
     assert "sk-must-not-escape" not in logs.text
+
+    secret_model = "sk-or-v1-" + "a" * 32
+    unsafe_rows, _, _ = keybroker.spend_rows(
+        {"data": [{"model": secret_model}], "total_pages": 1}
+    )
+    assert "model" not in unsafe_rows[0]
+    assert secret_model not in repr(unsafe_rows)
 
 
 def test_admin_key_generation_enforces_model_and_budget_policy(test_client, monkeypatch):

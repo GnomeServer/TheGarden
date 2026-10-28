@@ -54,6 +54,17 @@ LUNA_BACKEND_API_KEY=<key-accepted-by-the-inference-backend>
 `LUNA_MODEL` and `LUNA_API_BASE` describe the backend route. The public model
 name presented to clients remains `luna`.
 
+The checked-in `.env.example` points `LUNA_API_BASE` at the local llama service,
+so zero spend is expected for that default route. For a paid OpenAI route,
+`LUNA_MODEL` must identify the actual upstream model LiteLLM prices, or set
+`model_info.base_model` / explicit `input_cost_per_token` and
+`output_cost_per_token` rates in `config.yaml`. API Guard shows zero-priced
+requests by model ID. Before issuing a virtual key, Keybroker reloads LiteLLM's
+model cost map once and then blocks new keys if an external model still has
+missing or zero input/output pricing. Do not allowlist a paid provider URL as a
+free local model. See
+[LiteLLM custom pricing](https://docs.litellm.ai/docs/proxy/custom_pricing).
+
 The gateway config enforces a shared `$25,000` spend ceiling over `365d` across
 all LiteLLM traffic. Budget enforcement depends on the PostgreSQL database being
 available. The separate

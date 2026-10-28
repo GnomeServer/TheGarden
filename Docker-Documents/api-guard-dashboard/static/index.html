@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#11151c">
   <title>Dark Factory — API Guard</title>
-  <link rel="stylesheet" href="/api-guard/static/styles.css?v=2">
-  <script src="/api-guard/static/app.js?v=2" defer></script>
+  <link rel="stylesheet" href="/api-guard/static/styles.css?v=4">
+  <script src="/api-guard/static/app.js?v=4" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -48,6 +48,18 @@
         <div class="section-heading"><div><p class="eyebrow">PROVIDER BILLING CROSS-CHECK</p><h2 id="openai-costs-title">OpenAI reported costs</h2></div></div>
         <p class="section-note">Optional OpenAI organization Costs API data. Requires an organization Admin API key with Usage Read access—not the project key LiteLLM uses for inference. A project ID filter is recommended.</p>
         <div id="openai-costs" class="provider-costs" role="status">Checking OpenAI billing configuration…</div>
+      </section>
+
+      <section class="panel" aria-labelledby="worker-session-title">
+        <div class="section-heading"><div><p class="eyebrow">KEYBROKER WORKER / JOB CREDENTIALS</p><h2 id="worker-session-title">Session history &amp; usage attribution</h2></div></div>
+        <p class="section-note">Shows Keybroker-issued session metadata and LiteLLM usage matched by virtual-key ID. Expired and revoked session records remain visible for audit; key values, prompts, and run IDs are never shown.</p>
+
+        <h3>Keybroker worker allowlist</h3>
+        <p class="section-note">These tailnet IP mappings authorize session-key requests. They are not a live heartbeat or proof that Ansible deployed the worker's egress policy.</p>
+        <div id="worker-roster" class="table-wrap" aria-live="polite"><p class="loading">Loading worker roster…</p></div>
+        <div id="worker-session-summary" class="session-summary" aria-live="polite"></div>
+        <div id="worker-sessions" class="table-wrap" aria-live="polite"><p class="loading">Loading worker sessions…</p></div>
+        <div id="unmatched-usage" class="table-wrap"></div>
       </section>
 
       <div class="two-column">

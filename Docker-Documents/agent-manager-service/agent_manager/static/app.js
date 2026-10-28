@@ -13,10 +13,12 @@ const state = {
   workSessions: null,
   nodeHealth: null,
   accessEvents: null,
-  identityMappings: null,
+  apiGuardIncidents: null,
+  apiGuardIncidentsError: null,
   people: null,
   lastInteraction: 0,
   undoId: null,
+  editingSessionId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -72,9 +74,38 @@ function memberName(id) {
   return user ? personLabel(user) : "Unknown member";
 }
 
+function workerDisplayLabel(workerId) {
+  if (!workerId) return "Unassigned";
+  const worker = (state.workers || []).find((item) =>
+    item.id === workerId
+    || item.reported_worker_ids?.includes(workerId)
+    || item.legacy_worker_ids?.includes(workerId)
+  );
+  if (!worker) return workerId;
+  const name = worker.display_name || worker.id;
+  if (workerId !== worker.id) return `${name} (legacy ID ${workerId})`;
+  return name === workerId ? name : `${name} (${worker.id})`;
+}
+
 function utcDateValue(date) {
   return date.toISOString().slice(0, 10);
 }
+
+function toLocalInput(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function fromLocalInput(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
 
 const THEME_STORAGE_KEY = "thegarden-theme";
 
@@ -282,24 +313,36 @@ async function refreshAll() {
   });
 
   if (isAdministrator()) {
-    try {
-      state.identityMappings = await api("/v1/identity-mappings");
-      state.identityMappingsError = null;
-    } catch (error) {
-      state.identityMappingsError = error;
+    const adminResults = await Promise.allSettled([
+      api("/v1/identity-mappings"),
+      api("/v1/api-guard/incidents?limit=100"),
+    ]);
+    const unauthorizedAdminResult = adminResults.find(
+      (result) => result.status === "rejected" && result.reason?.status === 401,
+    );
+    if (unauthorizedAdminResult) {
+      handleAuthError(unauthorizedAdminResult.reason);
+      return;
     }
+    state.identityMappings = adminResults[0].status === "fulfilled" ? adminResults[0].value : null;
+    state.identityMappingsError = adminResults[0].status === "rejected" ? adminResults[0].reason : null;
+    state.apiGuardIncidents = adminResults[1].status === "fulfilled" ? adminResults[1].value : null;
+    state.apiGuardIncidentsError = adminResults[1].status === "rejected" ? adminResults[1].reason : null;
   } else {
     state.identityMappings = null;
     state.identityMappingsError = null;
+    state.apiGuardIncidents = null;
+    state.apiGuardIncidentsError = null;
   }
 
   const partial = results.some((result) => result.status === "rejected") ||
-    Boolean(state.identityMappingsError);
+    Boolean(state.identityMappingsError) || Boolean(state.apiGuardIncidentsError);
   $("connection").textContent = partial
     ? "Connected · some data unavailable"
     : "Connected";
   $("connection").classList.toggle("live", !partial);
   render();
+
 }
 
 
@@ -319,6 +362,7 @@ function render() {
   renderAccessGrants();
   renderWorkSessions();
   renderPresence();
+  renderApiGuardIncidents();
 }
 
 function accessChoice(user) {
@@ -370,6 +414,86 @@ function renderAccessGrants() {
             ${options.map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("")}
           </select>
         </label>
+      </article>
+    `;
+  }).join("");
+}
+
+function externalDeliveryLabel(status) {
+  if (status === "delivered") return "Delivered to the configured webhook; this is not a human acknowledgment.";
+  if (status === "pending") return "Queued for external delivery.";
+  if (status === "failed") return "External delivery failed; automatic retry is queued.";
+  return "External notification delivery is not configured.";
+}
+
+function ackCallbackLabel(status) {
+  if (status === "delivered") return "Acknowledgment callback delivered to API Guard.";
+  if (status === "pending") return "Acknowledgment callback is queued for API Guard.";
+  if (status === "failed") return "API Guard callback failed; automatic retry is queued.";
+  if (status === "unconfigured") return "API Guard acknowledgment callback is not configured.";
+  return "No acknowledgment callback has been queued.";
+}
+
+function escalationLabel(incident) {
+  const status = incident.escalation_status;
+  const level = Number(incident.escalation_level) || 0;
+  const attempts = Number(incident.escalation_attempts) || 0;
+  const next = incident.escalation_next_attempt_at
+    ? ` Next attempt: ${formatDate(incident.escalation_next_attempt_at)}.`
+    : "";
+  if (status === "acknowledged") return "Stopped after human acknowledgment.";
+  if (status === "unconfigured") return "External notification delivery is not configured; no-ack escalation is paused.";
+  if (status === "waiting_for_delivery") return "Waiting for initial external delivery before starting no-ack escalation.";
+  if (status === "pending") return `Escalation level ${level} delivery attempt ${attempts} is in progress.${next}`;
+  if (status === "failed") return `Escalation level ${level} delivery failed; independent retry backoff is active.${next}`;
+  if (status === "scheduled") {
+    return level
+      ? `Escalation level ${level} delivered; next no-ack escalation is scheduled.${next}`
+      : `First no-ack escalation is scheduled.${next}`;
+  }
+  return "No-ack escalation is not scheduled.";
+}
+
+function renderApiGuardIncidents() {
+  const panel = $("api-guard-incidents");
+  const target = $("api-guard-incident-list");
+  if (!panel || !target) return;
+  const admin = isAdministrator();
+  panel.classList.toggle("hidden", !admin);
+  if (!admin) return;
+  if (state.apiGuardIncidentsError) {
+    setError(target, "API Guard incidents could not be loaded.");
+    return;
+  }
+  if (!state.apiGuardIncidents) {
+    target.innerHTML = '<p class="loading">Loading API Guard incidents…</p>';
+    return;
+  }
+  if (!state.apiGuardIncidents.length) {
+    setEmpty(target, "No API Guard exposure incidents have been received.");
+    return;
+  }
+  target.innerHTML = state.apiGuardIncidents.map((incident) => {
+    const acknowledged = Boolean(incident.acknowledged_at);
+    const identifiers = [
+      incident.worker_id ? `Worker ${workerDisplayLabel(incident.worker_id)}` : "",
+      incident.session_id ? `Session ${incident.session_id}` : "",
+    ].filter(Boolean).join(" · ");
+    return `
+      <article class="identity-card incident-card">
+        <div>
+          <strong class="identity-name">${esc(incident.key_alias)} · ${esc(incident.reason.replaceAll("_", " "))}</strong>
+          <small>Event ${esc(incident.event_id)}${identifiers ? ` · ${esc(identifiers)}` : ""}</small>
+        </div>
+        <p><strong>Received:</strong> Agent Manager recorded this incident at ${esc(formatDate(incident.received_at))}.</p>
+        <p><strong>External delivery:</strong> ${esc(externalDeliveryLabel(incident.notification_status))}</p>
+        <p><strong>No-ack escalation:</strong> ${esc(escalationLabel(incident))}</p>
+        <p><strong>Human acknowledgment:</strong> ${acknowledged
+          ? `Acknowledged by ${esc(incident.acknowledged_by)} at ${esc(formatDate(incident.acknowledged_at))}.`
+          : "Not acknowledged."}</p>
+        ${acknowledged ? `<p><strong>API Guard callback:</strong> ${esc(ackCallbackLabel(incident.ack_callback_status))}</p>` : ""}
+        <small>Exposure reported ${esc(formatDate(incident.occurred_at))}</small>
+        ${acknowledged ? "" : `<button class="button danger" type="button" data-incident-ack="${esc(incident.event_id)}">Acknowledge after handling</button>`}
       </article>
     `;
   }).join("");
@@ -441,12 +565,18 @@ function renderPresence() {
   } else if (!state.workers.length) {
     setEmpty(workers, "No agent heartbeats yet.");
   } else {
-    workers.innerHTML = state.workers.map((worker) => {
+    const roster = state.workers.filter((worker) => worker.is_roster_member !== false);
+    const legacy = state.workers.filter((worker) => worker.is_roster_member === false);
+    workers.innerHTML = roster.map((worker) => {
       const offline = worker.presence_status === "offline" || worker.status === "offline";
       const run = (state.runs || []).find((item) => item.id === worker.current_run_id);
-      const detail = run?.phase || (worker.current_run_id ? "On a run" : offline ? "Offline" : "Idle");
-      return `<article class="channel ${offline ? "away" : "active"}"><span class="channel-dot" aria-hidden="true"></span><strong>${esc(worker.id)}</strong><small>${esc(detail)}</small></article>`;
-    }).join("");
+      const detail = !worker.has_record || worker.has_canonical_identity === false
+        ? worker.enrollment_status
+        : run?.phase || (worker.current_run_id ? "On a run" : offline ? "Offline" : "Idle");
+      return `<article class="channel ${offline ? "away" : "active"}"><span class="channel-dot" aria-hidden="true"></span><strong>${esc(worker.display_name || worker.id)}</strong><small>${esc(worker.id)} · ${esc(detail)}</small></article>`;
+    }).join("") + (legacy.length
+      ? `<p class="channel-legacy-note">Unregistered heartbeat IDs retained separately: ${legacy.map((worker) => esc(worker.id)).join(", ")}</p>`
+      : "");
   }
 }
 
@@ -506,7 +636,7 @@ function renderTasks() {
           <span class="task-meta">
             <span class="badge priority-${esc(task.priority)}">${esc(task.priority || "normal")}</span>
             <span>${esc(memberName(task.assignee_user_id))}</span>
-            ${task.assignee_worker_id ? `<span>Worker ${esc(task.assignee_worker_id)}</span>` : ""}
+            ${task.assignee_worker_id ? `<span>Worker ${esc(workerDisplayLabel(task.assignee_worker_id))}</span>` : ""}
             ${task.due_at ? `<time datetime="${esc(task.due_at)}">Due ${esc(formatDate(task.due_at))}</time>` : ""}
           </span>
           ${task.description ? `<span class="task-description">${esc(task.description)}</span>` : ""}
@@ -556,7 +686,7 @@ function renderAgentTasks() {
           <span class="task-title">${esc(task.title)}</span>
           <span class="task-meta">
             <span class="badge priority-${esc(task.priority)}">${esc(task.priority || "normal")}</span>
-            <span>Worker ${esc(task.assignee_worker_id)}</span>
+            <span>Worker ${esc(workerDisplayLabel(task.assignee_worker_id))}</span>
             <span>${esc(memberName(task.assignee_user_id))}</span>
             ${run ? `<span>${esc(run.phase || run.status)}</span>` : ""}
           </span>
@@ -618,9 +748,17 @@ function populateAssignments() {
     .filter((user) => user.active !== false)
     .map((user) => `<option value="${esc(user.id)}">${esc(user.display_name || user.login)}</option>`)
     .join("");
-  workerSelect.innerHTML = '<option value="">Unassigned</option>' + (state.workers || [])
-    .map((worker) => `<option value="${esc(worker.id)}">${esc(worker.id)} · ${esc(worker.role || "worker")}</option>`)
-    .join("");
+  const assignableWorkers = (state.workers || []).filter((worker) =>
+    worker.is_roster_member !== false && worker.assignable !== false
+  );
+  const workerOptions = assignableWorkers
+    .map((worker) => `<option value="${esc(worker.id)}">${esc(worker.display_name || worker.id)} (${esc(worker.id)}) · ${esc(worker.role || "worker")}</option>`);
+  if (oldWorker && !assignableWorkers.some((worker) => worker.id === oldWorker)) {
+    workerOptions.unshift(
+      `<option value="${esc(oldWorker)}">Existing legacy assignment · ${esc(workerDisplayLabel(oldWorker))}</option>`,
+    );
+  }
+  workerSelect.innerHTML = '<option value="">Unassigned</option>' + workerOptions.join("");
   userSelect.value = oldUser;
   workerSelect.value = oldWorker;
 }
@@ -740,25 +878,46 @@ function renderWorkers() {
     setEmpty(target, "No worker heartbeats have been recorded.");
     return;
   }
-  target.innerHTML = state.workers.map((worker) => {
+  const roster = state.workers.filter((worker) => worker.is_roster_member !== false);
+  const legacy = state.workers.filter((worker) => worker.is_roster_member === false);
+  const cards = roster.map((worker) => {
     const readiness = admissionInfo(worker);
+    const heartbeat = !worker.has_record
+      ? (worker.ansible_managed ? "Awaiting first heartbeat" : "Not provisioned")
+      : worker.has_canonical_identity === false
+        ? "Legacy worker identity"
+        : `Heartbeat · ${worker.status || "unknown"}`;
+    const legacyIds = Array.isArray(worker.legacy_worker_ids) && worker.legacy_worker_ids.length
+      ? `<small>Other stored IDs: ${esc(worker.legacy_worker_ids.join(", "))}</small>`
+      : "";
+    const legacyOnline = Array.isArray(worker.legacy_online_worker_ids) && worker.legacy_online_worker_ids.length
+      ? `<p class="notice">Legacy worker ID(s) still heartbeating: ${esc(worker.legacy_online_worker_ids.join(", "))}. Migrate them before retiring the old process.</p>`
+      : "";
     return `
       <article class="worker-card">
         <header>
-          <div><p class="eyebrow">${esc(worker.role || "WORKER")}</p><h3>${esc(worker.id)}</h3></div>
-          <span class="badge status-${esc(worker.status || "unknown")}">Heartbeat · ${esc(worker.status || "unknown")}</span>
+          <div><p class="eyebrow">${esc(worker.role || "WORKER")}</p><h3>${esc(worker.display_name || worker.id)}</h3><small>${esc(worker.id)}</small></div>
+          <span class="badge status-${esc(worker.status || "unknown")}">${esc(heartbeat)}</span>
         </header>
         <dl>
           <div><dt>Host</dt><dd>${esc(worker.hostname || "—")}</dd></div>
+          <div><dt>Tailnet IP</dt><dd>${esc(worker.tailnet_ip || "—")}</dd></div>
+          <div><dt>Enrollment</dt><dd>${esc(worker.enrollment_status || "Heartbeat record")}</dd></div>
           <div><dt>Last heartbeat</dt><dd>${esc(formatDate(worker.last_seen_at))}</dd></div>
           <div><dt>Current run</dt><dd>${esc(worker.current_run_id || "None")}</dd></div>
           <div><dt>Capabilities</dt><dd>${esc(Array.isArray(worker.capabilities) ? worker.capabilities.join(", ") : "—")}</dd></div>
           <div><dt>Run-admission readiness</dt><dd><span class="badge readiness-${readiness.kind}">${esc(readiness.label)}</span></dd></div>
         </dl>
-        <p class="worker-footnote">Heartbeat status is presence only. Readiness is shown only when reported by the backend.</p>
+        ${legacyIds}
+        ${legacyOnline}
+        <p class="worker-footnote">Heartbeat is presence only; it does not prove model access or host-wide security.</p>
       </article>
     `;
   }).join("");
+  const legacySection = legacy.length
+    ? `<details class="legacy-worker-records"><summary>Unregistered/legacy heartbeat IDs (${legacy.length})</summary>${legacy.map((worker) => `<p>${esc(worker.display_name || worker.id)} · ${esc(worker.hostname || "unknown host")} · ${esc(worker.status || "unknown")}</p>`).join("")}</details>`
+    : "";
+  target.innerHTML = cards + legacySection;
 }
 
 function runStatus(run) {
@@ -795,7 +954,7 @@ function renderRuns() {
         <td>${esc(run.request_summary || "No summary provided")}${run.script_name ? `<small class="subline">${esc(run.script_name)}</small>` : ""}</td>
         <td>${esc(source)}${run.operation ? `<small class="subline">${esc(run.operation)}</small>` : ""}</td>
         <td>${esc(run.phase || "—")}${Array.isArray(run.chatter) && run.chatter.length ? `<ol class="chatter">${run.chatter.map((line) => `<li>${esc(line)}</li>`).join("")}</ol>` : ""}${run.bounce ? `<small class="subline">Bounce: ${esc(run.bounce)}</small>` : ""}${run.result_summary ? `<small class="subline">${esc(run.result_summary)}</small>` : ""}</td>
-        <td>${esc(run.worker_role || "—")}${run.worker_id ? `<small class="subline">${esc(run.worker_id)}</small>` : ""}</td>
+        <td>${esc(run.worker_role || "—")}${run.worker_id ? `<small class="subline">${esc(workerDisplayLabel(run.worker_id))}</small>` : ""}</td>
         <td>${typeof run.duration_seconds === "number" ? esc(formatWorkerDuration(run.duration_seconds)) : "—"}</td>
         <td><span class="badge run-${esc(status.kind)}">${esc(status.label)}</span></td>
         <td>${esc(run.error_summary || "—")}</td>
@@ -945,6 +1104,24 @@ function renderWorkSessions() {
         }
         if (isOwner && entry.source === "timer" && ["running", "stopped", "rejected"].includes(entry.status)) {
           actions.push(`<button class="button danger" type="button" data-time-action="discard" data-session-id="${esc(entry.id)}">${entry.status === "rejected" ? "Delete" : "Discard"}</button>`);
+          actions.push(`<button class="button ghost" type="button" data-time-action="edit" data-session-id="${esc(entry.id)}">Edit times</button>`);
+        }
+        if (String(state.editingSessionId) === String(entry.id) && isOwner) {
+          return `
+            <tr>
+              <td colspan="6">
+                <form class="time-edit-form" data-session-id="${esc(entry.id)}">
+                  <label>Started<input type="datetime-local" name="started-at" required value="${esc(toLocalInput(entry.started_at))}"></label>
+                  <label>Stopped<input type="datetime-local" name="ended-at" ${entry.status === "running" ? "" : "required"} value="${esc(toLocalInput(entry.ended_at))}"></label>
+                  <div class="time-actions">
+                    <button class="button primary" type="submit">Save times</button>
+                    <button class="button ghost" type="button" data-time-action="cancel-edit" data-session-id="${esc(entry.id)}">Cancel</button>
+                  </div>
+                </form>
+                <p class="muted">Set the stop time if the timer was left running. Submitted and approved entries stay locked.</p>
+              </td>
+            </tr>
+          `;
         }
         return `
           <tr>
@@ -1013,6 +1190,15 @@ async function handleWorkSessionAction(button) {
     if (!window.confirm(`${verb} this reported-time entry? It will no longer count as reported time.`)) return;
   } else if (action === "stop" && (!isOwner || entry.status !== "running")) {
     return;
+  } else if (action === "edit") {
+    if (!isOwner || entry.source !== "timer" || !["running", "stopped", "rejected"].includes(entry.status)) return;
+    state.editingSessionId = sessionId;
+    renderWorkSessions();
+    return;
+  } else if (action === "cancel-edit") {
+    state.editingSessionId = null;
+    renderWorkSessions();
+    return;
   } else if (action === "submit" && (!isOwner || !["stopped", "rejected"].includes(entry.status))) {
     return;
   } else if (["approve", "reject"].includes(action) && (isOwner || entry.status !== "submitted")) {
@@ -1053,6 +1239,39 @@ async function handleWorkSessionAction(button) {
   }
 }
 
+async function saveEditedTimer(form) {
+  const sessionId = form.dataset.sessionId;
+  const entry = (state.workSessions || []).find((item) => String(item.id) === String(sessionId));
+  if (!entry) return;
+  const started = fromLocalInput(form.querySelector("[name=started-at]")?.value);
+  const ended = fromLocalInput(form.querySelector("[name=ended-at]")?.value);
+  if (!started) {
+    showToast("Start time is required.");
+    return;
+  }
+  if (entry.status !== "running" && !ended) {
+    showToast("Stopped time needs an end time.");
+    return;
+  }
+  const saveButton = form.querySelector("button[type=submit]");
+  if (saveButton) saveButton.disabled = true;
+  try {
+    const body = { started_at: started };
+    if (ended) body.ended_at = ended;
+    const result = await api(`/v1/work-sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    state.editingSessionId = null;
+    showToast("Reported time updated", result?.undo_id);
+    state.workSessionsError = null;
+    await refreshAll();
+  } catch (error) {
+    if (!handleAuthError(error)) showToast(error.message);
+  } finally {
+    if (saveButton) saveButton.disabled = false;
+  }
+}
 
 function renderIdentityMappings() {
   const panel = $("identity-admin");
@@ -1282,6 +1501,12 @@ $("work-sessions").addEventListener("click", (event) => {
   const button = event.target.closest("[data-time-action]");
   if (button) handleWorkSessionAction(button);
 });
+$("work-sessions").addEventListener("submit", (event) => {
+  const form = event.target.closest(".time-edit-form");
+  if (!form) return;
+  event.preventDefault();
+  saveEditedTimer(form);
+});
 $("task-status-filter").addEventListener("change", () => {
   state.tasks = null;
   state.tasksError = null;
@@ -1297,6 +1522,23 @@ $("identity-admin").addEventListener("click", (event) => {
   }
   const deleteButton = event.target.closest("[data-delete-mapping]");
   if (deleteButton) deleteIdentityMapping(deleteButton);
+});
+async function acknowledgeIncident(eventId, button) {
+  if (!window.confirm("Confirm that you have reviewed and handled this exposure before recording a human acknowledgment?")) return;
+  button.disabled = true;
+  try {
+    await api(`/v1/api-guard/incidents/${encodeURIComponent(eventId)}/ack`, { method: "POST" });
+    showToast("Incident acknowledgment recorded");
+    await refreshAll();
+  } catch (error) {
+    if (!handleAuthError(error)) showToast("Incident acknowledgment could not be recorded.");
+  } finally {
+    button.disabled = false;
+  }
+}
+document.querySelector("#api-guard-incident-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-incident-ack]");
+  if (button) acknowledgeIncident(button.dataset.incidentAck, button);
 });
 $("people-channels").addEventListener("change", (event) => {
   const select = event.target.closest("[data-access-user]");
