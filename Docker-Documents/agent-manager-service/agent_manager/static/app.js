@@ -83,8 +83,7 @@ function workerDisplayLabel(workerId) {
   );
   if (!worker) return workerId;
   const name = worker.display_name || worker.id;
-  if (workerId !== worker.id) return `${name} (legacy ID ${workerId})`;
-  return name === workerId ? name : `${name} (${worker.id})`;
+  return name === worker.id ? name : `${name} (${worker.id})`;
 }
 
 function utcDateValue(date) {
@@ -565,18 +564,14 @@ function renderPresence() {
   } else if (!state.workers.length) {
     setEmpty(workers, "No agent heartbeats yet.");
   } else {
-    const roster = state.workers.filter((worker) => worker.is_roster_member !== false);
-    const legacy = state.workers.filter((worker) => worker.is_roster_member === false);
-    workers.innerHTML = roster.map((worker) => {
+    workers.innerHTML = state.workers.map((worker) => {
       const offline = worker.presence_status === "offline" || worker.status === "offline";
       const run = (state.runs || []).find((item) => item.id === worker.current_run_id);
       const detail = !worker.has_record || worker.has_canonical_identity === false
         ? worker.enrollment_status
         : run?.phase || (worker.current_run_id ? "On a run" : offline ? "Offline" : "Idle");
       return `<article class="channel ${offline ? "away" : "active"}"><span class="channel-dot" aria-hidden="true"></span><strong>${esc(worker.display_name || worker.id)}</strong><small>${esc(worker.id)} · ${esc(detail)}</small></article>`;
-    }).join("") + (legacy.length
-      ? `<p class="channel-legacy-note">Unregistered heartbeat IDs retained separately: ${legacy.map((worker) => esc(worker.id)).join(", ")}</p>`
-      : "");
+    }).join("");
   }
 }
 
@@ -878,21 +873,13 @@ function renderWorkers() {
     setEmpty(target, "No worker heartbeats have been recorded.");
     return;
   }
-  const roster = state.workers.filter((worker) => worker.is_roster_member !== false);
-  const legacy = state.workers.filter((worker) => worker.is_roster_member === false);
-  const cards = roster.map((worker) => {
+  const cards = state.workers.map((worker) => {
     const readiness = admissionInfo(worker);
     const heartbeat = !worker.has_record
       ? (worker.ansible_managed ? "Awaiting first heartbeat" : "Not provisioned")
       : worker.has_canonical_identity === false
         ? "Legacy worker identity"
         : `Heartbeat · ${worker.status || "unknown"}`;
-    const legacyIds = Array.isArray(worker.legacy_worker_ids) && worker.legacy_worker_ids.length
-      ? `<small>Other stored IDs: ${esc(worker.legacy_worker_ids.join(", "))}</small>`
-      : "";
-    const legacyOnline = Array.isArray(worker.legacy_online_worker_ids) && worker.legacy_online_worker_ids.length
-      ? `<p class="notice">Legacy worker ID(s) still heartbeating: ${esc(worker.legacy_online_worker_ids.join(", "))}. Migrate them before retiring the old process.</p>`
-      : "";
     return `
       <article class="worker-card">
         <header>
@@ -908,16 +895,11 @@ function renderWorkers() {
           <div><dt>Capabilities</dt><dd>${esc(Array.isArray(worker.capabilities) ? worker.capabilities.join(", ") : "—")}</dd></div>
           <div><dt>Run-admission readiness</dt><dd><span class="badge readiness-${readiness.kind}">${esc(readiness.label)}</span></dd></div>
         </dl>
-        ${legacyIds}
-        ${legacyOnline}
         <p class="worker-footnote">Heartbeat is presence only; it does not prove model access or host-wide security.</p>
       </article>
     `;
   }).join("");
-  const legacySection = legacy.length
-    ? `<details class="legacy-worker-records"><summary>Unregistered/legacy heartbeat IDs (${legacy.length})</summary>${legacy.map((worker) => `<p>${esc(worker.display_name || worker.id)} · ${esc(worker.hostname || "unknown host")} · ${esc(worker.status || "unknown")}</p>`).join("")}</details>`
-    : "";
-  target.innerHTML = cards + legacySection;
+  target.innerHTML = cards;
 }
 
 function runStatus(run) {

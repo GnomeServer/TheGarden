@@ -52,7 +52,7 @@ CANONICAL_WORKERS: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "worker-02", "display_name": "Inkii", "hostname": "inkii",
-        "tailnet_ip": "100.98.125.127", "aliases": ("inkii", "worker-1", "worker-2"),
+        "tailnet_ip": "100.98.125.127", "aliases": ("inkii",),
         "ansible_managed": True,
     },
     {
@@ -272,6 +272,7 @@ async def canonical_worker_out(
             "hostname": record.hostname or spec["hostname"],
             "tailnet_ip": spec["tailnet_ip"],
             "is_roster_member": True,
+            "has_record": True,
             "has_canonical_identity": canonical_record is not None,
             "assignable": canonical_record is not None,
             "ansible_managed": spec["ansible_managed"],
@@ -966,12 +967,9 @@ async def list_workers(
     del user
     workers = (await session.execute(select(WorkerRecord).order_by(WorkerRecord.id))).scalars().all()
     grouped: dict[str, list[WorkerRecord]] = {spec["id"]: [] for spec in CANONICAL_WORKERS}
-    unregistered: list[WorkerRecord] = []
     for worker in workers:
         worker_id = canonical_worker_id(worker)
-        if worker_id is None:
-            unregistered.append(worker)
-        else:
+        if worker_id is not None:
             grouped[worker_id].append(worker)
     connection = getattr(request.app.state, "nats", None)
     if (
@@ -986,27 +984,7 @@ async def list_workers(
             for spec in CANONICAL_WORKERS
         )
     )
-    legacy = []
-    for worker in unregistered:
-        item = worker_out(worker)
-        item.update(
-            {
-                "display_name": f"Unregistered: {worker.id}",
-                "is_roster_member": False,
-                "has_record": True,
-                "has_canonical_identity": False,
-                "assignable": False,
-                "ansible_managed": False,
-                "enrollment_status": "Unregistered legacy heartbeat",
-                "reported_worker_ids": [worker.id],
-                "legacy_worker_ids": [],
-                "legacy_online_worker_ids": [],
-                "admission_status": "unavailable",
-                "admission_source": "unregistered",
-            }
-        )
-        legacy.append(item)
-    return [*canonical, *legacy]
+    return canonical
 
 
 def safe_run_label(value: Any, allowed: set[str]) -> str | None:
