@@ -35,7 +35,7 @@
 
     <main>
       <section id="view-work" class="view active" aria-labelledby="work-title">
-        <header class="page-heading"><div><p class="eyebrow">HUMAN WORK</p><h1 id="work-title">TODO board</h1><p class="muted">Editable tasks and self-reported time for Donatello, Raphael, Naruto, Inkii, and the rest of the team.</p></div><button id="new-task" class="button primary" type="button">＋ New task</button></header>
+        <header class="page-heading"><div><p class="eyebrow">HUMAN WORK</p><h1 id="work-title">TODO board</h1><p class="muted">Editable tasks and self-reported time for Donatello, Raphael, Naruto, Inkii, and the rest of the team.</p></div></header>
         <section class="content-section" aria-labelledby="reported-time-title">
           <div class="section-heading"><div><p class="eyebrow">OPTIONAL SELF-REPORT</p><h2 id="reported-time-title">Reported time</h2></div><div class="date-filters" aria-label="Filter reported-time entries"><label for="reported-time-from">From (UTC)</label><input id="reported-time-from" type="date"><label for="reported-time-to">To (UTC)</label><input id="reported-time-to" type="date"><button id="load-reported-time" class="button secondary" type="button">Update</button></div></div>
           <p class="section-note">Optional self-reported human time. Filter by UTC start date; leave dates blank to show all entries. Running timers stay visible regardless of the selected range. If a timer was left running, edit the start and stop times before submitting. Submitted and approved entries stay locked.</p>
@@ -53,7 +53,7 @@
         <div id="people-channels" class="team-widget" aria-label="People" aria-live="polite"><p class="loading">Loading people…</p></div>
         <section class="work-summary" aria-label="Team work summary"><div id="summary" class="metric-grid" aria-live="polite"><p class="loading">Loading team summary…</p></div></section>
         <section class="content-section" aria-labelledby="tasks-title">
-          <div class="section-heading"><div><p class="eyebrow">SHARED BOARD</p><h2 id="tasks-title">Problems and tasks</h2></div><div class="filters"><label class="visually-hidden" for="task-status-filter">Filter tasks by status</label><select id="task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select></div></div>
+          <div class="section-heading"><div><p class="eyebrow">SHARED BOARD</p><h2 id="tasks-title">Problems and tasks</h2></div><div class="filters"><label class="visually-hidden" for="task-status-filter">Filter tasks by status</label><select id="task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select><button id="new-task" class="button primary" type="button">＋ New task</button></div></div>
           <p class="section-note">Team members can create, edit, reassign, and move these tasks. Assign a worker to send a task to the agent board.</p>
           <p class="notice assignment-note">This board is manual. It does not start an agent run by itself.</p>
           <div id="task-board" class="task-board" aria-live="polite"><p class="loading">Loading tasks…</p></div>
