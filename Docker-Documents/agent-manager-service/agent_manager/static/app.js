@@ -21,6 +21,7 @@ const state = {
   editingSessionId: null,
   reportedTimeFrom: "",
   reportedTimeTo: "",
+  reportedTimeDefaultDay: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -136,6 +137,7 @@ function initTheme() {
 }
 
 initTheme();
+initializeReportedTimeDateDefaults();
 
 async function api(path, options = {}) {
   const method = (options.method || "GET").toUpperCase();
@@ -264,6 +266,26 @@ function taskQuery() {
   return `/v1/tasks${value ? `?${value}` : ""}`;
 }
 
+function initializeReportedTimeDateDefaults() {
+  const today = utcDateValue(new Date());
+  $("reported-time-from").value = today;
+  $("reported-time-to").value = today;
+  state.reportedTimeFrom = today;
+  state.reportedTimeTo = today;
+  state.reportedTimeDefaultDay = today;
+}
+
+function updateReportedTimeDateDefault() {
+  const previousDefault = state.reportedTimeDefaultDay;
+  const today = utcDateValue(new Date());
+  if (!previousDefault || today === previousDefault) return;
+  if (
+    $("reported-time-from").value !== previousDefault
+    || $("reported-time-to").value !== previousDefault
+  ) return;
+  initializeReportedTimeDateDefaults();
+}
+
 function workSessionsQuery() {
   const query = new URLSearchParams({ limit: "500" });
   if (state.reportedTimeFrom) query.set("from", state.reportedTimeFrom);
@@ -273,6 +295,7 @@ function workSessionsQuery() {
 
 async function refreshAll() {
   if (!state.session) return;
+  updateReportedTimeDateDefault();
   const dashboardFrom = $("dashboard-time-from").value;
   const dashboardTo = $("dashboard-time-to").value;
   const results = await Promise.allSettled([
