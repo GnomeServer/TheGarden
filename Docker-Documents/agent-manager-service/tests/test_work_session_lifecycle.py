@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +17,7 @@ from agent_manager.tracking import (
     decide_work_session,
     discard_work_session,
     edit_work_session,
+    list_work_sessions,
     start_work_session,
     stop_work_session,
     submit_work_session,
@@ -489,6 +490,48 @@ class WorkSessionEditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 403)
         self.assertEqual(record.status, "running")
         self.assertEqual(session.commits, 0)
+
+class WorkSessionListFilterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_date_range_is_inclusive_in_utc_and_running_timers_remain_visible(self) -> None:
+        session = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(all=lambda: []),
+                )
+            )
+        )
+
+        await list_work_sessions(
+            from_day=date(2026, 10, 15),
+            to_day=date(2026, 10, 16),
+            session_status=None,
+            limit=500,
+            actor=make_actor(role="admin"),
+            session=session,
+        )
+
+        query = session.execute.await_args.args[0]
+        sql = str(query.compile(compile_kwargs={"literal_binds": True}))
+        self.assertIn("started_at >= '2026-10-15 00:00:00+00:00'", sql)
+        self.assertIn("started_at < '2026-10-17 00:00:00+00:00'", sql)
+        self.assertIn("status = 'running'", sql)
+        self.assertIn("LIMIT 500", sql)
+
+    async def test_reversed_date_range_is_rejected_before_query(self) -> None:
+        session = SimpleNamespace(execute=AsyncMock())
+
+        with self.assertRaises(HTTPException) as raised:
+            await list_work_sessions(
+                from_day=date(2026, 10, 17),
+                to_day=date(2026, 10, 16),
+                session_status=None,
+                limit=500,
+                actor=make_actor(role="admin"),
+                session=session,
+            )
+
+        self.assertEqual(raised.exception.status_code, 422)
+        session.execute.assert_not_awaited()
 
 
 if __name__ == "__main__":

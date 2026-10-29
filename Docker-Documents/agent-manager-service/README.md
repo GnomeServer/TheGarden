@@ -118,6 +118,14 @@ runtime. Dashboard time counts one minute per foreground pulse while the page
 is visible and recently active; it excludes SSH sessions and is not verified
 work time.
 
+The Work page's self-reported time table can be filtered by inclusive UTC
+start-date bounds. Leave either bound blank for an open-ended range; leave both
+blank to show the latest 500 entries. Running timers remain visible even when
+their start date falls outside the selected range, so they remain available to
+stop, edit, or discard. The list endpoint accepts `from`, `to`, and `limit`;
+date filtering does not change the existing edit or approval rules.
+
+
 Queued and running runs are reconciled after
 `WORKER_RUN_STALE_AFTER_SECONDS` (default 1800). A running run is retained if
 a fresh worker heartbeat still claims it. Otherwise Agent Manager marks it

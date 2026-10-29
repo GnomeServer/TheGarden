@@ -17,7 +17,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import desc, func, select
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1127,6 +1127,8 @@ async def decide_work_session(
 async def list_work_sessions(
     user_id: str | None = None,
     session_status: str | None = Query(default=None, alias="status"),
+    from_day: date | None = Query(default=None, alias="from"),
+    to_day: date | None = Query(default=None, alias="to"),
     limit: int = Query(default=100, ge=1, le=500),
     actor: UserRecord = Depends(session_user),
     session: AsyncSession = Depends(get_session),
@@ -1140,6 +1142,25 @@ async def list_work_sessions(
         if session_status not in WORK_SESSION_STATUSES:
             raise HTTPException(status_code=422, detail="Invalid work-session status")
         query = query.where(WorkSessionRecord.status == session_status)
+    if from_day and to_day and to_day < from_day:
+        raise HTTPException(status_code=422, detail="Work-session date range must be ordered")
+    date_filters = []
+    if from_day:
+        date_filters.append(
+            WorkSessionRecord.started_at >= datetime.combine(from_day, datetime.min.time(), tzinfo=timezone.utc)
+        )
+    if to_day:
+        if to_day == date.max:
+            date_filters.append(
+                WorkSessionRecord.started_at <= datetime.max.replace(tzinfo=timezone.utc)
+            )
+        else:
+            date_filters.append(
+                WorkSessionRecord.started_at
+                < datetime.combine(to_day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+            )
+    if date_filters:
+        query = query.where(or_(and_(*date_filters), WorkSessionRecord.status == "running"))
     records = (
         await session.execute(query.order_by(desc(WorkSessionRecord.started_at)).limit(limit))
     ).scalars().all()

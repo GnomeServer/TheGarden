@@ -19,6 +19,8 @@ const state = {
   lastInteraction: 0,
   undoId: null,
   editingSessionId: null,
+  reportedTimeFrom: "",
+  reportedTimeTo: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -262,6 +264,13 @@ function taskQuery() {
   return `/v1/tasks${value ? `?${value}` : ""}`;
 }
 
+function workSessionsQuery() {
+  const query = new URLSearchParams({ limit: "500" });
+  if (state.reportedTimeFrom) query.set("from", state.reportedTimeFrom);
+  if (state.reportedTimeTo) query.set("to", state.reportedTimeTo);
+  return `/v1/work-sessions?${query.toString()}`;
+}
+
 async function refreshAll() {
   if (!state.session) return;
   const dashboardFrom = $("dashboard-time-from").value;
@@ -276,7 +285,7 @@ async function refreshAll() {
     api(`/v1/activity/estimates?from=${encodeURIComponent(dashboardFrom)}&to=${encodeURIComponent(dashboardTo)}`),
     api("/v1/nodes/health"),
     api("/v1/access-events?limit=100"),
-    api("/v1/work-sessions?limit=100"),
+    api(workSessionsQuery()),
     api("/v1/people/summary"),
   ]);
 
@@ -1072,7 +1081,8 @@ function renderWorkSessions() {
       : '<p class="muted">No reported-time timer is running.</p>';
     startButton.disabled = Boolean(ownRunning);
     if (!state.workSessions.length) {
-      setEmpty(target, "No reported-time entries yet.");
+      const hasDateFilter = Boolean(state.reportedTimeFrom || state.reportedTimeTo);
+      setEmpty(target, hasDateFilter ? "No reported-time entries match this UTC date range." : "No reported-time entries yet.");
     } else {
       const currentUserId = String(state.session.user.id);
       const rows = state.workSessions.map((entry) => {
@@ -1408,6 +1418,30 @@ async function reloadDashboardActivity() {
   renderDashboardActivity();
 }
 
+async function reloadReportedTime() {
+  const from = $("reported-time-from").value;
+  const to = $("reported-time-to").value;
+  if (from && to && from > to) {
+    setError($("reported-time-filter-error"), "The From date must be on or before the To date.");
+    return;
+  }
+
+  $("reported-time-filter-error").replaceChildren();
+  state.reportedTimeFrom = from;
+  state.reportedTimeTo = to;
+  state.editingSessionId = null;
+  state.workSessions = null;
+  state.workSessionsError = null;
+  renderWorkSessions();
+  try {
+    state.workSessions = await api(workSessionsQuery());
+  } catch (error) {
+    state.workSessionsError = error;
+    if (handleAuthError(error)) return;
+  }
+  renderWorkSessions();
+}
+
 function switchView(view, updateHash = true) {
   const selected = ["work", "operations"].includes(view) ? view : "work";
   document.querySelectorAll(".area-tab").forEach((button) => {
@@ -1496,6 +1530,7 @@ $("task-status-filter").addEventListener("change", () => {
   refreshAll().catch(() => {});
 });
  $("load-dashboard-time").addEventListener("click", reloadDashboardActivity);
+$("load-reported-time").addEventListener("click", reloadReportedTime);
 $("identity-admin").addEventListener("click", (event) => {
   const mapButton = event.target.closest("[data-map-identity]");
   if (mapButton) {
