@@ -316,7 +316,7 @@ main {
 .page-heading .muted {
   margin: 0;
 }
-.page-heading>.button {
+.page-heading>.button,.filters>#new-task {
   flex: none;
 }
 .work-summary {
