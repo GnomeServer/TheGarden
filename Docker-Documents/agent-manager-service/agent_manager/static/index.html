@@ -6,7 +6,7 @@
   <meta name="theme-color" id="theme-color" content="#12151c">
   <title>TheGarden — Team dashboard</title>
   <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.5.15">
-  <script src="/dashboard/static/app.js?v=1.5.17" defer></script>
+  <script src="/dashboard/static/app.js?v=1.5.18" defer></script>
 </head>
 <body>
   <section id="login" class="login-shell hidden" aria-labelledby="login-title">
@@ -45,8 +45,9 @@
           <div id="task-board" class="task-board" aria-live="polite"><p class="loading">Loading tasks…</p></div>
         </section>
         <section class="content-section" aria-labelledby="reported-time-title">
-          <div class="section-heading"><div><p class="eyebrow">OPTIONAL SELF-REPORT</p><h2 id="reported-time-title">Reported time</h2></div></div>
-          <p class="section-note">Optional self-reported human time. If a timer was left running, edit the start and stop times before submitting. Submitted and approved entries stay locked.</p>
+          <div class="section-heading"><div><p class="eyebrow">OPTIONAL SELF-REPORT</p><h2 id="reported-time-title">Reported time</h2></div><div class="date-filters" aria-label="Filter reported-time entries"><label for="reported-time-from">From (UTC)</label><input id="reported-time-from" type="date"><label for="reported-time-to">To (UTC)</label><input id="reported-time-to" type="date"><button id="load-reported-time" class="button secondary" type="button">Filter entries</button></div></div>
+          <p class="section-note">Optional self-reported human time. Filter by UTC start date; leave dates blank to show all entries. Running timers stay visible regardless of the selected range. If a timer was left running, edit the start and stop times before submitting. Submitted and approved entries stay locked.</p>
+          <p id="reported-time-filter-error" class="error date-range-error" role="alert" aria-live="polite"></p>
           <article class="panel timer-panel">
             <div id="timer-current" class="timer-current" aria-live="polite"><p class="loading">Loading reported time…</p></div>
             <form id="timer-form" class="timer-form">
