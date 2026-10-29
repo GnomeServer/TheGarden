@@ -31,7 +31,7 @@ from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 
 NATS_URL = os.getenv("NATS_URL", "nats://127.0.0.1:4222")
-WORKER_ID = os.getenv("WORKER_ID", "worker-1")
+WORKER_ID = os.getenv("WORKER_ID", "worker-01")
 WORKER_ROLE = os.getenv("WORKER_ROLE", "coder")
 WORKSPACE = Path(
     os.getenv("AGENT_WORKSPACE", str(Path.home() / "agent-workspace"))

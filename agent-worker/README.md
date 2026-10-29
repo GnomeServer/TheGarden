@@ -206,6 +206,9 @@ the repository.
 
 Each worker needs a unique `WORKER_ID`. Workers with the same capability use
 the same `WORKER_ROLE` and `WORKER_CONSUMER` values:
+The runtime fallback is `worker-01` for single-worker local development only.
+Every deployed worker must set its assigned canonical inventory ID explicitly;
+do not rely on the fallback on a host that is not worker-01.
 
 ```bash
 export NATS_URL='nats://100.94.49.45:4222'
