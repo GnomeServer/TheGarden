@@ -82,6 +82,11 @@ top-level `forgejo_repository`. The repository and base ref are context only;
 the worker image does not clone or push them. Do not set `metadata.worker_id` on
 the shared consumer.
 
+The worker normalizes those counts into an explicit `crew_plan` object in
+`/mission.json`, using `metadata.crew.size` first and the direct role counts in
+`metadata.mission` as a compatibility fallback. The OMP image requires this
+explicit plan before starting the mission.
+
 ## Mission OMP image
 
 The NATS queue listener is `worker.py`; it launches the pinned OMP job image.

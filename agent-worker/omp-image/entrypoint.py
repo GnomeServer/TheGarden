@@ -58,14 +58,11 @@ def load_mission() -> dict[str, Any]:
     goal = value.get("goal")
     if not isinstance(goal, str) or not goal.strip():
         failure(mission_id, "Mission is missing a non-empty goal.")
-    crew = value.get("crew")
-    if not isinstance(crew, dict):
-        failure(mission_id, "Mission is missing the sized crew.")
-    counts = crew.get("size")
-    if not isinstance(counts, dict):
-        failure(mission_id, "Mission is missing crew role counts.")
+    crew_plan = value.get("crew_plan")
+    if not isinstance(crew_plan, dict):
+        failure(mission_id, "Mission is missing its crew plan.")
     for role in ("planners", "coders", "reviewers"):
-        count = counts.get(role)
+        count = crew_plan.get(role)
         if type(count) is not int or not 1 <= count <= 5:
             failure(mission_id, f"Mission has an invalid {role} count.")
     return value

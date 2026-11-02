@@ -18,6 +18,42 @@ SPEC.loader.exec_module(worker)
 
 
 
+class MissionCrewPlanTests(unittest.TestCase):
+    def test_uses_flat_mission_plan_when_crew_envelope_is_missing(self) -> None:
+        metadata = {
+            "mission": {"planners": 1, "coders": 2, "reviewers": 1},
+        }
+
+        crew, plan = worker.mission_crew_plan(metadata)
+
+        self.assertEqual(plan, {"planners": 1, "coders": 2, "reviewers": 1})
+        self.assertEqual(crew, {"size": plan})
+
+    def test_prefers_valid_crew_size_and_preserves_crew_metadata(self) -> None:
+        metadata = {
+            "crew": {
+                "size": {
+                    "size": "small",
+                    "planners": 1,
+                    "coders": 1,
+                    "reviewers": 1,
+                },
+                "engine": "worker-omp-image",
+            },
+            "mission": {"planners": 1, "coders": 3, "reviewers": 2},
+        }
+
+        crew, plan = worker.mission_crew_plan(metadata)
+
+        self.assertEqual(plan, {"planners": 1, "coders": 1, "reviewers": 1})
+        self.assertEqual(crew["engine"], "worker-omp-image")
+        self.assertEqual(crew["size"]["size"], "small")
+
+    def test_rejects_an_event_without_a_valid_plan(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing its crew plan"):
+            worker.mission_crew_plan({"crew": {"size": {"coders": 0}}})
+
+
 class DockerModelHostMappingTests(unittest.TestCase):
     def test_maps_caddy_magicdns_for_bridge_containers(self) -> None:
         self.assertEqual(

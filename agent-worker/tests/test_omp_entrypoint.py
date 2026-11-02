@@ -22,6 +22,7 @@ def mission(count: int = 1) -> dict:
         "mission_id": "mission-1",
         "goal": "Create a small calculator app",
         "crew": {"size": {"planners": 1, "coders": count, "reviewers": 1}},
+        "crew_plan": {"planners": 1, "coders": count, "reviewers": 1},
     }
 
 
@@ -32,6 +33,20 @@ class MissionInputTests(unittest.TestCase):
             mission_path.write_text(json.dumps(mission(5)), encoding="utf-8")
             with patch.object(entrypoint, "MISSION_PATH", mission_path):
                 self.assertEqual(entrypoint.load_mission(), mission(5))
+
+
+    def test_rejects_a_mission_without_an_explicit_crew_plan(self) -> None:
+        value = mission()
+        del value["crew_plan"]
+        with tempfile.TemporaryDirectory() as directory:
+            mission_path = Path(directory) / "mission.json"
+            mission_path.write_text(json.dumps(value), encoding="utf-8")
+            with (
+                patch.object(entrypoint, "MISSION_PATH", mission_path),
+                contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                entrypoint.load_mission()
 
     def test_rejects_a_crew_count_outside_the_supported_range(self) -> None:
         for count in (0, 6):

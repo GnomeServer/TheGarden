@@ -68,6 +68,40 @@ _presence = {"status": "idle", "run_id": None}
 ACTIVE_MISSIONS: dict[str, tuple[str, asyncio.Event]] = {}
 CANCEL_POLL_INTERVAL_SECONDS = 1.0
 
+MISSION_CREW_ROLES = ("planners", "coders", "reviewers")
+
+
+def mission_crew_plan(
+    metadata: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Normalize supported event metadata into an explicit crew plan."""
+    crew_value = metadata.get("crew")
+    crew = dict(crew_value) if isinstance(crew_value, dict) else {}
+    size_value = crew.get("size")
+    size = dict(size_value) if isinstance(size_value, dict) else {}
+
+    def valid_plan(value: Any) -> dict[str, int] | None:
+        if not isinstance(value, dict):
+            return None
+        plan = {role: value.get(role) for role in MISSION_CREW_ROLES}
+        if any(
+            type(count) is not int or not 1 <= count <= 5
+            for count in plan.values()
+        ):
+            return None
+        return plan
+
+    plan = valid_plan(size)
+    if plan is None:
+        plan = valid_plan(metadata.get("mission"))
+    if plan is None:
+        raise ValueError("mission event is missing its crew plan")
+
+    crew["size"] = {**size, **plan}
+    return crew, plan
+
+
+
 def docker_model_host_args(base_url: str) -> list[str]:
     """Resolve the Caddy MagicDNS name inside bridge-network containers."""
     if urlsplit(base_url).hostname == CADDY_HOST:
@@ -1081,6 +1115,7 @@ async def run_mission_image(
         return {"status": "failed", "summary": "Mission is missing run_id."}
     if not goal.strip():
         return {"status": "failed", "summary": "Mission is missing its goal."}
+    crew, crew_plan = mission_crew_plan(metadata)
     resume_from_checkpoint = metadata.get("resume_from_checkpoint") is True
     checkpoint_retained = False
 
@@ -1160,7 +1195,6 @@ async def run_mission_image(
             "error": "Set MODEL_CA_FILE to the installed Caddy root certificate.",
         }
 
-    crew = metadata.get("crew") if isinstance(metadata.get("crew"), dict) else {}
     mission = {
         "mission_id": run_id,
         "goal": goal.strip(),
@@ -1168,6 +1202,7 @@ async def run_mission_image(
         "base_ref": event.get("base_ref", "main"),
         "project_name": metadata.get("project_name"),
         "crew": crew,
+        "crew_plan": crew_plan,
         "clarification": metadata.get("clarification"),
         "reviewer_feedback": metadata.get("reviewer_feedback"),
         "reviewer_count_start": 0,
