@@ -1,0 +1,145 @@
+SHORT-LIVED LITELLM KEY — ISOLATED WORKER SMOKE TEST
+
+Purpose
+-------
+Validate one-per-mission LiteLLM virtual-key creation, use, revocation, and server-side expiry on a dedicated test worker. This is not a production deployment procedure.
+
+IMPORTANT: the current checked-in worker uses a persistent MODEL_API_KEY. Do not run the production branch as if it supports short-lived leases. The test requires an owner-provided feature branch/commit that implements the lease client and documented broker configuration. If that code or the isolated test services are not ready, stop before starting the worker.
+
+Safety boundaries
+-----------------
+- Do not add this node to the production Ansible agent_workers group or run playbooks/agent-workers.yml against it.
+- Do not connect it to production NATS. The worker subscribes to AGENT_RUNS / agent.runs.created. A second durable consumer on the production stream can receive its own copies of production jobs; a new durable name is NOT isolation.
+- Use a dedicated test NATS server/stream and a test Manager that publishes only test missions. The test JetStream server must have stream AGENT_RUNS with subject agent.runs.created, because the worker currently uses those names.
+- Use a test LiteLLM instance/database or owner-approved test-only key broker. Never put LITELLM_MASTER_KEY, a production key, or a production worker-api-key on this node.
+- Keep test files in ~/agent-worker-shortkey-test. Do not overwrite ~/agent-worker, worker.env, ~/.config/litellm/worker-api-key, or the production systemd service.
+- Do not enable ALLOW_GENERATED_CODE. Do not paste key values into chat, tickets, shell commands, or logs.
+
+Owner must provide before setup
+-------------------------------
+1. Feature branch or commit implementing per-mission key leases, plus its exact broker environment-variable names and API contract.
+2. Dedicated test NATS URL and credentials; confirm it is not the production NATS host.
+3. Test Manager URL/credentials that publish only to that test NATS stream.
+4. Test key broker URL and a test-only worker identity/credential. The worker credential may request a restricted lease; it must not be a LiteLLM admin/master key.
+5. Test model gateway URL and trusted CA path. Confirm whether it uses an isolated LiteLLM instance or an explicitly approved test-only namespace.
+6. A harmless test mission and the person authorized to inspect/revoke test keys.
+
+Setup commands (on the test worker)
+-----------------------------------
+Set the branch name supplied by the owner. The clone is separate from the production worker directory:
+
+    FEATURE_BRANCH='OWNER_PROVIDED_FEATURE_BRANCH'
+    TEST_DIR="$HOME/agent-worker-shortkey-test"
+    git clone --branch "$FEATURE_BRANCH" --single-branch \
+      git@github.com:GnomeServer/TheGarden.git "$TEST_DIR/src"
+
+Install dependencies in a private test virtual environment and build a unique image tag:
+
+    python3 -m venv "$TEST_DIR/.venv"
+    "$TEST_DIR/.venv/bin/python" -m pip install \
+      -r "$TEST_DIR/src/agent-worker/requirements.txt"
+    IMAGE_TAG="local/omp-worker-shortkey-test:$(git -C "$TEST_DIR/src" rev-parse --short HEAD)"
+    docker build --pull --tag "$IMAGE_TAG" \
+      "$TEST_DIR/src/agent-worker/omp-image"
+
+Print the unique image tag; copy it into the test environment file below:
+
+    printf '%s\n' "$IMAGE_TAG"
+
+Create a test-only environment file. It must not contain MODEL_API_KEY, a worker-api-key, or LiteLLM master credentials. Use only the test endpoints supplied by the owner:
+
+    install -m 0600 /dev/null "$TEST_DIR/worker.env"
+    cat > "$TEST_DIR/worker.env" <<'EOF'
+NATS_URL=nats://TEST_NATS_HOST:4222
+WORKER_ID=worker-shortkey-test
+WORKER_ROLE=coder
+WORKER_CONSUMER=agent-workers-shortkey-test
+AGENT_WORKSPACE=/home/TEST_USER/agent-workspace-shortkey-test
+ALLOW_GENERATED_CODE=0
+MODEL_NAME=luna
+MODEL_BASE_URL=https://TEST_MODEL_GATEWAY/litellm/v1
+MODEL_CA_FILE=/path/to/test/caddy-root.crt
+OMP_WORKER_IMAGE=local/omp-worker-shortkey-test:REPLACE_WITH_BUILD_TAG
+EOF
+
+Edit the placeholders using the owner-provided values. Add only the broker settings documented by the feature branch. Store the worker-to-broker test credential in the documented protected file/secret mechanism, not in shell history. Before starting, have the owner verify the NATS host, Manager URL, model gateway, and broker all identify the test environment.
+
+Run the test worker in the foreground (no systemd installation):
+
+    cd "$TEST_DIR/src/agent-worker"
+    set -a
+    . "$TEST_DIR/worker.env"
+    set +a
+    exec "$TEST_DIR/.venv/bin/python" -u worker.py
+
+Submit the harmless mission through the TEST Manager only. Do not publish test events to production NATS. Stop the foreground worker with Ctrl-C after the run; do not stop or restart any production worker service.
+
+Smoke-test cases
+----------------
+Run these only after the test worker, test Manager, test JetStream stream, test model gateway, and test key broker are verified to be isolated from production. Use the test Manager's submission surface. Keep a record of mission ID, worker ID, key alias/ID, issued expiry, and result. Never record a plaintext key.
+
+TC-00 — Preflight and isolation
+1. Confirm NATS_URL points to the owner-approved test server and that the test stream is AGENT_RUNS with subject agent.runs.created.
+2. Confirm the test Manager readiness endpoint succeeds and that it publishes only to test NATS.
+3. Confirm the test worker is not in the production agent_workers inventory/group and has no production worker-api-key or LiteLLM master key.
+Expected: every endpoint and credential is test-only. If any endpoint is uncertain, stop without starting the worker.
+
+TC-01 — Successful mission and key lease
+1. Submit the owner-provided harmless mission through the TEST Manager.
+2. Observe the test worker receive it and request a per-mission key lease.
+3. Confirm the lease is restricted to luna and has the expected test expiry/limits.
+4. Let the mission complete normally.
+Expected: the model call succeeds, the mission completes, only one lease was created for the mission, and the broker revokes it after container cleanup. Record the key ID and expiry, never the key.
+
+TC-02 — Model and quota scope
+1. With a separate test-only lease, attempt one request to a model not permitted by the lease.
+2. If configured, verify the test budget/rate limit rejects further use after its limit.
+Expected: unauthorized model use is denied and limits apply. Do not test with a production key or spend limit.
+
+TC-03 — Normal revocation
+1. After TC-01 completes, verify through the test broker or LiteLLM test administration view that the key is revoked.
+2. Verify a post-revocation model request is rejected.
+Expected: container deletion is accompanied by server-side key revocation; a removed container alone does not count as success.
+
+TC-04 — Mission failure cleanup
+1. Run a controlled test mission that fails after key issuance (use a feature-branch test hook if available).
+2. Verify the worker's cleanup path runs.
+Expected: the mission fails visibly, the key is revoked, and its secret is not logged or added to an artifact.
+
+TC-05 — Cancellation cleanup
+1. Start a harmless test mission and cancel it through the TEST Manager after the key is issued.
+Expected: the container stops, the mission reports cancellation, and the broker revokes the key.
+
+TC-06 — Timeout cleanup
+1. If the test branch supports a shortened OMP timeout, run a deliberately bounded test that reaches that timeout.
+Expected: the worker kills/removes the test container and revokes the key. Do not wait through the production 660-second limit unless explicitly planned.
+
+TC-07 — Server-side expiry fallback
+1. Ask the test broker to issue a separate disposable test key with a short expiry; do not revoke that one key.
+2. Wait until its expiry plus a small clock-skew allowance, then verify the test gateway rejects it.
+Expected: expiry is enforced by LiteLLM even if worker cleanup never runs. This tests the crash fallback without killing a worker or leaving a mission container running.
+
+TC-08 — Secret persistence and exposure check
+1. After the mission, verify worker.env contains no MODEL_API_KEY and no test virtual-key value.
+2. Verify the per-job secret file/temp directory is gone. Review logs and artifacts using redacted output only; never search by printing the actual key.
+3. Confirm the dashboard displays key ID, model scope, expiry, and revoked/expired state without showing the secret.
+Expected: no plaintext key remains in persistent files, logs, artifacts, shell history, or dashboard output.
+
+TC-09 — Dashboard exposure detection (separate check)
+1. Use only the dashboard owner's approved synthetic canary or test fixture to exercise its exposure detector.
+2. Verify an alert identifies the test source and provides the test key ID or other safe identifier.
+3. Manually revoke the associated test key through the test broker and verify rejection.
+Expected: detection is observable; remediation remains a human action unless a separately reviewed automation exists. Never expose a real production key to test detection.
+
+TC-10 — Production isolation
+1. Confirm the test worker subscribed only to test NATS and the test mission was recorded only in the test Manager.
+2. Check test worker logs for unexpected production endpoint connections.
+Expected: no production mission was delivered, acknowledged, or changed by the pilot. If isolation cannot be proven, stop and do not repeat the test.
+
+Stop conditions
+---------------
+Stop if a test requires production NATS, Manager, LiteLLM master credentials, a production worker key, or an unclear endpoint. If broker revocation fails, leave server-side expiry enabled and notify the owner; do not mark the smoke test passed.
+
+Report back
+------------
+Send the branch/commit, test endpoint names (not credentials), sanitized command outcomes, mission ID, worker ID, key ID/expiry, revoke/expiry result, dashboard visibility result, and any failures. Do not send key material or master credentials.
