@@ -87,6 +87,19 @@ The worker normalizes those counts into an explicit `crew_plan` object in
 `metadata.mission` as a compatibility fallback. The OMP image requires this
 explicit plan before starting the mission.
 
+## Proxmox template smoke test
+
+The smoke script validates the isolated Proxmox VM lifecycle only: clone, start,
+verify running status, and delete the temporary VM and its cloned disks. It does
+not install a worker in the guest or consume a mission.
+
+Follow [`PROXMOX_SMOKE_TEST.md`](PROXMOX_SMOKE_TEST.md) for the tested
+Tailscale/TLS setup, token and ACL requirements, preflight, run commands,
+cleanup, and production-scope warnings. The smoke configuration uses template
+VMID `101`, storage `local`, and bridge `vmbr0`; do not keep the broad test ACL
+on a long-lived root token.
+
+
 ## Mission OMP image
 
 The NATS queue listener is `worker.py`; it launches the pinned OMP job image.
