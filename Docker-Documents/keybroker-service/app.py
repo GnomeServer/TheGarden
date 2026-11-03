@@ -75,7 +75,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://llama:8080/v1"]
     )
     session_max_budget_usd: float = 25.0
-    admin_max_budget_usd: float = 25000.0
+    admin_max_budget_usd: float = 30000.0
     session_ttl_seconds: int = 3600
     reaper_interval_seconds: int = 60
     worker_ip_map: dict[str, str] = Field(default_factory=lambda: dict(WORKER_IPS))

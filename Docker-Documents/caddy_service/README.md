@@ -20,21 +20,23 @@ The repository Caddyfile is `Caddyfile` in this directory, mounted by `compose.y
 - HTTP: VM port `80`
 - HTTPS: VM port `443` and UDP `443` for HTTP/3
 - Open WebUI HTTPS: VM port `8443`
-- Docker network: `caddy_proxy`
+- Network mode: host, so Caddy sees the original client IP for its Tailnet ACLs
 - Persistent volumes: `caddy-service_caddy_data` and `caddy-service_caddy_config`
 - TLS: Caddy's internal CA
-- Grafana: `grafana:3000` under `/grafana/`
-- Forgejo: `forgejo:3000` under `/forgejo/`, with the `/forgejo` prefix stripped
-- Keybroker: `/keybroker/`, Tailscale-only; Caddy injects the configured proxy token and the remote Tailscale source IP before proxying to `keybroker:8000`
-- API Guard: the standalone security/budget service at `/api-guard/`, restricted to Tailscale source addresses and authenticated separately through Forgejo OAuth
-- Agent Manager dashboard and APIs: `/dashboard/`, `/v1/*`, `/auth/*`, `/healthz`, and `/readyz`
-- LiteLLM: `/litellm/v1`, reverse-proxied to `litellm:4000` for Tailscale source addresses only
+- Grafana: `127.0.0.1:18000` under `/grafana/`
+- Forgejo: `127.0.0.1:18001` under `/forgejo/`, with the `/forgejo` prefix stripped
+- Keybroker: `/keybroker/`, Tailnet-only; Caddy injects the proxy token and original peer IP before proxying to `127.0.0.1:18002`
+- API Guard: `/api-guard/` at `127.0.0.1:18003`, restricted to Tailnet source addresses and authenticated separately through Forgejo OAuth
+- Agent Manager dashboard and APIs: `127.0.0.1:8090` for `/dashboard/`, `/v1/*`, `/auth/*`, `/healthz`, and `/readyz`
+- LiteLLM: `127.0.0.1:4000` for `/litellm/v1`, restricted to Tailnet source addresses
 - Requests outside Tailscale to `/keybroker/*`, `/api-guard/*`, and `/litellm/*` receive HTTP 403
 - Proxmox fallback: `https://10.1.10.156:8006` for other paths on port 443
 
-This project creates the `caddy_proxy` network. Grafana, Forgejo, Open WebUI,
-LiteLLM, Agent Manager, API Guard, and Keybroker join that external network. Do not mark this
-project's network `external: true`.
+Application containers share the `caddy_proxy` bridge network for private
+container-to-container traffic. Caddy runs in host network mode and reaches
+upstreams only through host-loopback ports. The deployment playbook creates
+`caddy_proxy` before deploying the stacks; manual deployments must create it
+before starting application containers.
 
 ## Deploy
 
@@ -54,6 +56,7 @@ variable is missing.
 
 ```bash
 cd Docker-Documents/caddy_service
+sudo docker network inspect caddy_proxy >/dev/null 2>&1 || sudo docker network create caddy_proxy
 sudo docker compose config --quiet
 sudo docker compose up -d --force-recreate caddy
 sudo docker compose ps
@@ -94,7 +97,9 @@ sudo docker network inspect caddy_proxy \
   --format '{{range .Containers}}{{.Name}}{{"\\n"}}{{end}}'
 ```
 
-The output should include `caddy` and any deployed `grafana` and `forgejo` containers. If Caddy returns `502`, confirm that the target service is running and attached to `caddy_proxy`.
+The output should include application containers such as Grafana and Forgejo;
+Caddy runs in host network mode and is not attached to `caddy_proxy`. If Caddy
+returns `502`, check the corresponding loopback port mapping and service health.
 
 For the Proxmox fallback, test the upstream from the VM:
 

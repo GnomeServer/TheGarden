@@ -9,9 +9,9 @@ https://infra-lab-services.tail494f6d.ts.net/forgejo/
 
 ## Architecture
 
-- Caddy and Forgejo share the external Docker network `caddy_proxy`.
-- Caddy reaches Forgejo at the Docker service name `forgejo:3000`.
-- Forgejo's HTTP port `3000` is not published to the VM or LAN.
+- Caddy runs with host networking and proxies to Forgejo through `127.0.0.1:18001`.
+- Forgejo's HTTP port `3000` is published only on VM loopback; it is not reachable from the VM LAN.
+- Forgejo and other application containers share `caddy_proxy`; Caddy does not join that bridge.
 - PostgreSQL is reachable only on the private `forgejo_internal` network.
 - Git SSH access is bound only to `100.94.49.45:2222`, the VM's Tailscale address.
 - The Forgejo image's OpenSSH service listens on container port `22`.
@@ -33,8 +33,10 @@ The published mapping is:
 
 ## Deployment
 
-The Caddy project must be running first and must own the external Docker network
-`caddy_proxy`.
+The shared application network `caddy_proxy` must exist before starting this
+stack. The Ansible Docker deployment creates it first; for manual deployment,
+create it as described in the Caddy service README. Caddy runs in host network
+mode and does not join this bridge.
 
 For a new deployment, copy this directory to the VM and create the environment
 file:
@@ -73,9 +75,10 @@ sudo docker compose logs --tail=100 forgejo
 sudo docker network inspect caddy_proxy --format '{{range .Containers}}{{println .Name}}{{end}}'
 ```
 
-The network output should include `caddy` and `forgejo-forgejo-1`. Keep the
-network-inspect command on one physical line; a backslash followed by spaces
-causes the shell to run `--format` as a separate command.
+The network output should include `forgejo-forgejo-1` and other application
+containers, but not Caddy; Caddy uses host networking and the loopback HTTP
+upstream. Keep the network-inspect command on one physical line; a backslash
+followed by spaces causes the shell to run `--format` as a separate command.
 
 ## First Forgejo setup
 
@@ -148,12 +151,13 @@ The Forgejo route must appear before Caddy's fallback route:
 
 handle @forgejo {
     uri strip_prefix /forgejo
-    reverse_proxy forgejo:3000
+    reverse_proxy 127.0.0.1:18001
 }
 ```
 
-The prefix is stripped before proxying because Forgejo's `ROOT_URL` includes
-`/forgejo/`. Caddy and Forgejo must both be attached to `caddy_proxy`.
+The prefix is stripped because Forgejo's `ROOT_URL` includes `/forgejo/`.
+Caddy uses the loopback upstream `127.0.0.1:18001`; Forgejo remains on
+`caddy_proxy` for container-to-container traffic.
 
 Validate and reload Caddy from the Caddy project directory:
 

@@ -30,7 +30,7 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
             "alert_webhook_secret": api_guard.settings.alert_webhook_secret,
             "alert_ack_secret": api_guard.settings.alert_ack_secret,
             "alert_status_url": api_guard.settings.alert_status_url,
-            "annual_budget_usd": api_guard.settings.annual_budget_usd,
+            "monthly_budget_usd": api_guard.settings.monthly_budget_usd,
             "openai_admin_api_key": api_guard.settings.openai_admin_api_key,
             "openai_project_id": api_guard.settings.openai_project_id,
         }
@@ -44,7 +44,7 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         api_guard.settings.alert_webhook_secret = ""
         api_guard.settings.alert_ack_secret = ""
         api_guard.settings.alert_status_url = ""
-        api_guard.settings.annual_budget_usd = 25_000.0
+        api_guard.settings.monthly_budget_usd = 30_000.0
         api_guard.settings.openai_admin_api_key = ""
         api_guard.settings.openai_project_id = ""
         self.client = httpx.AsyncClient(
@@ -653,17 +653,17 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(incident["matched_alias"])
         self.assertEqual(incident["worker_id"], "Donatello")
         self.assertEqual(incident["session_id"], "unassociated-session-1")
-        self.assertEqual(result["budget"]["annual_limit_usd"], 25_000)
-        self.assertEqual(result["budget"]["annual_spend_usd"], 17.5)
+        self.assertEqual(result["budget"]["monthly_limit_usd"], 30_000)
+        self.assertEqual(result["budget"]["rolling_365d_spend_usd"], 17.5)
         self.assertEqual(result["budget"]["monthly_spend_usd"], 12.5)
-        self.assertEqual(result["budget"]["monthly_target_usd"], 2_083.33)
+        self.assertEqual(result["budget"]["monthly_percent"], 0.04)
         self.assertEqual(result["keys"][0]["key_id"], "abcdef0123456789")
         self.assertEqual(result["unmanaged_active_key_count"], 1)
         self.assertEqual(result["unmanaged_active_keys"][0]["alias"], "worker-one")
         self.assertEqual(result["unmanaged_active_keys"][0]["key_id_suffix"], "23456789")
         self.assertIsNotNone(result["unmanaged_active_keys"][0]["age_days"])
         self.assertEqual(result["budget"]["monthly_tokens"], 173)
-        self.assertEqual(result["budget"]["annual_tokens"], 213)
+        self.assertEqual(result["budget"]["rolling_365d_tokens"], 213)
         self.assertEqual(result["budget"]["zero_cost_requests_monthly"], 1)
         self.assertEqual(result["budget"]["zero_cost_tokens_monthly"], 50)
         self.assertEqual(
@@ -759,6 +759,34 @@ class ApiGuardContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][2]["models"], ["luna"])
         self.assertEqual(calls[0][2]["duration"], f"{api_guard.settings.rotation_days * 2}d")
         self.assertNotIn("sk-one-time-new-key", repr(api_guard.event_rows()))
+
+    async def test_key_budget_cannot_exceed_monthly_cap(self) -> None:
+        broker = AsyncMock(return_value={"key": "sk-monthly-cap-key", "key_id": "monthly-cap-id"})
+        with patch.object(api_guard, "keybroker_request", new=broker):
+            accepted = await self.client.post(
+                "/api-guard/api/v1/keys",
+                headers={"X-CSRF-Token": self.csrf},
+                json={
+                    "alias": "monthly-cap",
+                    "models": ["luna"],
+                    "max_budget_usd": 30_000,
+                    "budget_duration": "30d",
+                },
+            )
+            rejected = await self.client.post(
+                "/api-guard/api/v1/keys",
+                headers={"X-CSRF-Token": self.csrf},
+                json={
+                    "alias": "over-monthly-cap",
+                    "models": ["luna"],
+                    "max_budget_usd": 30_000.01,
+                    "budget_duration": "30d",
+                },
+            )
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(rejected.status_code, 422)
+        self.assertEqual(broker.await_count, 1)
+
 
     async def test_rotation_preserves_scope_and_revoke_resolves_alias_only_alert(self) -> None:
         event = {

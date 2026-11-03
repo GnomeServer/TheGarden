@@ -6,7 +6,7 @@ infra-lab-services.tail494f6d.ts.net {
 	}
 
 	handle @grafana {
-		reverse_proxy grafana:3000
+		reverse_proxy 127.0.0.1:18000
 	}
 
 	@forgejo {
@@ -15,7 +15,7 @@ infra-lab-services.tail494f6d.ts.net {
 
 	handle @forgejo {
 		uri strip_prefix /forgejo
-		reverse_proxy forgejo:3000
+		reverse_proxy 127.0.0.1:18001
 	}
 
 	@keybroker_tailnet {
@@ -25,7 +25,7 @@ infra-lab-services.tail494f6d.ts.net {
 
 	handle @keybroker_tailnet {
 		uri strip_prefix /keybroker
-		reverse_proxy keybroker:8000 {
+		reverse_proxy 127.0.0.1:18002 {
 			header_up X-Darkfactory-Proxy-Token {$KEYBROKER_PROXY_TOKEN}
 			header_up X-Darkfactory-Client-IP {http.request.remote.host}
 		}
@@ -43,7 +43,7 @@ infra-lab-services.tail494f6d.ts.net {
 	}
 
 	handle @api_guard_tailnet {
-		reverse_proxy api-guard:8000
+		reverse_proxy 127.0.0.1:18003
 	}
 
 	@api_guard_path path /api-guard /api-guard/*
@@ -56,7 +56,7 @@ infra-lab-services.tail494f6d.ts.net {
 	}
 
 	handle @agent_manager {
-		reverse_proxy agent-manager:8000
+		reverse_proxy 127.0.0.1:8090
 	}
 
 	@litellm_tailnet {
@@ -66,7 +66,7 @@ infra-lab-services.tail494f6d.ts.net {
 
 	handle @litellm_tailnet {
 		uri strip_prefix /litellm
-		reverse_proxy litellm:4000
+		reverse_proxy 127.0.0.1:4000
 	}
 
 	@litellm_path path /litellm/*
@@ -84,5 +84,5 @@ infra-lab-services.tail494f6d.ts.net {
 }
 infra-lab-services.tail494f6d.ts.net:8443 {
 	tls internal
-	reverse_proxy open-webui:8080
+	reverse_proxy 127.0.0.1:18004
 }

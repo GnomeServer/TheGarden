@@ -22,6 +22,8 @@ services:
       ENABLE_SIGNUP: ${OPEN_WEBUI_ENABLE_SIGNUP:-true}
     volumes:
       - open_webui_data:/app/backend/data
+    ports:
+      - "127.0.0.1:18004:8080"
     networks:
       - caddy_proxy
       - ai_internal

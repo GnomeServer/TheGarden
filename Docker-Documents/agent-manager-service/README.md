@@ -51,6 +51,47 @@ longer-lived LiteLLM virtual key and requires manual rotation in API Guard.
 Pattern matching is not a general-purpose secret scanner; keep provider master
 keys out of prompts and model context.
 
+### Chat inference configuration
+
+Agent Manager chat requires its own `MODEL_API_KEY`; the Open WebUI Pipe's
+`AGENT_MANAGER_API_TOKEN` authenticates to the manager, not to the model gateway.
+Worker missions obtain separate short-lived credentials from Keybroker.
+
+For the bundled LiteLLM deployment, set `MODEL_BASE_URL=http://litellm:4000/v1`
+and `MODEL_NAME=luna` in the live manager Compose project's private `.env`.
+`luna` is the gateway's public model alias, not its upstream provider model ID.
+Issue a model-scoped, budget-limited virtual key through API Guard/Keybroker,
+and set `MODEL_API_KEY`, `MODEL_API_KEY_ALIAS`, and `MODEL_API_KEY_ID` without
+printing them or storing them in version control. Track the key's expiration
+and rotate it before expiry.
+
+Recreate only the manager after changing its environment; a container restart
+does not reload Compose `.env` values. Verify a conversational `/v1/omp/turns`
+request such as `hello` returns a model answer. `/healthz` alone does not
+exercise model authentication. An empty key produces
+`OMP cannot answer yet. The manager has no model key.` before any inference.
+
+### Worker-05 rootless Docker recovery
+
+On 2026-11-03, Sammy (`worker-05`, `100.79.110.117`) was repaired after
+authorized SSH access became available. Its rootless Docker daemon exposed
+the owner-only mission file as container UID 0, but the worker launched the
+container as UID 1000. This caused `PermissionError` before inference; the
+old image's `unknown` mission ID hid the underlying error.
+
+The worker now detects rootless Docker and uses container `0:0`, mapping to
+the unprivileged host owner. Rootful workers retain their host UID/GID.
+The matching host/image identity fix was deployed to Sammy. Mission
+`72edc317-9b94-4fcd-8fa5-63235c345efb` completed on `worker-05`, and its
+downloaded ZIP passed checksum and exact-content verification.
+
+Sammy is back in the pool. Its temporary NATS firewall rules and
+`agent-manager-worker05-quarantine.service` were removed after verification.
+Donatello's earlier recovery mission
+`9d3dcfa5-0c8b-4351-934c-f5f17e8b46fe` also passed artifact verification.
+See the [worker troubleshooting guide](../../agent-worker/README.md#troubleshooting)
+for the rootless permission contract and rollback image tags.
+
 
 ## API Guard exposure incidents
 
@@ -132,8 +173,8 @@ a fresh worker heartbeat still claims it. Otherwise Agent Manager marks it
 failed, sets its terminal timestamp, and stops its displayed runtime. New queue
 events expire after the same interval; a worker acknowledges an expired event
 without executing it. Late status or completion events cannot reopen a terminal
-run. This timeout exceeds the worker's 900-second JetStream acknowledgment
-window to allow redelivery before finalization.
+run. This timeout exceeds the worker's 1500-second JetStream mission
+acknowledgment window.
 
 The human control surface is available at `/dashboard/` through Caddy. It
 tracks runs, deadline-aware tasks, Forgejo users and activity, worker presence,
@@ -190,7 +231,7 @@ procedure](../../docs/central-dashboard-deployment.md) and its post-deployment c
 
 The manager joins the existing networks used by the lab:
 
-- `caddy_proxy` for Forgejo and LiteLLM HTTP/API access and Caddy routing
+- `caddy_proxy` for Forgejo and LiteLLM container-to-container access; host-networked Caddy uses their loopback-published ports
 - `open-webui_internal` for Ollama access
 - `agent_manager_internal` for PostgreSQL and NATS
 
@@ -553,9 +594,10 @@ it runs generated Python unsandboxed.
 A single delivery should produce one terminal completion event. If a run has
 both `failed` and `completed` results, compare `run_id`, `worker_id`, and
 `hostname`. Stop stale worker processes, ensure all workers share the same
-role consumer, and keep the model/script runtime below the JetStream
-`ack_wait` window. A redelivery can occur when the worker takes longer than
-`ack_wait` to acknowledge the event.
+role consumer, and keep the OMP runtime below the JetStream `ack_wait` window.
+Workers upgrade the existing role and resume consumers to a 1500-second
+`ack_wait` on startup, without lowering a longer configured value. A redelivery
+can occur when processing exceeds `ack_wait`.
 
 ## Backups
 

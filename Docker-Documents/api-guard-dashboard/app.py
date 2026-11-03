@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     exposure_webhook_secret: str = Field(default="", validation_alias="API_GUARD_EXPOSURE_WEBHOOK_SECRET")
     openai_admin_api_key: str = Field(default="", validation_alias="API_GUARD_OPENAI_ADMIN_API_KEY")
     openai_project_id: str = Field(default="", validation_alias="API_GUARD_OPENAI_PROJECT_ID")
-    annual_budget_usd: float = Field(default=25000.0, gt=0, validation_alias="API_GUARD_ANNUAL_BUDGET_USD")
+    monthly_budget_usd: float = Field(default=30000.0, gt=0, validation_alias="API_GUARD_MONTHLY_BUDGET_USD")
     rotation_days: int = Field(default=14, ge=7, le=30, validation_alias="API_GUARD_ROTATION_DAYS")
     jev_model: str = Field(default="jev", validation_alias="API_GUARD_JEV_MODEL")
     jev_api_key: str = Field(default="", validation_alias="API_GUARD_JEV_API_KEY")
@@ -1104,9 +1104,8 @@ async def overview(request: Request) -> dict[str, Any]:
         and alert_receiver["ack_callback_configured"]
     )
     provider_costs = await openai_cost_report(rolling_start, month_start, now)
-    annual, monthly, per_key = aggregate_spend_logs(log_rows, rolling_start, month_start, now)
+    rolling_365d, month_to_date, per_key = aggregate_spend_logs(log_rows, rolling_start, month_start, now)
     zero_cost_models_monthly = zero_cost_model_breakdown(log_rows, month_start, now)
-    month_target = settings.annual_budget_usd / 12
     keys = [safe_key_out(row, now) for row in rows]
     known_key_ids = {key["key_id"] for key in keys if key["key_id"]}
     active_key_ids = {
@@ -1152,19 +1151,20 @@ async def overview(request: Request) -> dict[str, Any]:
     return {
         "as_of": now.isoformat(),
         "budget": {
-            "annual_limit_usd": settings.annual_budget_usd,
-            "annual_spend_usd": annual["spend_usd"],
-            "monthly_target_usd": round(month_target, 2),
-            "monthly_spend_usd": monthly["spend_usd"],
-            "annual_percent": round(min(100.0, annual["spend_usd"] / settings.annual_budget_usd * 100), 2),
-            "monthly_target_percent": round(min(100.0, monthly["spend_usd"] / month_target * 100), 2),
-            "monthly_tokens": monthly["total_tokens"],
-            "annual_tokens": annual["total_tokens"],
-            "prompt_tokens_monthly": monthly["prompt_tokens"],
-            "completion_tokens_monthly": monthly["completion_tokens"],
-            "zero_cost_requests_monthly": monthly["zero_cost_requests"],
-            "zero_cost_tokens_monthly": monthly["zero_cost_tokens"],
-            "zero_cost_requests_rolling": annual["zero_cost_requests"],
+            "rolling_365d_spend_usd": rolling_365d["spend_usd"],
+            "monthly_limit_usd": settings.monthly_budget_usd,
+            "monthly_spend_usd": month_to_date["spend_usd"],
+            "monthly_percent": round(
+                min(100.0, month_to_date["spend_usd"] / settings.monthly_budget_usd * 100),
+                2,
+            ),
+            "monthly_tokens": month_to_date["total_tokens"],
+            "rolling_365d_tokens": rolling_365d["total_tokens"],
+            "prompt_tokens_monthly": month_to_date["prompt_tokens"],
+            "completion_tokens_monthly": month_to_date["completion_tokens"],
+            "zero_cost_requests_monthly": month_to_date["zero_cost_requests"],
+            "zero_cost_tokens_monthly": month_to_date["zero_cost_tokens"],
+            "zero_cost_requests_rolling": rolling_365d["zero_cost_requests"],
             "zero_cost_models_monthly": zero_cost_models_monthly,
         },
         "openai_costs": provider_costs,
@@ -1208,8 +1208,8 @@ async def list_keys(request: Request) -> list[dict[str, Any]]:
 async def create_key(body: KeyCreate, request: Request, response: Response) -> dict[str, Any]:
     user = require_admin(request)
     require_csrf(request, user)
-    if body.max_budget_usd > settings.annual_budget_usd:
-        raise HTTPException(status_code=422, detail="Per-key budget cannot exceed the configured annual budget")
+    if body.max_budget_usd > settings.monthly_budget_usd:
+        raise HTTPException(status_code=422, detail="Per-key budget cannot exceed the configured monthly budget")
     result = await keybroker_request("POST", "/v1/admin/keys/generate", body={
         "alias": body.alias,
         "models": body.models,

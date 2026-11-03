@@ -5,7 +5,7 @@ API Guard is a separate web service and URL, not a section of Agent Manager's te
 ## What it does
 
 - Shows LiteLLM rolling-365-day and current-month spend, prompt/completion/total tokens, per-key totals, budget caps, key age, and token-bearing zero-cost counts grouped by safe model ID.
-- Uses the default $25,000 shared hard ceiling in `litellm-service/config.yaml`; this applies to calls through LiteLLM. The dashboard's monthly pacing target is `$25,000 / 12 = $2,083.33`, a warning target, not a second hard stop.
+- Uses a `$30,000` shared LiteLLM hard cap per calendar month. The dashboard compares month-to-date spend with that cap; rolling 365-day spend is informational.
 - Issues budgeted, model-scoped LiteLLM virtual keys through Keybroker. A new raw key is sent once to the authenticated browser with `Cache-Control: no-store`; API Guard never persists it. Keys expire after twice the rotation interval. Existing unlimited keys are not silently changed.
 - Keybroker checks LiteLLM pricing metadata before issuing either session or admin keys. Unpriced external models are blocked; only explicitly allowlisted local model API bases may have zero cost.
 - Flags HMAC-signed OMP exposure reports. Events may contain a safe worker/session identifier and a key alias/identifier. The schema rejects content fields and recognized credential formats; it does not claim to detect arbitrary exfiltration.
@@ -25,12 +25,15 @@ The default rotation interval is 14 days (biweekly). Set `API_GUARD_ROTATION_DAY
    ```
 
 2. Copy `.env.example` to a deployment-only `.env` with mode `0600`. Set an independent random `API_GUARD_SESSION_SECRET`, `API_GUARD_ADMINS`, the OAuth credentials, the API Guard/Keybroker `KEYBROKER_DASHBOARD_TOKEN`, and `API_GUARD_EXPOSURE_WEBHOOK_SECRET`. The dashboard token must match Keybroker's setting. The LiteLLM master key belongs only in Keybroker's environment; never configure it in API Guard or commit it.
-3. Match the annual ceiling in `litellm-service/config.yaml` and `API_GUARD_ANNUAL_BUDGET_USD`. LiteLLM needs PostgreSQL for global budget enforcement. Dashboard usage is rolling-365-day; monthly spend is compared with the pacing target.
+3. Set `API_GUARD_MONTHLY_BUDGET_USD=30000` to match the LiteLLM monthly hard
+   cap. The dashboard compares calendar-month spend with that cap and displays
+   rolling 365-day spend as context. LiteLLM needs PostgreSQL for global budget
+   enforcement.
 4. Share `API_GUARD_EXPOSURE_WEBHOOK_SECRET` with Keybroker so it can sign worker-session exposure events sent to `http://api-guard:8000/api-guard/api/v1/webhooks/exposure`. The existing Agent Manager OMP notifier can use that same webhook URL and secret. OMP can redact the configured key and recognized credential patterns, but this is not a scanner for arbitrary exfiltration.
 5. API Guard's Compose default sends signed incident events to the separate Forge/Agent Manager receiver. Set matching, distinct `API_GUARD_ALERT_WEBHOOK_SECRET` and `API_GUARD_ALERT_ACK_SECRET` values in API Guard and Agent Manager. Never reuse `API_GUARD_EXPOSURE_WEBHOOK_SECRET`. For actual external paging, also configure Agent Manager's `NOTIFICATION_WEBHOOK_URL` and `NOTIFICATION_WEBHOOK_TOKEN` to the organization's monitored relay; no endpoint or recipient is provisioned by this repository.
 6. Use a restricted LiteLLM virtual key for JEV and set `API_GUARD_JEV_API_KEY`; configure the `jev` model alias in LiteLLM first. The checked-in LiteLLM model list contains only `luna`, so JEV review stays unavailable until an operator configures a real JEV route and key. Never use the LiteLLM master key for JEV calls.
 
-7. Start the service after Caddy, Keybroker, and LiteLLM are attached to `caddy_proxy`:
+7. Ensure `caddy_proxy` exists and Keybroker, API Guard, and LiteLLM are attached to that application network. Caddy runs with host networking and reaches API Guard through its loopback-only host port:
 
    ```bash
    cd /home/infra-lab-user/TheGarden/Docker-Documents/api-guard-dashboard
@@ -89,7 +92,15 @@ locally and reports that central delivery could not be confirmed.
 
 ## Budget semantics
 
-`litellm_settings.max_budget: 25000` with `budget_duration: 365d` is the shared hard limit for all requests through this LiteLLM proxy. LiteLLM must have its database available for the limit to be enforced. API Guard's `$2,083.33` monthly target indicates pacing toward the annual allowance; it does not block requests. Each newly issued key also receives a required per-key budget and reset period. Existing keys without per-key budgets remain clearly labeled and must be migrated/managed separately.
+LiteLLM enforces a shared `$30,000` spend ceiling per calendar month with
+`budget_duration: 30d`, which resets on the first day of the month in UTC by
+default. PostgreSQL must be available for this global limit to work. API Guard
+shows month-to-date estimated spend against the same cap; rolling 365-day
+spend is informational, not another limit. Keep
+`API_GUARD_MONTHLY_BUDGET_USD` and `KEYBROKER_ADMIN_MAX_BUDGET_USD` at `30000`.
+Each newly issued key also receives its own budget and reset period. Existing
+keys without per-key budgets remain clearly labeled and must be migrated or
+managed separately.
 For a provider-side OpenAI comparison, optionally set `API_GUARD_OPENAI_ADMIN_API_KEY` to an organization Admin API key with **Usage Read** access, and set `API_GUARD_OPENAI_PROJECT_ID` to the project LiteLLM uses. This is separate from the project API key used for inference and remains server-side. Without a project ID, the costs panel reports organization-wide spend, which may include other workloads. See the [OpenAI Costs API](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs).
 
 This does not limit unrelated provider keys or direct provider calls that bypass LiteLLM. Configure a hard provider-account limit and alerts at OpenRouter (or the actual upstream) as a second boundary. Confirm provider-side invoices against LiteLLM because model-price metadata can be incomplete or stale.

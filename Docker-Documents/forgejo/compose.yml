@@ -55,6 +55,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
     ports:
       - "${FORGEJO_TAILSCALE_IP:-100.94.49.45}:${FORGEJO_SSH_PORT:-2222}:22"
+      - "127.0.0.1:18001:3000"
     networks:
       - caddy_proxy
       - forgejo_internal

@@ -6,16 +6,16 @@ This Compose project runs Open WebUI and Ollama as separate containers on `infra
 
 - Open WebUI container: `open-webui`
 - Ollama container: `ollama`
-- Open WebUI container port: `8080`, not published to the host
+- Open WebUI container port: `8080`, published only as `127.0.0.1:18004:8080`
 - Ollama container port: `11434`, not published to the host
-- Docker network shared with Caddy: `caddy_proxy`
+- Application Docker network: `caddy_proxy`; Caddy itself uses host networking
 - Private network: `open-webui_internal`
 - Compose `WEBUI_URL` default: `https://infra-lab-services.tail494f6d.ts.net:8443/`
 - Compose `ENABLE_SIGNUP` default: `true` via `OPEN_WEBUI_ENABLE_SIGNUP`
 
-There is no committed `.env.example`. Caddy terminates TLS and routes
-`https://infra-lab-services.tail494f6d.ts.net:8443/` to `open-webui:8080`.
-Open WebUI is not directly published on the host. Tailnet browsers must trust
+There is no committed `.env.example`. Caddy terminates TLS and proxies
+`https://infra-lab-services.tail494f6d.ts.net:8443/` to `127.0.0.1:18004`.
+The loopback-only port prevents direct LAN access. Tailnet browsers must trust
 Caddy's internal root CA.
 
 ## Files and volumes
@@ -34,12 +34,23 @@ open-webui_ollama_data   Ollama models and runtime data
 
 ## Start the services
 
-Caddy must already be running and must create the external `caddy_proxy` network:
+Caddy uses host networking and no longer creates `caddy_proxy`. The Ansible
+deployment playbook creates the shared application network before deploying
+the stacks; for manual deployment, create it once if it does not exist:
+
+```bash
+sudo docker network inspect caddy_proxy >/dev/null 2>&1 || sudo docker network create caddy_proxy
+```
+
+Then start Caddy and Open WebUI:
 
 ```bash
 export REPO_ROOT=/path/to/TheGarden
 cd "$REPO_ROOT/Docker-Documents/caddy_service"
 sudo docker compose up -d caddy
+
+cd "$REPO_ROOT/Docker-Documents/open_webui_services"
+sudo docker compose up -d
 ```
 
 For a new Open WebUI deployment, start from the Compose defaults. Create a private `.env` only when overriding them:
@@ -138,6 +149,42 @@ Open WebUI should use the Docker URL. Remote workers use the Caddy endpoint:
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
 
+## Keep Arena separate from mission execution
+
+Arena randomly selects a backing model. An unrestricted Arena includes Pipe
+models, so an ordinary chat prompt can accidentally launch an Agent Manager
+mission. Select **Agent ManagerOMP** explicitly for intentional manager work;
+Arena should select only ordinary chat backends.
+
+In **Admin Settings → Evaluations → Arena Models**, edit **Arena Model**,
+choose **Exclude**, add **Agent ManagerOMP**, and save. The deployed Arena
+configuration uses the stable ID `arena-model` with:
+
+```json
+{
+  "model_ids": ["agent_manager_worker.worker"],
+  "filter_mode": "exclude"
+}
+```
+
+These fields belong under the Arena model's `meta`. Administrators can also
+read and update the configuration through `GET`/`POST
+/api/v1/evaluations/config`, preserving the other model metadata and Arena
+settings. The API persists the setting and makes it effective without an
+Open WebUI restart; do not edit `webui.db` directly.
+
+Recovery verification on 2026-11-03 confirmed the exclusion in the live
+administration UI, persisted configuration, and `/api/models`. A real Arena
+completion selected `/models/gemma-3-4b-it-Q4_K_M.gguf` and returned
+`ARENA_OK`. The other eligible chat IDs were `luna` and `llama3.2:3b`.
+An independent temporary UI chat explicitly selecting **Agent ManagerOMP**
+sent `hello` and received `Hello! How can I help you today?`.
+
+Review the exclusion list whenever adding or renaming a mission Pipe;
+exclusion is by exact model ID, not by model type. Keep at least one ordinary
+chat backend available: the installed selector falls back to unrestricted
+non-Arena selection if filtering leaves no candidates.
+
 ## Naming Agent Manager work from Open WebUI
 
 Open WebUI's Pipe source is `agent_manager_pipe.py`;
@@ -153,6 +200,15 @@ active mission. The worker stops its named OMP container and reports the final
 `cancelled` state. Closing the browser tab alone does not cancel the background
 Pipe task. If a worker is offline, it checks the queued run's cancellation
 state before starting it after reconnecting.
+
+The Pipe's `RUN_TIMEOUT_SECONDS` valve defaults to 1500 seconds so polling can
+wait through the worker's 1200-second OMP limit and finalization. If the Pipe
+already has a saved valve value, set it to at least 1500 seconds in Open WebUI;
+updating the source default does not guarantee an existing value changes.
+
+The live recovery set the saved valve to 1500 through the supported function
+valves API; the installed Pipe source still has its older 900-second default.
+The source was deliberately not replaced with pending repository edits.
 
 After ten rejected coder-reviewer attempts, the Pipe presents the reviewer's
 specific clarification question. Your answer resumes the same mission from its
@@ -224,7 +280,7 @@ The separate-container arrangement used here is preferred because Open WebUI and
 ## Troubleshooting
 
 - **Blank page:** use the configured `WEBUI_URL` at `https://infra-lab-services.tail494f6d.ts.net:8443/`; the Caddy route uses a separate origin because Open WebUI assets are root-relative.
-- **502 from Caddy on port 8443:** verify the `open-webui` container is running and attached to `caddy_proxy`. A 502 on `/dashboard/` indicates the Agent Manager upstream; the root path falls back to Proxmox.
+- **502 from Caddy on port 8443:** verify the `open-webui` container is running and the loopback mapping `127.0.0.1:18004:8080` is active. A 502 on `/dashboard/` indicates the Agent Manager upstream; the root path falls back to Proxmox.
 - **No models:** run `ollama list`; models must be pulled intentionally, or check that the LiteLLM virtual key is allowed to use `luna`.
 - **Ollama connection error:** Open WebUI should use `http://ollama:11434`, not a host-published port.
 - **LiteLLM 401:** use the generated `.luna-worker-api-key`, not `LITELLM_MASTER_KEY` or the backend `LLAMA_API_KEY`.

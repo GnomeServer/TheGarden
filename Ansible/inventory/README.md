@@ -65,7 +65,7 @@ ansible-playbook playbooks/docker-services.yml --syntax-check
 ansible-playbook playbooks/docker-services.yml --ask-become-pass
 ```
 
-Caddy starts first because it creates the external `caddy_proxy` network. Agent Manager starts last because it joins both `caddy_proxy` and `open-webui_internal`.
+Caddy runs in host network mode. The playbook creates `caddy_proxy` before deploying projects; Agent Manager starts last because it joins `caddy_proxy` and `open-webui_internal`.
 
 The Compose project `.env` files remain on the Docker VM and are intentionally not stored in the inventory or committed to Git.
 

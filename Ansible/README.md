@@ -60,7 +60,7 @@ ansible-galaxy collection install -r requirements.yml
 
 `playbooks/docker-services.yml` deploys the projects named in `inventory/group_vars/docker_hosts.yml`, in this order:
 
-1. `caddy` at `/home/infra-lab-user/caddy-service` (`build: never`), which creates `caddy_proxy`
+1. `caddy` at `/home/infra-lab-user/caddy-service` (`build: never`); the playbook provisions `caddy_proxy` before deploying the projects
 2. `keybroker` at `/home/infra-lab-user/TheGarden/Docker-Documents/keybroker-service` (`build: always`)
 3. `forgejo` at `/home/infra-lab-user/forgejo-service`
 4. `open-webui` at `/home/infra-lab-user/open-webui-service`

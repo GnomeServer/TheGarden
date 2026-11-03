@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import selectors
 import stat
@@ -21,7 +22,7 @@ OMP_PLANNER_PROMPT = Path("/opt/omp-worker/planner.md")
 OMP_AGENT_DIR = Path("/opt/omp-worker/agents")
 OMP_MODELS = Path("/opt/omp-worker/models.yml")
 OMP_MODEL = os.environ.get("OMP_MODEL", "worker-litellm/luna")
-OMP_TIMEOUT_SECONDS = max(60, int(os.environ.get("OMP_TIMEOUT_SECONDS", "600")))
+OMP_TIMEOUT_SECONDS = max(60, int(os.environ.get("OMP_TIMEOUT_SECONDS", "1200")))
 
 
 def emit(result: dict[str, Any], exit_code: int = 0) -> None:
@@ -29,11 +30,16 @@ def emit(result: dict[str, Any], exit_code: int = 0) -> None:
     raise SystemExit(exit_code)
 
 
-def failure(mission_id: str, summary: str, error: str = "") -> None:
+def failure(
+    mission_id: str,
+    summary: str,
+    error: str = "",
+    provider_error: dict[str, Any] | None = None,
+) -> None:
     result: dict[str, Any] = {
         "mission_id": mission_id,
         "status": "failed",
-        "summary": summary,
+        "summary": _sanitize_diagnostic(summary, 1200),
         "bounce_to": "none",
         "steps": [],
         "reviewer_approved": False,
@@ -41,20 +47,31 @@ def failure(mission_id: str, summary: str, error: str = "") -> None:
         "artifacts": [],
     }
     if error:
-        result["error"] = error[:1200]
+        result["error"] = _sanitize_diagnostic(error, 1200)
+    if provider_error:
+        _attach_provider_error(result, provider_error)
     emit(result, 1)
 
 
 def load_mission() -> dict[str, Any]:
+    expected_mission_id = os.environ.get("OMP_EXPECTED_MISSION_ID", "")
+    if not expected_mission_id:
+        failure("unknown", "Worker image is missing its expected mission identity.")
     try:
         value = json.loads(MISSION_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        failure("unknown", "Worker image could not read its mission file.", f"{type(exc).__name__}: {exc}")
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        failure(
+            expected_mission_id,
+            "Worker image could not read its mission file.",
+            f"{type(exc).__name__}: {exc}",
+        )
     if not isinstance(value, dict):
-        failure("unknown", "Mission file must contain one JSON object.")
+        failure(expected_mission_id, "Mission file must contain one JSON object.")
     mission_id = value.get("mission_id")
     if not isinstance(mission_id, str) or not mission_id:
-        failure("unknown", "Mission is missing mission_id.")
+        failure(expected_mission_id, "Mission is missing mission_id.")
+    if mission_id != expected_mission_id:
+        failure(expected_mission_id, "Mission file has a mismatched mission_id.")
     goal = value.get("goal")
     if not isinstance(goal, str) or not goal.strip():
         failure(mission_id, "Mission is missing a non-empty goal.")
@@ -81,6 +98,18 @@ def prepare_omp_home() -> Path:
     if "__MODEL_BASE_URL__" in model_config:
         raise RuntimeError("worker model config was not fully rendered")
     (agent_dir / "models.yml").write_text(model_config, encoding="utf-8")
+    (agent_dir / "config.yml").write_text(
+        json.dumps(
+            {
+                "web_search": {"enabled": True},
+                "fetch": {"enabled": True},
+                "modelRoles": {"web": "web/duckduckgo"},
+                "retry": {"fallbackChains": {"web": []}},
+                "providers": {"webSearchTimeoutSeconds": 30},
+            }
+        ),
+        encoding="utf-8",
+    )
     return home
 
 
@@ -255,26 +284,178 @@ def _assistant_text_from_event(event: dict[str, Any]) -> str:
         (text for message in reversed(messages) if (text := _message_text(message))),
         "",
     )
-def _assistant_error_from_event(event: dict[str, Any]) -> str:
-    assistant_event = event.get("assistantMessageEvent")
-    if (
-        event.get("type") == "message_update"
-        and isinstance(assistant_event, dict)
-        and assistant_event.get("type") == "error"
-        and isinstance(assistant_event.get("reason"), str)
+
+
+def _sanitize_diagnostic(text: str, limit: int = 600) -> str:
+    """Redact credentials and labelled payloads before truncating diagnostics."""
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = "".join(char for char in text if char.isprintable() or char.isspace())
+    for key, value in os.environ.items():
+        if value and re.search(r"(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", key, re.I):
+            text = text.replace(value, "[REDACTED CREDENTIAL]")
+    text = re.sub(
+        r"sk-(?:or-v1-|ant-|proj-|svcacct-)?[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{35,}",
+        "[REDACTED CREDENTIAL]",
+        text,
+    )
+    text = re.sub(r"https?://[^\s<>\"']+", "[REDACTED URL]", text, flags=re.I)
+    text = re.sub(
+        r"(?i)\b(?:authorization|proxy-authorization)\b[\"']?\s*[:=]\s*"
+        r"(?:[\"'][^\"'\r\n]*[\"']|[^\r\n,;}]+)",
+        "[REDACTED CREDENTIAL]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(?:api[_-]?key|access[_-]?token|token|password|secret)\b[\"']?\s*[:=]\s*"
+        r"(?:[\"'][^\"'\r\n]*[\"']|[^\s,;}]+)|\bBearer\s+[A-Za-z0-9._~+/=-]+",
+        "[REDACTED CREDENTIAL]",
+        text,
+    )
+    text = re.sub(
+        r"(?is)\b(?:prompt|messages|tool[_ ]?arguments|arguments|request[_ ]?body|response[_ ]?body)"
+        r"[\"']?\s*[:=].*",
+        "[OMITTED PAYLOAD]",
+        text,
+    )
+    return " ".join(text.split())[:limit]
+
+
+def _error_diagnostic(
+    message: str, source: str, metadata: dict[str, Any], category: str
+) -> dict[str, Any]:
+    # Only explicitly labelled identifiers are evidence. OMP's errorId is not a
+    # provider code, and responseId is not an HTTP request ID.
+    text = _sanitize_diagnostic(message, 4096)
+    diagnostic: dict[str, Any] = {
+        "category": category,
+        "source": source,
+        "message": text[:600] or "OMP reported an error without a diagnostic message.",
+    }
+    for target, keys in (
+        ("provider", ("provider",)),
+        ("model", ("model",)),
+        ("code", ("code", "errorCode")),
+        ("request_id", ("requestId", "request_id")),
+        ("response_id", ("responseId",)),
+        ("agent", ("agent",)),
+        ("agent_id", ("id",)),
+        ("stop_reason", ("stopReason",)),
     ):
-        return assistant_event["reason"]
-    messages: list[Any] = []
-    if event.get("type") in {"message_end", "turn_end"}:
-        messages.append(event.get("message"))
-    elif event.get("type") == "agent_end" and isinstance(event.get("messages"), list):
-        messages.extend(event["messages"])
-    for message in reversed(messages):
+        value = next((metadata[key] for key in keys if key in metadata), None)
+        if target in {"code", "request_id"} and value is None:
+            label = r"(?:error[_ -]?code|code)" if target == "code" else r"(?:x-request-id|request[_ -]?id)"
+            match = re.search(rf"\b{label}[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_.:/-]+)", text, re.I)
+            if match:
+                value = match.group(1)
+        if target == "code" and type(value) is int:
+            value = str(value)
+        if (
+            isinstance(value, str)
+            and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", value)
+            and _sanitize_diagnostic(value, 128) == value
+        ):
+            diagnostic[target] = value
+    status = metadata.get("errorStatus")
+    if type(status) is int and 100 <= status <= 599:
+        diagnostic["http_status"] = status
+    error_id = metadata.get("errorId")
+    if type(error_id) is int and 0 <= error_id < 2**64:
+        diagnostic["omp_error_id"] = error_id
+    if (
+        re.match(r"^(?:\[[^\]\n]{1,160}\]\s*)?Provider finish_reason:\s*content_filter\b", text)
+        or diagnostic.get("code") in {"content_filter", "content_policy_violation", "ResponsibleAIPolicyViolation"}
+    ):
+        diagnostic["category"] = "content_filter"
+    return diagnostic
+
+
+def _task_error_diagnostic(result: Any, source: str) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    details = result.get("details")
+    results = details.get("results") if isinstance(details, dict) else None
+    if not isinstance(results, list):
+        return None
+    for child in reversed(results):
+        if not isinstance(child, dict) or child.get("aborted") is True:
+            continue
+        failed = child.get("isError") is True or (
+            type(child.get("exitCode")) is int and child["exitCode"] != 0
+        )
+        if not failed:
+            continue
+        for field in ("error", "stderr"):
+            message = child.get(field)
+            if isinstance(message, str) and message.strip():
+                # Child output can contain partial tool arguments or normal prose.
+                # Its dedicated error/stderr is evidence, output is never evidence.
+                return _error_diagnostic(message, f"{source}.details.results.{field}", child, "task_error")
+    return None
+
+
+def _provider_error_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = event.get("type")
+    assistant_event = event.get("assistantMessageEvent")
+    if event_type == "message_update" and isinstance(assistant_event, dict) and assistant_event.get("type") == "error":
+        message = assistant_event.get("error")
         if isinstance(message, dict):
             error = message.get("errorMessage")
-            if isinstance(error, str) and error:
-                return error
-    return ""
+            return _error_diagnostic(
+                error if isinstance(error, str) else "OMP assistant stream ended with an error.",
+                "message_update.assistantMessageEvent.error",
+                message,
+                "provider_error",
+            )
+    if event_type == "tool_execution_end" and event.get("toolName") == "task":
+        return _task_error_diagnostic(event.get("result"), "tool_execution_end.result")
+    messages: list[Any] = []
+    if event_type in {"message_end", "turn_end"}:
+        messages.append(event.get("message"))
+    elif event_type == "agent_end" and isinstance(event.get("messages"), list):
+        messages = event["messages"]
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "toolResult" and message.get("toolName") == "task":
+            diagnostic = _task_error_diagnostic(message, f"{event_type}.toolResult")
+            if diagnostic:
+                return diagnostic
+        if message.get("role") == "assistant":
+            error = message.get("errorMessage")
+            if isinstance(error, str) and error.strip():
+                source = "agent_end.messages" if event_type == "agent_end" else f"{event_type}.message"
+                return _error_diagnostic(error, source, message, "provider_error")
+    return None
+
+
+def _provider_failure_summary(diagnostic: dict[str, Any]) -> str:
+    if diagnostic["category"] == "content_filter":
+        return "The provider stopped generation with a content filter. Use a benign example or narrow the request; do not retry unchanged."
+    if diagnostic["category"] == "task_error":
+        return "An OMP child task failed. Inspect the reported task error before rerunning the mission."
+    return "OMP reported a provider error. Inspect gateway/provider logs using the reported identifiers or failure time."
+
+
+def _attach_provider_error(result: dict[str, Any], diagnostic: dict[str, Any]) -> None:
+    result["provider_error"] = diagnostic
+    identifiers = "; ".join(
+        f"{key}={diagnostic[key]}"
+        for key in ("provider", "model", "code", "request_id", "response_id", "http_status", "agent")
+        if key in diagnostic
+    )
+    error = f"{_provider_failure_summary(diagnostic)} {diagnostic['message']}"
+    if identifiers:
+        error += f" ({identifiers})"
+    prior_error = result.get("error")
+    if isinstance(prior_error, str) and prior_error.strip():
+        error += f" Detail: {prior_error}"
+    result["error"] = _sanitize_diagnostic(error, 1200)
+
+
+class OmpExecutionError(RuntimeError):
+    def __init__(self, message: str, provider_error: dict[str, Any] | None) -> None:
+        super().__init__(_sanitize_diagnostic(message, 1200))
+        self.provider_error = provider_error
 
 
 def _task_agents(arguments: Any) -> list[str]:
@@ -440,7 +621,11 @@ def _read_stream_tail(stream: Any, limit: int = 1200) -> str:
     stream.seek(0, os.SEEK_END)
     size = stream.tell()
     stream.seek(max(0, size - limit))
-    return stream.read().decode("utf-8", errors="replace").strip()
+    text = stream.read().decode("utf-8", errors="replace")
+    if size > limit:
+        # A tail starting halfway through a credential cannot be safely redacted.
+        text = text.partition("\n")[2]
+    return _sanitize_diagnostic(text, limit)
 
 
 
@@ -479,7 +664,7 @@ def run_omp(mission: dict[str, Any]) -> dict[str, Any]:
         "--no-lsp",
         "--no-extensions",
         "--tools",
-        "read,bash,edit,write,grep,glob,task",
+        "read,bash,edit,write,grep,glob,task,web_search",
         "--model",
         OMP_MODEL,
         "--approval-mode",
@@ -493,8 +678,7 @@ def run_omp(mission: dict[str, Any]) -> dict[str, Any]:
     deadline = time.monotonic() + OMP_TIMEOUT_SECONDS
     progress_state: dict[str, Any] = {"reviewer_rejections": 0}
     last_assistant_text = ""
-    last_assistant_error = ""
-    recent_output: list[str] = []
+    observed_error: dict[str, Any] | None = None
     with tempfile.TemporaryFile() as stderr_capture:
         process = subprocess.Popen(
             command,
@@ -513,24 +697,22 @@ def run_omp(mission: dict[str, Any]) -> dict[str, Any]:
         stdout_closed = False
 
         def consume_line(line_bytes: bytes) -> None:
-            nonlocal last_assistant_text, last_assistant_error
+            nonlocal last_assistant_text, observed_error
             line = line_bytes.decode("utf-8", errors="replace").strip()
             if not line:
                 return
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
-                recent_output.append(line[-1200:])
-                del recent_output[:-8]
                 return
             if not isinstance(event, dict):
                 return
             text = _assistant_text_from_event(event)
             if text:
                 last_assistant_text = text
-            error = _assistant_error_from_event(event)
+            error = _provider_error_from_event(event)
             if error:
-                last_assistant_error = error
+                observed_error = error
             for update in _progress_from_omp_event(event, progress_state):
                 phase = update["phase"]
                 details = {key: value for key, value in update.items() if key != "phase"}
@@ -566,7 +748,7 @@ def run_omp(mission: dict[str, Any]) -> dict[str, Any]:
             if process.poll() is None:
                 process.kill()
                 process.wait()
-            raise RuntimeError(f"OMP exceeded {OMP_TIMEOUT_SECONDS} seconds") from exc
+            raise OmpExecutionError(f"OMP exceeded {OMP_TIMEOUT_SECONDS} seconds", observed_error) from exc
         except Exception:
             if process.poll() is None:
                 process.kill()
@@ -578,19 +760,31 @@ def run_omp(mission: dict[str, Any]) -> dict[str, Any]:
         stderr_detail = _read_stream_tail(stderr_capture)
 
     if return_code != 0:
-        detail = stderr_detail or last_assistant_error or last_assistant_text or "\n".join(recent_output)
-        raise RuntimeError(
-            f"OMP exited with code {return_code}: "
-            f"{detail[-1200:] or 'OMP exited without output'}"
+        detail = "See observed OMP error." if observed_error else (stderr_detail or "No stderr diagnostic.")
+        raise OmpExecutionError(
+            f"OMP exited with code {return_code}: {detail}",
+            observed_error,
         )
     result = extract_result(last_assistant_text)
     if result is None:
-        detail = last_assistant_error or last_assistant_text or stderr_detail or "\n".join(recent_output)
-        raise RuntimeError(
-            "OMP did not return the required JSON result: "
-            f"{detail[-1200:] or 'OMP returned no final result'}"
+        # Assistant text may be the rejected generation. Do not echo it as an error.
+        raise OmpExecutionError(
+            "OMP did not return the required JSON result." + (f" {stderr_detail}" if not observed_error else ""),
+            observed_error,
         )
-    return normalize_result(result, mission["mission_id"])
+    # This field is reserved for observed runtime evidence, not planner claims.
+    result.pop("provider_error", None)
+    try:
+        result = normalize_result(result, mission["mission_id"])
+    except RuntimeError as exc:
+        raise OmpExecutionError(str(exc), observed_error) from exc
+    if result["status"] != "completed":
+        result["summary"] = _sanitize_diagnostic(result["summary"], 1200)
+        if isinstance(result.get("error"), str):
+            result["error"] = _sanitize_diagnostic(result["error"], 1200)
+        if observed_error:
+            _attach_provider_error(result, observed_error)
+    return result
 
 
 def main() -> None:
@@ -610,10 +804,12 @@ def main() -> None:
             "mission_failed",
             error_type=type(exc).__name__,
         )
+        diagnostic = exc.provider_error if isinstance(exc, OmpExecutionError) else None
         failure(
             mission["mission_id"],
-            f"Worker OMP failed ({type(exc).__name__}).",
+            _provider_failure_summary(diagnostic) if diagnostic else f"Worker OMP failed ({type(exc).__name__}).",
             f"{type(exc).__name__}: {exc}",
+            diagnostic,
         )
 
 

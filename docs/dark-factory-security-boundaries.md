@@ -108,7 +108,7 @@ with a one-hour TTL. Mission payloads cannot choose the model, budget, TTL, or
 worker identity.
 - API Guard controls administrative key issuance, revocation, spend visibility,
 and exposure-event review. It is not on the inference data path and does not
-replace LiteLLM's `$25,000/365d` hard budget or provider-side spend limits.
+replace LiteLLM's `$30,000/month` hard budget or provider-side spend limits.
 - The `crew_rules.container_create_body` helper encodes a no-network, read-only,
   resource-limited container policy, but source search found no callsite that
   enforces it in a running mission path. Do not count that helper as an active

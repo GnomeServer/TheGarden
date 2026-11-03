@@ -30,18 +30,25 @@ The current deployment uses Docker Compose on the VM:
 Caddy project:    ~/caddy-service
 Grafana project:  ~/grafana-service
 Forgejo project:  ~/forgejo-service
-Docker network:   caddy_proxy
+Caddy network mode: host
 Caddy hostname:   infra-lab-services.tail494f6d.ts.net
 VM Tailscale:     100.94.49.45
 Grafana URL:      https://infra-lab-services.tail494f6d.ts.net/grafana/
 Forgejo URL:      https://infra-lab-services.tail494f6d.ts.net/forgejo/
 ```
 
-Caddy, Grafana, Prometheus, and Forgejo are attached to `caddy_proxy`. The configured application hostname is `infra-lab-services.tail494f6d.ts.net`, with Grafana under `/grafana/` and Forgejo under `/forgejo/`. Forgejo's HTTP upstream is `forgejo:3000`; its SSH clone endpoint is published separately on the VM's Tailscale address at port `2222`.
+Caddy is no longer attached to `caddy_proxy`; Grafana, Prometheus, and Forgejo
+remain on the shared application bridge. Caddy preserves the incoming Tailnet
+client IP in host network mode and routes to application services using
+loopback-only ports. Forgejo's HTTP upstream is `127.0.0.1:18001`; its SSH
+endpoint remains published on the VM's Tailnet address at port `2222`.
 
 The VM is a Tailscale node named `infra-lab-services` at `100.94.49.45`. Other tailnet devices should use the VM's MagicDNS hostname directly; no hosts override or `--resolve` option is required when MagicDNS is working.
 
-A direct request to the VM's Tailscale MagicDNS name returned `HTTP/2 200`, `Via: 1.1 Caddy`, and Grafana HTML with `<base href="/grafana/" />`. This verifies TLS, Caddy routing, Docker service discovery, and Grafana's `/grafana/` subpath configuration.
+A direct request to the VM's Tailscale MagicDNS name returned `HTTP/2 200`,
+`Via: 1.1 Caddy`, and Grafana HTML with `<base href="/grafana/" />`. This
+verifies TLS, Caddy routing, loopback upstream forwarding, and Grafana's
+`/grafana/` subpath configuration.
 
 ## Important architecture note
 
@@ -97,7 +104,7 @@ infra-lab-services.tail494f6d.ts.net {
     }
 
     handle @grafana {
-        reverse_proxy grafana:3000
+        reverse_proxy 127.0.0.1:18000
     }
 
     @forgejo {
@@ -106,7 +113,7 @@ infra-lab-services.tail494f6d.ts.net {
 
     handle @forgejo {
         uri strip_prefix /forgejo
-        reverse_proxy forgejo:3000
+        reverse_proxy 127.0.0.1:18001
     }
 
     handle {
@@ -122,7 +129,7 @@ infra-lab-services.tail494f6d.ts.net {
 Important details:
 
 - `infra-lab-services.tail494f6d.ts.net` must match the hostname used in the request's SNI. The old `tail494f6d.ts.net` alias and `server-debian.tail494f6d.ts.net` are not the configured Caddy site addresses.
-- `grafana:3000` and `forgejo:3000` are Docker service names. They resolve only when Caddy shares `caddy_proxy` with the corresponding service.
+- Caddy runs in host network mode and reaches Grafana, Forgejo, Keybroker, API Guard, Open WebUI, Agent Manager, and LiteLLM through loopback-only published ports; application containers continue to communicate on `caddy_proxy`.
 - `10.1.10.156` is the Proxmox host, not `10.1.10.1`.
 - `10.1.10.1` is the LAN gateway/router.
 - Proxmox serves HTTPS on port `8006`, so the upstream URL uses `https://`.
@@ -249,13 +256,16 @@ curl -k -vk https://10.1.10.2/
 
 The `--resolve` option is only a LAN-path test override. The current canonical MagicDNS name resolves directly to the VM's Tailscale address. A normal browser request from a tailnet device should use `https://infra-lab-services.tail494f6d.ts.net/grafana/login` without a hosts entry.
 
-If Caddy logs `lookup grafana ... no such host`, inspect the shared network:
+If Caddy returns 502 for Grafana, check the loopback-published upstream from the
+VM and confirm that Grafana is healthy:
 
 ```bash
+curl --fail --silent --show-error http://127.0.0.1:18000/api/health
 sudo docker network inspect caddy_proxy --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}'
 ```
 
-The output should contain `caddy` and the current `grafana_services-*` containers. The Compose project name is `grafana_services`. Do not leave old `monitoring-*` or `grafana-service-*` containers attached to the network, because multiple Grafana containers can create ambiguous Docker DNS results.
+The network output should include Grafana and other application containers, but
+not Caddy. Caddy runs in host network mode.
 
 ## Firewall findings
 
@@ -387,15 +397,15 @@ which this lab does not use:
 
 ```caddyfile
 forgejo.example.internal {
-    reverse_proxy forgejo:3000
+    reverse_proxy 127.0.0.1:18001
 }
 
 grafana.example.internal {
-    reverse_proxy grafana:3000
+    reverse_proxy 127.0.0.1:18000
 }
 
 ai.example.internal {
-    reverse_proxy open-webui:8080
+    reverse_proxy 127.0.0.1:18004
 }
 ```
 

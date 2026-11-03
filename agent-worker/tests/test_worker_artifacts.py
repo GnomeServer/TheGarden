@@ -28,6 +28,14 @@ def valid_model_session() -> dict[str, str]:
     }
 
 
+def valid_crew_metadata() -> dict[str, dict[str, dict[str, int]]]:
+    return {
+        "crew": {
+            "size": {"planners": 1, "coders": 1, "reviewers": 1},
+        },
+    }
+
+
 class ArtifactPackagingTests(unittest.TestCase):
     def test_single_file_is_uploaded_as_zip_and_preserves_its_relative_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -307,7 +315,110 @@ class ParentArtifactInputTests(unittest.TestCase):
             self.assertFalse((workspace / "link.txt").exists())
 
 
+class MissionStartupIdentityTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch.object(worker, "_docker_mission_user", return_value="1000:1000"))
+
+    async def run_image_result(self, output: dict, stderr: str = "") -> dict:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ca_file = root / "model-root.crt"
+            ca_file.write_text("certificate", encoding="utf-8")
+
+            def fake_docker(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                self.assertIn("OMP_EXPECTED_MISSION_ID=run-1", command)
+                identity_index = command.index("OMP_EXPECTED_MISSION_ID=run-1")
+                self.assertEqual(command[identity_index - 1], "-e")
+                self.assertLess(identity_index, len(command) - 1)
+                return SimpleNamespace(stdout=json.dumps(output), stderr=stderr)
+
+            with (
+                patch.object(worker, "WORKSPACE", root / "workspace"),
+                patch.object(worker, "MODEL_CA_FILE", str(ca_file)),
+                patch.object(worker.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(worker.subprocess, "run", side_effect=fake_docker),
+                patch.object(worker, "upload_artifact") as upload,
+                patch.object(worker, "save_mission_checkpoint") as save_checkpoint,
+                patch.object(
+                    worker, "get_mission_control",
+                    return_value={"mission_id": "run-1", "status": "running"},
+                ),
+            ):
+                result = await worker.run_mission_image(
+                    {"run_id": "run-1", "goal": "Create a result file"},
+                    {
+                        **valid_crew_metadata(),
+                        "artifact_upload_url": (
+                            f"https://{worker.CADDY_HOST}/v1/omp/missions/run-1/artifact"
+                        ),
+                        "artifact_upload_token": "run-scoped-capability",
+                    },
+                    model_session=valid_model_session(),
+                )
+            upload.assert_not_called()
+            save_checkpoint.assert_not_called()
+            self.assertEqual(list((root / "workspace").iterdir()), [])
+            return result
+
+    async def test_startup_failure_retains_identity_and_original_diagnostic(self) -> None:
+        failure = {
+            "mission_id": "run-1",
+            "status": "failed",
+            "summary": "Worker image could not read its mission file.",
+            "error": "FileNotFoundError: /mission.json",
+            "reviewer_count": None,
+            "artifacts": [],
+        }
+        result = await self.run_image_result(failure)
+        self.assertEqual(result, {key: value for key, value in failure.items() if key != "artifacts"})
+        self.assertNotIn("artifacts", result)
+
+    async def test_mismatched_results_are_rejected_with_sanitized_diagnostics(self) -> None:
+        provider_key = "sk-" + "a" * 30
+        for mission_id, status in (
+            ("unknown", "failed"),
+            ("another-mission", "completed"),
+            ("another-mission", "needs_input"),
+        ):
+            with self.subTest(mission_id=mission_id, status=status):
+                result = await self.run_image_result({
+                    "mission_id": mission_id,
+                    "status": status,
+                    "summary": "Worker image could not read its mission file.",
+                    "error": (
+                        "FileNotFoundError: /mission.json; model-session-key; "
+                        f"run-scoped-capability; {provider_key}\x1b[31m"
+                    ),
+                    "reviewer_approved": True,
+                    "artifacts": ["wrong-mission.txt"],
+                    "artifact": {"id": "wrong-artifact"},
+                    "question": "Should this result be accepted?",
+                })
+                self.assertEqual(result["mission_id"], "run-1")
+                self.assertEqual(result["status"], "failed")
+                self.assertIn("mismatched mission_id", result["summary"])
+                self.assertIn("could not read its mission file", result["error"])
+                self.assertIn("FileNotFoundError: /mission.json", result["error"])
+                self.assertIn(worker.REDACTED_CREDENTIAL, result["error"])
+                for secret in ("model-session-key", "run-scoped-capability", provider_key):
+                    self.assertNotIn(secret, result["error"])
+                self.assertNotIn("\x1b", result["error"])
+                self.assertEqual(set(result), {"mission_id", "status", "summary", "error"})
+
+    async def test_mismatch_diagnostic_uses_bounded_stderr_when_fields_are_invalid(self) -> None:
+        result = await self.run_image_result(
+            {"mission_id": "another-mission", "summary": {}, "error": []},
+            "PermissionError: /mission.json " + "x" * 2000,
+        )
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["error"].startswith("PermissionError: /mission.json"))
+        self.assertEqual(len(result["error"]), 1200)
+
+
 class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch.object(worker, "_docker_mission_user", return_value="1000:1000"))
+
     async def test_workspace_is_removed_only_after_upload_finishes(self) -> None:
         descriptor = {
             "id": "artifact-1",
@@ -350,6 +461,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("MODEL_BASE_URL=https://models.example/v1", env_contents)
                 self.assertIn("MODEL_API_KEY=model-session-key", env_contents)
                 self.assertIn("OMP_MODEL=worker-litellm/luna", env_contents)
+                self.assertIn("OMP_TIMEOUT_SECONDS=1200", env_contents)
                 self.assertEqual(stat.S_IMODE(env_path.stat().st_mode), 0o600)
                 self.assertNotIn(secret, " ".join(command))
                 self.assertNotIn("model-session-key", " ".join(command))
@@ -409,6 +521,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "goal": "Create a result file",
                     },
                     {
+                        **valid_crew_metadata(),
                         "artifact_upload_url": (
                             f"https://{worker.CADDY_HOST}/v1/omp/missions/run-1/artifact"
                         ),
@@ -455,6 +568,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 docker_stopped.set()
 
             metadata = {
+                **valid_crew_metadata(),
                 "artifact_upload_url": (
                     f"https://{worker.CADDY_HOST}/v1/omp/missions/cancel-run/artifact"
                 ),
@@ -490,6 +604,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ca_file = Path(directory) / "model-root.crt"
             ca_file.write_text("certificate", encoding="utf-8")
             metadata = {
+                **valid_crew_metadata(),
                 "artifact_upload_url": (
                     f"https://{worker.CADDY_HOST}/v1/omp/missions/queued-run/artifact"
                 ),
@@ -574,6 +689,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(stdout=json.dumps(outputs.pop(0)), stderr=None)
 
             metadata = {
+                **valid_crew_metadata(),
                 "operation": "mission",
                 "artifact_upload_url": (
                     f"https://{worker.CADDY_HOST}/v1/omp/missions/{run_id}/artifact"
@@ -736,6 +852,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 result = await worker.run_mission_image(
                     {"run_id": child_id, "goal": "Add a dark mode to the app."},
                     {
+                        **valid_crew_metadata(),
                         "artifact_upload_url": (
                             f"https://{worker.CADDY_HOST}/v1/omp/missions/{child_id}/artifact"
                         ),
@@ -791,6 +908,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 result = await worker.run_mission_image(
                     {"run_id": child_id, "goal": "Update the existing app."},
                     {
+                        **valid_crew_metadata(),
                         "artifact_upload_url": (
                             f"https://{worker.CADDY_HOST}/v1/omp/missions/{child_id}/artifact"
                         ),

@@ -33,7 +33,7 @@ class Pipe:
         BASE_REF: str = Field(default="main", description="Repository base ref.")
         WORKER_ROLE: str = Field(default="coder", description="Worker-pool role.")
         POLL_INTERVAL_SECONDS: float = Field(default=2.0, ge=0.5, le=30.0)
-        RUN_TIMEOUT_SECONDS: int = Field(default=900, ge=30, le=7200)
+        RUN_TIMEOUT_SECONDS: int = Field(default=1500, ge=30, le=7200)
         MAX_GOAL_CHARACTERS: int = Field(default=18000, ge=100, le=20000)
 
     def __init__(self) -> None:

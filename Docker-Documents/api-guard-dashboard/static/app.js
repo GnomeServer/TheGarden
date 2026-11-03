@@ -34,16 +34,14 @@
   }
 
   function renderBudget(budget) {
-    text("annual-spend", money(budget.annual_spend_usd));
-    text("annual-detail", `${money(budget.annual_limit_usd)} shared LiteLLM hard limit`);
+    text("rolling-spend", money(budget.rolling_365d_spend_usd));
+    text("rolling-detail", "Informational rolling 365-day total");
     text("monthly-spend", money(budget.monthly_spend_usd));
-    text("monthly-detail", `${money(budget.monthly_target_usd)} pacing target, not a separate cap`);
+    text("monthly-detail", `${money(budget.monthly_limit_usd)} shared LiteLLM monthly hard limit`);
     text("monthly-tokens", number(budget.monthly_tokens));
     text("token-detail", `${number(budget.prompt_tokens_monthly)} prompt · ${number(budget.completion_tokens_monthly)} completion`);
-    $("annual-bar").style.width = `${Math.min(100, Number(budget.annual_percent || 0))}%`;
-    $("monthly-bar").style.width = `${Math.min(100, Number(budget.monthly_target_percent || 0))}%`;
-    $("annual-bar").classList.toggle("warning", budget.annual_percent >= 80);
-    $("monthly-bar").classList.toggle("warning", budget.monthly_target_percent >= 100);
+    $("monthly-bar").style.width = `${Math.min(100, Number(budget.monthly_percent || 0))}%`;
+    $("monthly-bar").classList.toggle("warning", budget.monthly_percent >= 80);
   }
 
   function renderOpenAICosts(costs) {

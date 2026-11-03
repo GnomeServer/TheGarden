@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -52,6 +54,99 @@ class MissionCrewPlanTests(unittest.TestCase):
     def test_rejects_an_event_without_a_valid_plan(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing its crew plan"):
             worker.mission_crew_plan({"crew": {"size": {"coders": 0}}})
+
+
+
+@unittest.skipUnless(
+    os.environ.get("NATS_TEST_URL"), "NATS_TEST_URL is required for broker integration"
+)
+class ConsumerAckWaitTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.nc = await worker.nats.connect(os.environ["NATS_TEST_URL"])
+        self.js = self.nc.jetstream()
+        self.stream = f"ACK_WAIT_{uuid.uuid4().hex}"
+        self.subject = f"{self.stream}.jobs"
+        await self.js.add_stream(name=self.stream, subjects=[self.subject])
+
+    async def asyncTearDown(self) -> None:
+        try:
+            await self.js.delete_stream(self.stream)
+        finally:
+            await self.nc.close()
+
+    async def test_extends_window_without_resetting_pending_delivery(self) -> None:
+        subscription = await self.js.pull_subscribe(
+            self.subject,
+            stream=self.stream,
+            durable="worker",
+            config=worker.ConsumerConfig(
+                ack_policy=worker.AckPolicy.EXPLICIT, ack_wait=900, max_deliver=3
+            ),
+        )
+        await self.js.publish(self.subject, b"pending mission")
+        await subscription.fetch(1, timeout=2)
+        before = await self.js.consumer_info(self.stream, "worker")
+
+        await worker.ensure_consumer_ack_wait(self.js, self.stream, "worker", 1500)
+
+        after = await self.js.consumer_info(self.stream, "worker")
+        self.assertEqual(after.config.ack_wait, 1500)
+        self.assertEqual(after.config.max_deliver, 3)
+        self.assertEqual(after.config.filter_subject, self.subject)
+        self.assertEqual(after.num_ack_pending, 1)
+        self.assertEqual(after.delivered.stream_seq, before.delivered.stream_seq)
+        self.assertEqual(after.ack_floor.stream_seq, before.ack_floor.stream_seq)
+
+    async def test_keeps_a_longer_existing_window_unchanged(self) -> None:
+        await self.js.add_consumer(
+            self.stream,
+            config=worker.ConsumerConfig(durable_name="worker", ack_wait=1800),
+        )
+
+        await worker.ensure_consumer_ack_wait(self.js, self.stream, "worker", 1500)
+
+        after = await self.js.consumer_info(self.stream, "worker")
+        self.assertEqual(after.config.ack_wait, 1800)
+
+    async def test_leaves_missing_consumer_for_subscription_to_create(self) -> None:
+        await worker.ensure_consumer_ack_wait(self.js, self.stream, "worker", 1500)
+
+        with self.assertRaises(worker.NotFoundError):
+            await self.js.consumer_info(self.stream, "worker")
+
+
+class DockerMissionIdentityTests(unittest.TestCase):
+    def test_rootless_uses_daemon_owner_mapping(self) -> None:
+        with patch.object(
+            worker.subprocess, "run",
+            return_value=SimpleNamespace(stdout='["name=seccomp,profile=builtin","name=rootless"]'),
+        ):
+            self.assertEqual(worker._docker_mission_user(), "0:0")
+
+    def test_rootful_preserves_host_worker_identity(self) -> None:
+        with (
+            patch.object(
+                worker.subprocess, "run",
+                return_value=SimpleNamespace(stdout='["name=apparmor","name=seccomp,profile=builtin"]'),
+            ),
+            patch.object(worker.os, "getuid", return_value=2000),
+            patch.object(worker.os, "getgid", return_value=3000),
+        ):
+            self.assertEqual(worker._docker_mission_user(), "2000:3000")
+
+    def test_unknown_daemon_security_information_fails_closed(self) -> None:
+        for output in ("null", "{}", "not JSON"):
+            with self.subTest(output=output), patch.object(
+                worker.subprocess, "run", return_value=SimpleNamespace(stdout=output)
+            ), self.assertRaises((RuntimeError, json.JSONDecodeError)):
+                worker._docker_mission_user()
+
+    def test_daemon_query_failure_does_not_choose_a_user(self) -> None:
+        with patch.object(
+            worker.subprocess, "run",
+            side_effect=worker.subprocess.CalledProcessError(1, ["docker", "info"]),
+        ), self.assertRaises(worker.subprocess.CalledProcessError):
+            worker._docker_mission_user()
 
 
 class DockerModelHostMappingTests(unittest.TestCase):

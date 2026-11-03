@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 import nats
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+from nats.js.errors import NotFoundError
 
 
 NATS_URL = os.getenv("NATS_URL", "nats://127.0.0.1:4222")
@@ -39,6 +40,10 @@ WORKSPACE = Path(
 WORKER_CONSUMER = os.getenv(
     "WORKER_CONSUMER", f"agent-workers-{WORKER_ROLE}"
 )
+
+
+OMP_JOB_TIMEOUT_SECONDS = 1200
+MISSION_ACK_WAIT_SECONDS = 1500
 
 KEYBROKER_URL = os.getenv(
     "KEYBROKER_URL",
@@ -109,6 +114,24 @@ def docker_model_host_args(base_url: str) -> list[str]:
     return []
 
 
+def _docker_mission_user() -> str:
+    """Keep bind-mounted files owned by the worker across Docker user namespaces."""
+    completed = subprocess.run(
+        ["docker", "info", "--format", "{{json .SecurityOptions}}"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    security_options = json.loads(completed.stdout)
+    if not isinstance(security_options, list):
+        raise RuntimeError("Docker did not report its security options")
+    if "name=rootless" in security_options:
+        # Root inside a rootless daemon maps to its unprivileged host owner.
+        return "0:0"
+    return f"{os.getuid()}:{os.getgid()}"
+
+
 REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]"
 CREDENTIAL_PATTERN = re.compile(
     r"sk-or-v1-[A-Fa-f0-9]{20,}|"
@@ -161,6 +184,7 @@ def keybroker_request(
     if not isinstance(response_data, dict):
         raise RuntimeError("Keybroker returned an invalid response")
     return response_data
+
 
 
 async def validate_keybroker_worker_identity() -> None:
@@ -1195,6 +1219,8 @@ async def run_mission_image(
             "error": "Set MODEL_CA_FILE to the installed Caddy root certificate.",
         }
 
+    container_user = await asyncio.to_thread(_docker_mission_user)
+
     mission = {
         "mission_id": run_id,
         "goal": goal.strip(),
@@ -1262,14 +1288,13 @@ async def run_mission_image(
                     f"MODEL_BASE_URL={model_base_url}",
                     f"MODEL_API_KEY={session_key}",
                     f"OMP_MODEL=worker-litellm/{model}",
-                    "OMP_TIMEOUT_SECONDS=600",
+                    f"OMP_TIMEOUT_SECONDS={OMP_JOB_TIMEOUT_SECONDS}",
                     "",
                 ]
             ),
             encoding="utf-8",
         )
         os.chmod(env_file, 0o600)
-        del session_key
 
         container_name = f"omp-mission-{uuid.uuid5(uuid.NAMESPACE_URL, run_id).hex[:20]}"
         cancellation = asyncio.Event()
@@ -1278,7 +1303,7 @@ async def run_mission_image(
             "docker", "run", "--rm", "--name", container_name,
             "--network", "bridge",
             "--read-only",
-            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--user", container_user,
             "--memory", "2g",
             "--cpus", "2",
             "--pids-limit", "128",
@@ -1286,6 +1311,7 @@ async def run_mission_image(
             "--security-opt", "no-new-privileges:true",
             "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m,mode=1777",
             "--env-file", str(env_file),
+            "-e", f"OMP_EXPECTED_MISSION_ID={run_id}",
             "--mount", f"type=bind,src={mission_path},dst=/mission.json,readonly",
             "--mount", f"type=bind,src={work_dir},dst=/work",
         ]
@@ -1410,9 +1436,22 @@ async def run_mission_image(
                     "summary": "Worker OMP image returned a non-object result.",
                 }
             if result.get("mission_id") not in (None, run_id):
+                diagnostic = "; ".join(
+                    detail.strip()
+                    for field in ("summary", "error")
+                    if isinstance(detail := result.get(field), str) and detail.strip()
+                ) or completed.stderr or "No diagnostic in rejected worker result."
+                diagnostic = redact_credentials(diagnostic, session_key)[0]
+                if isinstance(upload_token, str) and upload_token:
+                    diagnostic = diagnostic.replace(upload_token, REDACTED_CREDENTIAL)
                 return {
+                    "mission_id": run_id,
                     "status": "failed",
                     "summary": "Worker OMP result has a mismatched mission_id.",
+                    "error": "".join(
+                        char for char in diagnostic
+                        if char.isprintable() or char in "\n\t"
+                    )[:1200],
                 }
             result["mission_id"] = run_id
             result.setdefault("summary", "Worker OMP finished.")
@@ -1745,6 +1784,32 @@ async def respond_to_cancellation(message: Any) -> None:
             return
 
 
+async def ensure_consumer_ack_wait(
+    js: Any, stream: str, durable: str, ack_wait_seconds: int
+) -> None:
+    """Extend an existing durable before subscribing to long-running jobs."""
+    try:
+        info = await js.consumer_info(stream, durable)
+    except NotFoundError:
+        return
+
+    config = info.config
+    current_ack_wait = getattr(config, "ack_wait", None)
+    if (
+        isinstance(current_ack_wait, (int, float))
+        and current_ack_wait >= ack_wait_seconds
+    ):
+        return
+
+    config.ack_wait = ack_wait_seconds
+    await js.add_consumer(stream, config=config)
+    print(
+        f"Updated JetStream consumer {durable} ack_wait to "
+        f"{ack_wait_seconds}s",
+        flush=True,
+    )
+
+
 async def main() -> None:
     nc = await nats.connect(
         NATS_URL,
@@ -1768,13 +1833,22 @@ async def main() -> None:
 
     await nc.subscribe(f"agent.workers.health.{WORKER_ROLE}", cb=reply_health)
     heartbeat = asyncio.create_task(heartbeat_loop())
+    await ensure_consumer_ack_wait(
+        js, "AGENT_RUNS", WORKER_CONSUMER, MISSION_ACK_WAIT_SECONDS
+    )
+    await ensure_consumer_ack_wait(
+        js,
+        "AGENT_RUNS",
+        f"agent-worker-resume-{WORKER_ID}",
+        MISSION_ACK_WAIT_SECONDS,
+    )
     subscription = await js.pull_subscribe(
         "agent.runs.created",
         stream="AGENT_RUNS",
         durable=WORKER_CONSUMER,
         config=ConsumerConfig(
             ack_policy=AckPolicy.EXPLICIT,
-            ack_wait=900,
+            ack_wait=MISSION_ACK_WAIT_SECONDS,
             deliver_policy=DeliverPolicy.ALL,
         ),
     )
@@ -1785,7 +1859,7 @@ async def main() -> None:
         durable=f"agent-worker-resume-{WORKER_ID}",
         config=ConsumerConfig(
             ack_policy=AckPolicy.EXPLICIT,
-            ack_wait=900,
+            ack_wait=MISSION_ACK_WAIT_SECONDS,
             deliver_policy=DeliverPolicy.ALL,
         ),
     )

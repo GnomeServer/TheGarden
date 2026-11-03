@@ -23,6 +23,12 @@
       loop_control:
         label: "{{ item.item.name }}"
 
+    - name: Ensure shared application Docker network exists
+      community.docker.docker_network:
+        name: caddy_proxy
+        driver: bridge
+        state: present
+
     - name: Deploy Compose project
       community.docker.docker_compose_v2:
         project_src: "{{ item.path }}"

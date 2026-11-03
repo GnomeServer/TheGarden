@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     api_guard_alert_ack_secret: str = Field(
         default="", validation_alias="API_GUARD_ALERT_ACK_SECRET"
     )
-    model_name: str = Field(default="gpt-5.6-luna", validation_alias="MODEL_NAME")
+    model_name: str = Field(default="luna", validation_alias="MODEL_NAME")
     reasoning_effort: str = Field(default="medium", validation_alias="REASONING_EFFORT")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     artifact_retention_days: int = Field(

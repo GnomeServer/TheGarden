@@ -94,9 +94,10 @@ Deploy the Compose projects in dependency order:
 ansible-playbook playbooks/docker-services.yml --ask-become-pass
 ```
 
-The playbook targets `docker_hosts`, not `all`. Caddy starts first because it
-creates `caddy_proxy`; Agent Manager starts after the networks and dependent
-services are available.
+The playbook targets `docker_hosts`, not `all`. It creates the shared
+`caddy_proxy` application network before deploying services. Caddy runs in host
+network mode to preserve Tailnet source addresses; Agent Manager starts after
+the networks and dependent services are available.
 
 ## Worker deployment
 

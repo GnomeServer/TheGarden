@@ -8,6 +8,11 @@ import agent_manager_pipe
 from agent_manager_pipe import Pipe
 
 
+class PipeTimeoutConfigurationTests(unittest.TestCase):
+    def test_default_wait_exceeds_the_worker_omp_limit(self) -> None:
+        self.assertEqual(Pipe().valves.RUN_TIMEOUT_SECONDS, 1500)
+
+
 class ProjectDirectiveTests(unittest.TestCase):
     def test_script_filename_instruction_remains_in_the_mission_goal(self) -> None:
         self.assertEqual(

@@ -8,7 +8,8 @@ This directory documents the Docker services running on the `infra-lab-services`
 Proxmox host:       server-debian / 10.1.10.156
 Caddy VM:           infra-lab-services / 10.1.10.2
 VM Tailscale:       100.94.49.45
-Shared Docker net:  caddy_proxy
+Shared app network: caddy_proxy
+Caddy mode:         host network; loopback-only upstream ports
 Caddy hostname:     infra-lab-services.tail494f6d.ts.net
 Grafana URL:        https://infra-lab-services.tail494f6d.ts.net/grafana/
 ```
@@ -23,8 +24,8 @@ Open WebUI, Ollama, llama.cpp, and LiteLLM also have Compose projects on the VM.
 Manager control-plane Compose project is stored in
 `TheGarden/Docker-Documents/agent-manager-service` and includes the manager
 API, a private PostgreSQL database, and NATS JetStream. Its API is
-loopback-bound on port `8090` and is available to containers on `caddy_proxy` at
-`http://agent-manager:8000`. The base Compose file does not publish NATS.
+loopback-bound on port `8090`; host-networked Caddy uses `127.0.0.1:8090`, and
+containers on `caddy_proxy` use `http://agent-manager:8000`. The base Compose file does not publish NATS.
 Remote workers need `compose.worker-test.yml`, which binds port `4222` to the
 VM Tailscale address. That pool is documented in [`../agent-worker/README.md`](../agent-worker/README.md).
 
@@ -33,14 +34,14 @@ The VM has its own Tailscale identity, so other tailnet devices can use the Magi
 ## Documents
 
 - [`caddy_service/caddy-setup.md`](caddy_service/caddy-setup.md) — VM networking, Caddy routes, TLS/SNI testing, Docker network checks, and Proxmox connectivity.
-- [`caddy_service/README.md`](caddy_service/README.md) — Caddy Compose deployment, persistent TLS volumes, network membership, and operations.
-- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — The checked-in routes include the Tailscale-only `/keybroker/`, `/api-guard/`, and `/litellm/` endpoints, Agent Manager routes, `/grafana/`, `/forgejo/`, and the Proxmox fallback. There is no `/llama/` or Open WebUI route.
-- [`grafana_services/README.md`](grafana_services/README.md) — Grafana, Prometheus, and Node Exporter deployment and the shared `caddy_proxy` network.
+- [`caddy_service/README.md`](caddy_service/README.md) — Caddy host networking, loopback-only upstream publishing, persistent TLS volumes, and operations.
+- [`caddy_service/Caddyfile`](caddy_service/Caddyfile) — The routes include the Tailscale-only `/keybroker/`, `/api-guard/`, and `/litellm/` endpoints, Agent Manager routes, `/grafana/`, `/forgejo/`, and the Proxmox fallback. There is no `/llama/` route.
+- [`grafana_services/README.md`](grafana_services/README.md) — Grafana, Prometheus, and Node Exporter deployment and the shared application `caddy_proxy` network.
 - [`forgejo/README.md`](forgejo/README.md) — Forgejo with PostgreSQL, HTTPS Git access, SSH clone access, and first-run setup.
 - [`llama_services/README.md`](llama_services/README.md) — llama.cpp model serving. The API is Docker-network only; Caddy does not publish `/llama/`.
-- [`litellm-service/README.md`](litellm-service/README.md) — LiteLLM gateway, virtual keys, and the loopback/`caddy_proxy` endpoints that actually exist.
+- [`litellm-service/README.md`](litellm-service/README.md) — LiteLLM gateway, virtual keys, and loopback/application-network endpoints.
 - [`keybroker-service/README.md`](keybroker-service/README.md) — per-run LiteLLM sessions, safe exposure-event forwarding, and Keybroker operations.
-- [`open_webui_services/README.md`](open_webui_services/README.md) — Open WebUI and Ollama. The Compose file does not publish a host port, and the Caddyfile does not proxy Open WebUI.
+- [`open_webui_services/README.md`](open_webui_services/README.md) — Open WebUI and Ollama. Caddy routes through a loopback-only host port.
 - [`api-guard-dashboard/README.md`](api-guard-dashboard/README.md) — the separate administrator-only budget, key-rotation, JEV-advisory, and OMP exposure dashboard.
 - [`agent-manager-service/README.md`](agent-manager-service/README.md) — Agent Manager, PostgreSQL, NATS JetStream, and API verification. Ansible deployment is in [`../Ansible/README.md`](../Ansible/README.md), not in that service README.
 - [`../agent-worker/README.md`](../agent-worker/README.md) — Remote worker installation, dynamic script prompts, and NATS configuration.
@@ -64,5 +65,15 @@ curl -4 -k -i -L --connect-timeout 5 --resolve infra-lab-services.tail494f6d.ts.
 Do not test with only `https://10.1.10.2/`. Caddy uses the hostname/SNI `infra-lab-services.tail494f6d.ts.net`; a direct IP request can fail during the TLS handshake even when the service is healthy.
 
 Ansible deployment is documented in [`../Ansible/README.md`](../Ansible/README.md). `Ansible/playbooks/docker-services.yml` deploys `caddy`, `keybroker`, `forgejo`, `open-webui`, `llama`, `grafana`, `agent-manager`, and `api-guard-dashboard` from paths in `inventory/group_vars/docker_hosts.yml`. Ensure Keybroker, API Guard, and Caddy each have their private `.env` files at the configured paths before deployment. The playbook does not deploy `litellm-service` or apply `compose.worker-test.yml`. Compose `.env` files remain local and are not committed.
+
+## Spend and model routing
+
+LiteLLM enforces the shared `$30,000` ceiling per calendar month. Keep API
+Guard and Keybroker settings aligned at `30000`. Checked-in defaults expose
+only `luna`; Google routes are not configured yet. See the
+[LiteLLM](litellm-service/README.md), [Keybroker](keybroker-service/README.md),
+and [API Guard](api-guard-dashboard/README.md) guides for details. LiteLLM is
+outside the Ansible playbook and must be restarted from its Compose project
+after gateway configuration changes.
 
 Do not paste `docker compose config` output into chat or tickets. It expands environment variables and can reveal service passwords or API tokens.

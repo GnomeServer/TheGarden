@@ -2,19 +2,16 @@
 
 This Compose project deploys Grafana, Prometheus, and Node Exporter inside `infra-lab-services`. The Compose project name is `grafana_services`.
 
-The containers join the existing Docker network used by Caddy instead of creating a private network. The default network name is:
+The containers join the shared application Docker network `caddy_proxy`.
+Host-networked Caddy is not attached to that bridge; it proxies to Grafana
+through the loopback-only mapping `127.0.0.1:18000:3000`.
 
-```text
-caddy_proxy
-```
-
-The network name can be changed with `CADDY_NETWORK` in `.env`, but it must be the exact network that the Caddy container joins. Docker Compose registers the Grafana service name as `grafana` on this network, allowing Caddy to resolve `grafana:3000` through Docker DNS.
-
-No service ports are published directly to the VM LAN. Caddy is the HTTPS entry point.
+No application ports are published to the VM's LAN interfaces. Caddy remains
+the HTTPS entry point.
 
 ## Current status
 
-The stack is running on `infra-lab-services` and shares `caddy_proxy` with Caddy. The verified URL is:
+The stack joins `caddy_proxy`; Caddy reaches Grafana via its loopback-only port. The verified URL is:
 
 ```text
 https://infra-lab-services.tail494f6d.ts.net/grafana/
@@ -95,20 +92,22 @@ The Caddyfile route is:
 }
 
 handle @grafana {
-    reverse_proxy grafana:3000
+    reverse_proxy 127.0.0.1:18000
 }
 ```
 
-Grafana is configured for the `/grafana/` subpath through `GF_SERVER_ROOT_URL` and `GF_SERVER_SERVE_FROM_SUB_PATH`.
+Grafana is configured for the `/grafana/` subpath through `GF_SERVER_ROOT_URL` and `GF_SERVER_SERVE_FROM_SUB_PATH`. Its host port is bound to loopback only; Caddy uses host networking and does not join `caddy_proxy`.
 
-Caddy and the Grafana container must be attached to the same Docker network. The Grafana service name `grafana` is automatically resolvable from Caddy on that network. If Caddy logs `lookup grafana ... no such host`, inspect the network membership before changing the upstream hostname:
+If the route returns 502, check Grafana's loopback mapping and health, then
+inspect the application network to confirm Grafana is connected:
 
 ```bash
 sudo docker network inspect caddy_proxy \
   --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}'
 ```
 
-The output must include both the Caddy container and the Grafana container. Do not leave old `monitoring-*` or `grafana-service-*` containers attached to the network, because multiple Grafana containers can create ambiguous Docker DNS results.
+The output should include the Grafana and other application containers; Caddy
+runs in host network mode and is not listed on `caddy_proxy`.
 
 To remove stale containers without removing volumes:
 
@@ -118,11 +117,12 @@ sudo docker ps -a --format '{{.Names}}' | grep -E '^(monitoring-|grafana-service
 
 Do not combine `docker ps -q` with `docker ps --format`; Docker ignores the custom format when `-q` is present.
 
-Caddy's Compose project creates `caddy_proxy`. Do not mark that network `external: true` in the Caddy project. This project already joins it as an external network. If Caddy is missing from the network, start the Caddy project instead of rewriting it to join a network it is supposed to create.
-
-Use the same network name in both Compose projects, then recreate the containers:
+Caddy no longer creates or joins `caddy_proxy`. The deployment playbook creates
+the shared application network before deploying the Compose projects. For a
+manual deployment, create it once before starting any dependent stack:
 
 ```bash
+sudo docker network inspect caddy_proxy >/dev/null 2>&1 || sudo docker network create caddy_proxy
 sudo docker compose up -d --force-recreate
 ```
 
@@ -134,11 +134,13 @@ sudo docker compose restart caddy
 sudo docker compose logs --tail=100 caddy
 ```
 
-Do not use the Grafana container name or a container IP as the permanent upstream. Docker service DNS on the shared network is the stable route.
+Do not use container IPs or Docker service names as Caddy upstreams. Host-networked
+Caddy uses `127.0.0.1:18000`; containers on `caddy_proxy` continue to use Docker
+service DNS for container-to-container requests.
 
-This `grafana:3000` route assumes Caddy is also running in Docker. A native systemd Caddy process cannot use Docker's service DNS. In that setup, either move Caddy into the shared Docker network or deliberately publish Grafana only on loopback and change the native Caddy upstream to `127.0.0.1:3000`. Do not publish Grafana on the VM's LAN address.
-
-Do not publish Grafana's port `3000` unless there is a specific temporary testing requirement.
+Grafana's container port `3000` is not exposed to the LAN. Compose maps it only
+to `127.0.0.1:18000` for Caddy's upstream; Caddy's host-network listener
+preserves the original client IP.
 
 ## Test the Grafana URL
 

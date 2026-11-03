@@ -87,6 +87,11 @@ The worker normalizes those counts into an explicit `crew_plan` object in
 `metadata.mission` as a compatibility fallback. The OMP image requires this
 explicit plan before starting the mission.
 
+The host also passes `OMP_EXPECTED_MISSION_ID` directly to Docker, independently
+of the mounted JSON. The image requires that identity and rejects a mission
+file naming a different mission before starting OMP. Missing, unreadable, or
+invalid mission files report failure under the host-supplied identity.
+
 ## Mission OMP image
 
 The NATS queue listener is `worker.py`; it launches the pinned OMP job image.
@@ -103,6 +108,34 @@ with `reviewer_count` reset to zero for the new review cycle.
 it is not the attempt number. Wrapper-generated failures use `null` when no
 valid final OMP result exists. The Agent Manager mission-status JSON exposes
 this count and the clarification question.
+
+The planner, coder, and reviewer can research public sources with `web_search`
+and read public HTTPS pages with `read`. Each temporary OMP home pins
+`modelRoles.web` to `web/duckduckgo`, sets an empty
+`retry.fallbackChains.web`, and bounds search transport to 30 seconds. Search
+needs no additional API key and does not fall through to model-backed search.
+Search throttling and unavailable sources remain real failures, not permission
+to invent evidence. The crew requires dated source links and an access date for
+current-information claims, with independent reviewer checks. Undated archive
+pages, access dates, and dates on unrelated entries do not establish current
+circulation. Specify a date window when freshness is important.
+
+Research restrictions are agent policy, not an enforced egress boundary.
+The existing container sandbox and service firewall are unchanged; arbitrary
+shell execution and environment-held model credentials still require trusted
+missions. The prompts forbid shell-based networking, private/authenticated
+sources, sending secrets in searches, and following retrieved instructions.
+Do not describe this change as network or credential isolation.
+
+For open-ended examples, the crew prefers benign material. A provider
+content-filter stop remains a failed mission: the crew must not retry the
+blocked text, bypass filtering, or treat it as reviewer correction feedback.
+Observed assistant/child errors now survive valid planner failure JSON in a
+bounded, redacted `error` string and structured `provider_error` metadata.
+The Manager already persists this result and exposes `error` in mission status.
+Provider codes and request/response IDs are included only when observed; normal
+prose mentioning a filter is not provider evidence. Only the latest observed
+error is retained, not a complete transcript or the rejected generation.
 
 For `needs_input`, the worker retains a bounded checkpoint under
 `~/agent-workspace/.pending-missions/` until the mission resumes or is explicitly
@@ -136,6 +169,25 @@ image on each worker. Rebuild manually after changing that directory:
 docker build --pull --tag local/omp-worker:18.12.5 \
   "$HOME/agent-worker/omp-image"
 ```
+
+For an existing running worker, deploy and restart the updated **host worker
+first**, while the old image is still installed; only then build/promote the
+new image. The old image ignores the additional identity environment variable,
+but the new image requires it. Alternatively, drain and stop the worker before
+the complete source/image rollout, including an Ansible deployment, and start
+it only after both are installed. Do not run an old host worker with the new
+image. Preserve the previous image under a rollback tag before replacing the
+active tag; restore the old image before rolling back the host source.
+
+The host queries the active Docker daemon's security options before each
+mission. Rootful Docker runs the container with the worker's host UID/GID.
+Rootless Docker instead uses container `0:0`, which maps to the unprivileged
+daemon owner's host identity. Reusing the host's nonzero numeric UID inside a
+rootless daemon maps to a subordinate host UID and cannot read a `0600`
+mission file or write the private workspace. Keep the worker and rootless
+daemon under the same host account. This does not grant host root access:
+read-only root, dropped capabilities, no-new-privileges, resource limits, and
+owner-only host file permissions remain enforced.
 
 ## NATS network
 
@@ -365,6 +417,73 @@ Pipe. Do not publish a normal pooled mission with `metadata.worker_id`.
 
 ## Troubleshooting
 
+### Mission startup failure or mismatched identity
+
+A wrapper startup failure is not evidence that inference ran. Inspect the
+failure's `error` alongside its summary: a missing or unreadable `/mission.json`
+must retain the original file error and the expected queued mission ID.
+Results explicitly naming another mission (including the old `unknown`
+startup ID) remain rejected. Their bounded diagnostic is retained with
+session keys, run capabilities, recognized provider credentials, and unsafe
+control characters removed; their artifacts and status are not accepted.
+Check the bind source, worker UID/GID permissions, and Docker daemon's
+filesystem view on the affected host rather than weakening identity checks.
+
+On 2026-11-03, the identity fix was initially deployed to `worker-03`
+(`bgurrol4@100.94.145.104`). The host worker restarted after a fresh idle
+heartbeat, no active mission container, and empty pending/ack-pending queues.
+The rebuilt `local/omp-worker:18.12.5-identity-20261103` image was promoted to
+`local/omp-worker:18.12.5`; the preceding image remains tagged
+`local/omp-worker:18.12.5-before-identity-20261103`. Actual image checks proved
+missing-file failure identity preservation, successful loading of a valid
+read-only mission mount, and rejection of a mismatched mounted mission. These
+loader checks did not exercise model inference.
+
+Later that day, authorized SSH access to `worker-05`
+(`dow_admin@100.79.110.117`) became available. A no-network container probe
+confirmed rootless Docker was exposing the `0600` mission file as container
+UID 0, while the host launched OMP as container UID 1000. The old loader
+reported `PermissionError` with mission ID `unknown`, masking the cause.
+
+Sammy now runs the rootless-aware host worker and the matching identity-aware
+image, tagged `local/omp-worker:18.12.5-rootless-20261103` and promoted to
+`local/omp-worker:18.12.5`. Its previous image is retained as
+`local/omp-worker:18.12.5-before-rootless-20261103`; source backups end in
+`.before-rootless-20261103`. Mission
+`72edc317-9b94-4fcd-8fa5-63235c345efb` completed on `worker-05`; its downloaded
+ZIP passed checksum and exact-content checks. Sammy's temporary NATS
+quarantine and systemd unit were removed after verification. Other workers
+were not updated by this rootless repair.
+
+### Research and provider-diagnostic repair (2026-11-03)
+
+Mission `0d73a61e-f9d8-4fd1-87ce-537490825a06` failed while the coder tried
+to quote the Navy Seal copypasta. LiteLLM recorded truncated `write` arguments;
+the worker reported a content-filter stop. The image now permits source-backed
+research and preserves observed runtime error details.
+
+The updated image is deployed on Donatello as
+`local/omp-worker:18.12.5-research-20261103`, promoted to
+`local/omp-worker:18.12.5`; rollback image:
+`local/omp-worker:18.12.5-before-research-20261103`. Host worker code and
+firewall rules were not changed. Other workers were not updated: Inkii,
+Naruto, and Michelangelo rejected SSH authentication, Raphael timed out, and
+Sammy became unreachable during staging.
+
+Verification: 28 entrypoint tests passed locally; 56 additional worker tests
+passed using Donatello's dependency-equipped Python, with three NATS integration
+tests skipped. Public DuckDuckGo search succeeded in the pinned image. A
+standalone final-image mission on the control-plane host used the real model,
+created a benign sourced Markdown artifact, received one reviewer rejection,
+then passed independent review. Its evidence dated May–July 2026, not proof of
+ongoing circulation on November 3. This smoke did not exercise Manager upload
+or Open WebUI delivery. All temporary model keys were revoked.
+
+The earlier Donatello smoke timed out after starting its coder. Subsequent
+worker-identity requests returned HTTP 403 from the control plane. Diagnose
+that separate access problem before treating a new queued mission as an
+end-to-end deployment check; do not relax access controls to make the smoke pass.
+
 ### NATS connection refused
 
 On the service host, use both Compose files and check the published port:
@@ -403,13 +522,43 @@ A single delivery should produce one completion event. Check the `run_id`,
 old worker process is still subscribed, different workers are using different
 consumer names, or the job exceeded the JetStream acknowledgement window.
 
-Keep the maximum model and script time below `ack_wait` (currently 900 seconds)
-or increase `ack_wait` when intentionally allowing longer jobs. Stop stale
-worker processes before testing:
+Keep the maximum OMP runtime at 1200 seconds and mission `ack_wait` at 1500
+seconds. Worker startup upgrades existing role and resume consumers to this
+window without lowering a longer configured value. Stop stale worker processes
+before testing:
 
 ```bash
 pgrep -af worker.py
 ```
+
+### Worker exits while upgrading the acknowledgement window
+
+The pinned `nats-py==2.9.0` updates an existing durable through
+`js.add_consumer(stream, config=existing_config)`, not `update_consumer`.
+Startup preserves the existing consumer configuration and delivery state while
+extending `ack_wait`. An older worker that reports
+`NATS client cannot update the mission consumer ack_wait` needs the corrected
+worker source deployed before restarting:
+
+```bash
+sudo systemctl reset-failed dark-factory-agent-worker
+sudo systemctl restart dark-factory-agent-worker
+sudo journalctl -u dark-factory-agent-worker -n 50 --no-pager
+```
+
+Verify fresh manager heartbeats and queue consumption, not only a successful
+systemd start. Run the consumer migration regression cases against a disposable
+JetStream-enabled broker with the pinned worker requirements installed:
+
+```bash
+cd agent-worker
+NATS_TEST_URL=nats://127.0.0.1:4222 \
+  python -m unittest discover -s tests -p test_worker_execution.py
+```
+
+Without `NATS_TEST_URL`, the broker integration cases are skipped. They verify
+that extending the window retains pending deliveries, preserves longer windows,
+and leaves missing consumers for normal subscription creation.
 
 ### TLS certificate failure
 

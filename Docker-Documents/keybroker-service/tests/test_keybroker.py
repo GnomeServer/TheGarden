@@ -28,7 +28,7 @@ def test_client(tmp_path, monkeypatch):
             "allowed_models": ["luna"],
             "allow_unpriced_local_model_bases": ["http://llama:8080/v1"],
             "session_max_budget_usd": 25.0,
-            "admin_max_budget_usd": 25000.0,
+            "admin_max_budget_usd": 30000.0,
             "session_ttl_seconds": 3600,
             "reaper_interval_seconds": 3600,
             "model_base_url": "https://models.example.test/v1",
@@ -607,7 +607,7 @@ def test_admin_routes_require_bearer_and_strip_raw_keys_and_content(test_client,
 def test_admin_key_generation_enforces_model_and_budget_policy(test_client, monkeypatch):
     install_litellm_stub(monkeypatch)
     headers = {"Authorization": "Bearer dashboard-test-token"}
-    base_body = {"alias": "admin-test", "models": ["luna"], "max_budget_usd": 20}
+    base_body = {"alias": "admin-test", "models": ["luna"], "max_budget_usd": 30000}
     disallowed = test_client.post(
         "/v1/admin/keys/generate",
         headers=headers,
@@ -617,7 +617,7 @@ def test_admin_key_generation_enforces_model_and_budget_policy(test_client, monk
     over_budget = test_client.post(
         "/v1/admin/keys/generate",
         headers=headers,
-        json={**base_body, "max_budget_usd": 25001},
+        json={**base_body, "max_budget_usd": 30000.01},
     )
     assert over_budget.status_code == 422
     generated = test_client.post(

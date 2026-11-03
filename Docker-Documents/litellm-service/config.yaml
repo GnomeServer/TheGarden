@@ -20,7 +20,7 @@ litellm_settings:
   num_retries: 1
   request_timeout: 600
   set_verbose: false
-  # One hard, shared 365-day ceiling across every LiteLLM key.
-  # The API Guard dashboard displays a $25,000 default and monthly pacing target.
-  max_budget: 25000
-  budget_duration: 365d
+  # One hard, shared monthly ceiling across every LiteLLM key.
+  # With the default UTC timezone, 30d resets on the first day of the month.
+  max_budget: 30000
+  budget_duration: 30d

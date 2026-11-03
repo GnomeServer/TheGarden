@@ -10,9 +10,9 @@ records, or NATS.
 ## Deployment
 
 The Compose project has a private PostgreSQL service and a Keybroker service on
-the external `caddy_proxy` network. Neither service publishes a host port. The
-Keybroker container joins `caddy_proxy` so Caddy and API Guard can reach it;
-Postgres is attached only to the private `keybroker_internal` network.
+the external `caddy_proxy` network. Keybroker publishes HTTP only on
+`127.0.0.1:18002` for host-networked Caddy; API Guard reaches it container-to-container
+at `http://keybroker:8000`. Postgres is attached only to `keybroker_internal`.
 
 Create a local environment file and protect it:
 
@@ -38,14 +38,13 @@ docker compose ps
 
 The required Caddy route is Tailnet-only at
 `https://infra-lab-services.tail494f6d.ts.net/keybroker`; it strips
-`/keybroker`, proxies to `keybroker:8000`, and injects
-`X-Darkfactory-Client-IP` with the actual remote host plus
-`X-Darkfactory-Proxy-Token` with the configured proxy token. Keybroker checks
-both headers and maps the IP to a worker server-side. It does not accept
-`worker_id` in request bodies or trust worker-supplied identity. Do not expose
-the service to non-Caddy clients. API Guard uses `http://keybroker:8000` over
-Docker networking and authenticates admin routes with
-`Authorization: Bearer $KEYBROKER_DASHBOARD_TOKEN`.
+`/keybroker`, proxies to `127.0.0.1:18002`, and injects
+`X-Darkfactory-Client-IP` from Caddy's original client address and
+`X-Darkfactory-Proxy-Token` from its private environment. Keybroker validates
+both headers and maps the IP server-side. It does not trust `worker_id` in
+request bodies or worker-supplied identity. Keep the host-published port
+loopback-only. API Guard uses `http://keybroker:8000` over Docker networking and
+authenticates admin routes with `Authorization: Bearer $KEYBROKER_DASHBOARD_TOKEN`.
 
 The Keybroker trusted-source allowlist includes the six designated agent hosts:
 
@@ -76,12 +75,21 @@ worker request contract but is not stored or passed to LiteLLM.
 
 Default settings are `luna`, a `$25` per-session max budget, and a 3600-second
 key lifetime. They can be changed using `KEYBROKER_DEFAULT_MODEL`,
-`KEYBROKER_ALLOWED_MODELS`, `KEYBROKER_SESSION_MAX_BUDGET_USD`, and
+`KEYBROKER_ALLOWED_MODELS`, `KEYBROKER_SESSION_MAX_BUDGET_USD`,
+`KEYBROKER_ADMIN_MAX_BUDGET_USD` (default `$30,000`), and
 `KEYBROKER_SESSION_TTL_SECONDS`; the selected model must remain in the
 server-side allowlist and a session budget cannot exceed the administrator
-budget ceiling. The global LiteLLM `$25,000/365d` limit remains independent.
+budget ceiling. The admin-issued key ceiling matches the global LiteLLM
+`$30,000/month` cap across all keys; individual key budgets and reset periods
+remain independent.
+
 The returned model base URL defaults to
 `https://infra-lab-services.tail494f6d.ts.net/litellm/v1`.
+
+The checked-in default allowlist contains only `luna`. Google model aliases are
+not enabled until their LiteLLM routes, provider credentials, and positive
+input/output prices are configured. Add the same approved public aliases to
+`KEYBROKER_ALLOWED_MODELS` only after verifying LiteLLM pricing.
 
 Before minting session or administrator keys, Keybroker checks LiteLLM's
 `/model/info`. If an external route has missing or zero prices, it calls

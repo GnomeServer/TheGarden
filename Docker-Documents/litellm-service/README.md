@@ -22,12 +22,12 @@ The Caddy service exposes a Tailnet-only LiteLLM worker route:
 ```text
 https://infra-lab-services.tail494f6d.ts.net/litellm/v1
 ```
-`handle_path /litellm/*` strips the prefix before proxying to `litellm:4000`, so LiteLLM receives `/v1/...`. Caddy and LiteLLM share `caddy_proxy`.
+`handle_path /litellm/*` strips the prefix before proxying to `127.0.0.1:4000`, so LiteLLM receives `/v1/...`. Caddy runs in host network mode and uses LiteLLM's loopback-only host port.
 
 It accepts requests only from Tailscale addresses and requires a worker-scoped
 LiteLLM virtual key. Workers must trust Caddy's internal root certificate.
-Containers attached to `caddy_proxy` use `http://litellm:4000/v1`; the host-local
-gateway uses `http://127.0.0.1:4000/v1`.
+Containers attached to `caddy_proxy` use `http://litellm:4000/v1`; host-networked
+Caddy and the host-local gateway use `http://127.0.0.1:4000/v1`.
 
 `litellm` is a Docker-only hostname. A remote worker cannot resolve it or use
 the VM loopback address; it must use the Tailnet-only Caddy hostname and its
@@ -57,24 +57,39 @@ LUNA_BACKEND_API_KEY=<key-accepted-by-the-inference-backend>
 name presented to clients remains `luna`.
 
 The checked-in `.env.example` points `LUNA_API_BASE` at the local llama service,
-so zero spend is expected for that default route. For a paid OpenAI route,
-`LUNA_MODEL` must identify the actual upstream model LiteLLM prices, or set
-`model_info.base_model` / explicit `input_cost_per_token` and
-`output_cost_per_token` rates in `config.yaml`. API Guard shows zero-priced
-requests by model ID. Before issuing a virtual key, Keybroker reloads LiteLLM's
-model cost map once and then blocks new keys if an external model still has
-missing or zero input/output pricing. Do not allowlist a paid provider URL as a
-free local model. See
+so zero spend is expected for that default route. If the `luna` alias is
+repointed to a paid provider, its `LUNA_MODEL` must identify the actual upstream
+model LiteLLM prices, or set `model_info.base_model` / explicit
+`input_cost_per_token` and `output_cost_per_token` rates in `config.yaml`.
+API Guard shows zero-priced requests by model ID. Before issuing a virtual key,
+Keybroker reloads LiteLLM's model cost map once and then blocks new keys if an
+external model still has missing or zero input/output pricing. Do not allowlist
+a paid provider URL as a free local model. See
 [LiteLLM custom pricing](https://docs.litellm.ai/docs/proxy/custom_pricing).
 
-The gateway config enforces a shared `$25,000` spend ceiling over `365d` across
-all LiteLLM traffic. Budget enforcement depends on the PostgreSQL database being
-available. The separate
-[`API Guard dashboard`](../api-guard-dashboard/README.md) compares rolling
-365-day spend with that limit and shows `$2,083.33` per month as a pacing
-target; monthly pacing is not an additional hard cap. Keep the matching
-`API_GUARD_ANNUAL_BUDGET_USD` value at `25000` unless the LiteLLM config changes
-with it.
+The only configured public model alias is currently `luna`. Google model routes
+are not configured yet. After the exact provider model IDs, credentials, and
+pricing are confirmed, add priced LiteLLM routes and then add the matching
+public aliases to `KEYBROKER_ALLOWED_MODELS`. Do not send worker requests
+directly to Google or bypass the LiteLLM/Keybroker path.
+
+The gateway config enforces a shared `$30,000` spend ceiling per calendar month
+across all LiteLLM traffic. `budget_duration: 30d` resets on the first day of
+the month in UTC by default. Budget enforcement depends on the PostgreSQL
+database being available. API Guard compares calendar-month spend with this
+hard cap; its rolling 365-day total is informational. Keep
+`API_GUARD_MONTHLY_BUDGET_USD` and `KEYBROKER_ADMIN_MAX_BUDGET_USD` at `30000`
+to keep the dashboard and per-key limit aligned.
+
+To apply gateway config changes in an existing deployment, run from this
+directory:
+
+```bash
+sudo docker compose config --quiet
+sudo docker compose up -d --force-recreate litellm
+```
+
+The Ansible Docker-services playbook does not deploy this project.
 
 The ceiling only covers calls sent through this proxy. Set an independent
 upstream provider spend limit and alert (for example, on OpenRouter) and do not
