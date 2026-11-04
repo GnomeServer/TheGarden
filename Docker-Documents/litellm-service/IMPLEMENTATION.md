@@ -23,8 +23,9 @@ master key. Workers trust Caddy's internal CA.
 ## Credential boundaries
 
 - `LITELLM_MASTER_KEY` is for LiteLLM administration only.
-- `LUNA_BACKEND_API_KEY` is used by LiteLLM to call the configured inference
-  backend.
+- `LUNA_BACKEND_API_KEY` is the upstream provider key (the OpenAI project key
+  for production); it remains only in LiteLLM's local `.env`.
+  It is not an Agent Manager or worker credential.
 
 Ansible-managed worker inventory no longer provisions `litellm_key_source`.
 The role removes each legacy local key file after Keybroker readiness and
@@ -41,12 +42,18 @@ file remain deployment-only files.
 
 ## Current request path
 
+Production routes the stable LiteLLM alias `luna` to OpenAI GPT-5.6 Luna or
+GPT-6 Luna with `reasoning_effort: medium`:
+
 ```text
 Open WebUI container
   → http://litellm:4000/v1 on caddy_proxy
-  → LiteLLM
-  → configured Luna backend
+  → LiteLLM (`luna`)
+  → https://api.openai.com/v1 (`gpt-5.6-luna` or `gpt-6-luna`)
 ```
+
+The checked-in LiteLLM `.env.example` remains a separate local llama.cpp/Gemma
+route. The production OpenAI route does not use that service or Ollama.
 
 Remote worker requests reach the Tailnet-only Caddy endpoint with a per-run
 virtual key returned by Keybroker. Validate LiteLLM readiness, then test
