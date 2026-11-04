@@ -56,17 +56,14 @@ LUNA_BACKEND_API_KEY=<OpenAI project API key>
 `LUNA_MODEL` and `LUNA_API_BASE` describe the backend route. The public model
 name presented to clients remains `luna`.
 
-The checked-in `.env.example` remains a local `llama.cpp`/Gemma example; it is
-not the production OpenAI route and does not use Ollama. For production, choose
-`openai/gpt-5.6-luna` or, when enabled for the OpenAI project,
-`openai/gpt-6-luna`. The stable client-facing LiteLLM alias remains `luna`.
-`config.yaml` sets `reasoning_effort: medium`, supported by both model IDs.
-However, GPT-6 Luna's API documentation says Chat Completions function calling
-is supported only with `reasoning_effort: none`. Verify OMP crew tool-call
-compatibility before switching workers to GPT-6 at medium reasoning.
+The checked-in `.env.example` defaults to GPT-5.6 Luna through OpenAI; the
+public LiteLLM alias remains `luna`. Use `openai/gpt-6-luna` only if the project
+has access. `config.yaml` sets medium reasoning for both models. GPT-6
+Chat Completions function calling requires `reasoning_effort: none`; verify
+OMP tool-call compatibility before switching workers to GPT-6 at medium.
 Keep the OpenAI project key only in `LUNA_BACKEND_API_KEY`. Agent Manager and
-workers continue to use LiteLLM virtual keys; workers receive short-lived
-keys from Keybroker.
+workers use LiteLLM virtual keys; workers receive short-lived keys from
+Keybroker.
 
 The OpenAI API base URL is not a browser page; opening its root or `/v1` may
 return 404. Validate with an authenticated `POST /v1/chat/completions`.
@@ -88,11 +85,9 @@ the linked OpenAI model pages as the source of truth. Keybroker blocks new
 worker keys when an external model has missing or zero input/output pricing.
 See [LiteLLM custom pricing](https://docs.litellm.ai/docs/proxy/custom_pricing).
 
-The only configured public model alias is currently `luna`. Google model routes
-are not configured yet. After the exact provider model IDs, credentials, and
-pricing are confirmed, add priced LiteLLM routes and then add the matching
-public aliases to `KEYBROKER_ALLOWED_MODELS`. Do not send worker requests
-directly to Google or bypass the LiteLLM/Keybroker path.
+The only configured public alias is `luna`, routed through OpenAI. Google is
+not configured. Add other providers only after verifying model IDs, credentials,
+pricing, and Keybroker's allowed-model list; never bypass LiteLLM/Keybroker.
 
 The gateway config enforces a shared `$30,000` spend ceiling per calendar month
 across all LiteLLM traffic. `budget_duration: 30d` resets on the first day of
@@ -112,11 +107,11 @@ sudo docker compose up -d --force-recreate litellm
 
 The Ansible Docker-services playbook does not deploy this project.
 
-The ceiling only covers calls sent through this proxy. Set an independent
-upstream provider spend limit and alert (for example, on OpenRouter) and do not
-give the upstream provider key to workers or OMP. API Guard manages LiteLLM
-virtual keys; upstream provider credentials remain in LiteLLM's private
-deployment environment and must be rotated there.
+The LiteLLM cap covers only calls through the proxy. Configure independent
+provider-side OpenAI spending alerts; provider billing remains authoritative.
+Do not give the OpenAI project key to workers or OMP. API Guard manages LiteLLM
+virtual keys; keep the provider key only in LiteLLM's private deployment
+environment and rotate it there.
 
 Ansible-managed Dark Factory agent workers obtain model-scoped keys from
 Keybroker for each run; the worker role no longer reads `MODEL_API_KEY` or
@@ -139,17 +134,12 @@ does not revoke the corresponding key in LiteLLM.
 
 ## Start the stack
 
-Caddy must be running first so the external `caddy_proxy` network exists.
-Starting the local inference service is only necessary when using the local
-default route; the production OpenAI route does not depend on `llama.cpp`:
+Caddy must be running first so the external `caddy_proxy` network exists. The
+OpenAI route does not need a local model server:
 
 ```bash
 cd "$REPO_ROOT/Docker-Documents/caddy_service"
 sudo docker compose up -d caddy
-
-# Optional: only for the local llama.cpp/Gemma route.
-cd "$REPO_ROOT/Docker-Documents/llama_services"
-sudo docker compose up -d
 
 cd "$REPO_ROOT/Docker-Documents/litellm-service"
 sudo docker compose config --quiet

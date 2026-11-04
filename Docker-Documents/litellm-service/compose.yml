@@ -40,8 +40,8 @@ services:
       STORE_MODEL_IN_DB: "False"
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?Set LITELLM_SALT_KEY in .env}
-      LUNA_API_BASE: ${LUNA_API_BASE:-http://llama:8080/v1}
-      LUNA_MODEL: ${LUNA_MODEL:-openai/luna}
+      LUNA_API_BASE: ${LUNA_API_BASE:-https://api.openai.com/v1}
+      LUNA_MODEL: ${LUNA_MODEL:-openai/gpt-5.6-luna}
       LUNA_BACKEND_API_KEY: ${LUNA_BACKEND_API_KEY:?Set LUNA_BACKEND_API_KEY in .env}
     volumes:
       - ./config.yaml:/app/config.yaml:ro

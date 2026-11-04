@@ -3,8 +3,8 @@
 model_list:
   - model_name: luna
     litellm_params:
-      # LUNA_MODEL includes the provider prefix, for example openai/luna or
-      # openai//models/model.gguf for a llama.cpp server that validates IDs.
+      # LUNA_MODEL includes the provider prefix, e.g. openai/gpt-5.6-luna.
+      # The stable public alias remains "luna"; reasoning uses medium effort.
       model: os.environ/LUNA_MODEL
       api_base: os.environ/LUNA_API_BASE
       api_key: os.environ/LUNA_BACKEND_API_KEY

@@ -52,8 +52,8 @@ Open WebUI container
   → https://api.openai.com/v1 (`gpt-5.6-luna` or `gpt-6-luna`)
 ```
 
-The checked-in LiteLLM `.env.example` remains a separate local llama.cpp/Gemma
-route. The production OpenAI route does not use that service or Ollama.
+The checked-in LiteLLM `.env.example` defaults to GPT-5.6 Luna. The local
+llama.cpp service is separate and not part of the production OpenAI route.
 
 Remote worker requests reach the Tailnet-only Caddy endpoint with a per-run
 virtual key returned by Keybroker. Validate LiteLLM readiness, then test
