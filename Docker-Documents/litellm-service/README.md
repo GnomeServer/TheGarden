@@ -43,29 +43,50 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-The important settings are:
+For the production OpenAI route, set:
 
 ```dotenv
 LITELLM_MASTER_KEY=<administration-only-key>
 LITELLM_SALT_KEY=<stable-encryption-salt>
-LUNA_API_BASE=http://llama:8080/v1
-LUNA_MODEL=openai/luna
-LUNA_BACKEND_API_KEY=<key-accepted-by-the-inference-backend>
+LUNA_API_BASE=https://api.openai.com/v1
+LUNA_MODEL=openai/gpt-5.6-luna
+LUNA_BACKEND_API_KEY=<OpenAI project API key>
 ```
 
 `LUNA_MODEL` and `LUNA_API_BASE` describe the backend route. The public model
 name presented to clients remains `luna`.
 
-The checked-in `.env.example` points `LUNA_API_BASE` at the local llama service,
-so zero spend is expected for that default route. If the `luna` alias is
-repointed to a paid provider, its `LUNA_MODEL` must identify the actual upstream
-model LiteLLM prices, or set `model_info.base_model` / explicit
-`input_cost_per_token` and `output_cost_per_token` rates in `config.yaml`.
-API Guard shows zero-priced requests by model ID. Before issuing a virtual key,
-Keybroker reloads LiteLLM's model cost map once and then blocks new keys if an
-external model still has missing or zero input/output pricing. Do not allowlist
-a paid provider URL as a free local model. See
-[LiteLLM custom pricing](https://docs.litellm.ai/docs/proxy/custom_pricing).
+The checked-in `.env.example` remains a local `llama.cpp`/Gemma example; it is
+not the production OpenAI route and does not use Ollama. For production, choose
+`openai/gpt-5.6-luna` or, when enabled for the OpenAI project,
+`openai/gpt-6-luna`. The stable client-facing LiteLLM alias remains `luna`.
+`config.yaml` sets `reasoning_effort: medium`, supported by both model IDs.
+However, GPT-6 Luna's API documentation says Chat Completions function calling
+is supported only with `reasoning_effort: none`. Verify OMP crew tool-call
+compatibility before switching workers to GPT-6 at medium reasoning.
+Keep the OpenAI project key only in `LUNA_BACKEND_API_KEY`. Agent Manager and
+workers continue to use LiteLLM virtual keys; workers receive short-lived
+keys from Keybroker.
+
+The OpenAI API base URL is not a browser page; opening its root or `/v1` may
+return 404. Validate with an authenticated `POST /v1/chat/completions`.
+A successful response proves routing, not cost accounting. Confirm API Guard
+records nonzero estimated spend before issuing worker keys.
+
+Official standard text rates per 1M tokens:
+
+| Model | Input | Cached input | Cache write | Output |
+| --- | ---: | ---: | ---: | ---: |
+| [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna) | $0.20 | $0.02 | $0.25 | $1.20 |
+| [GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) | $0.10 | $0.01 | $0.125 | $0.50 |
+
+The pinned LiteLLM image may not include pricing metadata for these model IDs.
+If API Guard reports zero cost, add the corresponding exact per-token rates to
+`model_info` in `config.yaml`. GPT-5.6 Luna cache writes cost 1.25x uncached
+input; GPT-6 Luna lists cache-write pricing explicitly. Rates can change; use
+the linked OpenAI model pages as the source of truth. Keybroker blocks new
+worker keys when an external model has missing or zero input/output pricing.
+See [LiteLLM custom pricing](https://docs.litellm.ai/docs/proxy/custom_pricing).
 
 The only configured public model alias is currently `luna`. Google model routes
 are not configured yet. After the exact provider model IDs, credentials, and
@@ -115,15 +136,18 @@ KEY_ALIAS=manual-client KEY_FILE=.manual-client-api-key ./create-luna-key.sh
 Do not distribute those keys to the four Ansible-managed agent workers. The
 worker-role cutover removes the old `~/.config/litellm/worker-api-key` file but
 does not revoke the corresponding key in LiteLLM.
+
 ## Start the stack
 
-Caddy and the inference backend must be running first so the external
-`caddy_proxy` network exists:
+Caddy must be running first so the external `caddy_proxy` network exists.
+Starting the local inference service is only necessary when using the local
+default route; the production OpenAI route does not depend on `llama.cpp`:
 
 ```bash
 cd "$REPO_ROOT/Docker-Documents/caddy_service"
 sudo docker compose up -d caddy
 
+# Optional: only for the local llama.cpp/Gemma route.
 cd "$REPO_ROOT/Docker-Documents/llama_services"
 sudo docker compose up -d
 
