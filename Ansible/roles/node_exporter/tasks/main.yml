@@ -1,0 +1,66 @@
+---
+- name: Require a Tailscale IPv4 address for the exporter listener
+  ansible.builtin.assert:
+    that:
+      - ansible_host is defined
+      - ansible_host is match('^100[.](6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])[.]')
+    fail_msg: "{{ inventory_hostname }} must have its Tailscale IPv4 address in ansible_host."
+
+- name: Require the Tailscale daemon to be active
+  ansible.builtin.command:
+    cmd: systemctl is-active tailscaled
+  changed_when: false
+  become: false
+
+- name: Install Prometheus Node Exporter
+  ansible.builtin.apt:
+    name: prometheus-node-exporter
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    policy_rc_d: 101
+
+- name: Create the Node Exporter systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/prometheus-node-exporter.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Bind Node Exporter to this host's Tailscale address only
+  ansible.builtin.template:
+    src: prometheus-node-exporter.default.j2
+    dest: /etc/default/prometheus-node-exporter
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Node Exporter
+
+- name: Start Node Exporter after Tailscale
+  ansible.builtin.template:
+    src: systemd-override.conf.j2
+    dest: /etc/systemd/system/prometheus-node-exporter.service.d/override.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Node Exporter
+
+- name: Enable and start Node Exporter
+  ansible.builtin.systemd_service:
+    name: prometheus-node-exporter.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply changed Node Exporter configuration before checking it
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify Node Exporter serves metrics on the Tailscale address
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:{{ node_exporter_port }}/metrics"
+    method: GET
+    status_code: 200
+    timeout: 5
+    return_content: false
+  become: false

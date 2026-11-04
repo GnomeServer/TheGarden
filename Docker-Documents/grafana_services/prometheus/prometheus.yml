@@ -11,8 +11,8 @@ scrape_configs:
       - targets:
           - prometheus:9090
 
-  # Node Exporter runs in a separate container with the server's host network
-  # namespace. Prometheus reaches it through Docker's host-gateway alias.
+  # The host VM exporter is reached through Docker's host-gateway address.
+  # The Compose node-exporter sidecar is not the server's host scrape target.
   - job_name: node-exporter
     static_configs:
       - targets:
@@ -20,18 +20,51 @@ scrape_configs:
         labels:
           host: infra-lab-services
           role: server
-  - job_name: agent-worker-inkii-host
+  # Host labels drive the dashboard's stable node names; keep identities separate.
+  - job_name: agent-worker-node-exporter
     static_configs:
       - targets:
-        - 100.98.125.127:9100
+          - 100.98.125.127:9100
         labels:
           host: inkii
-          worker_id: inkii
+          role: coder
+      - targets:
+          - 100.88.92.78:9100
+        labels:
+          host: naruto
+          role: coder
+      - targets:
+          - 100.116.35.103:9100
+        labels:
+          host: raphael
+          role: coder
+      - targets:
+          - 100.94.145.104:9100
+        labels:
+          host: donatello
+          role: coder
+      - targets:
+          - 100.70.246.104:9100
+        labels:
+          host: michelangelo
+          role: coder
+      - targets:
+          - 100.79.110.117:9100
+        labels:
+          host: sammy
           role: coder
   - job_name: agent-manager
-    metrics_path: /metrics/
+    metrics_path: /metrics
     static_configs:
       - targets:
-        - agent-manager:8000
+          - agent-manager:8000
         labels:
           service: agent-manager
+
+  - job_name: nats-jetstream
+    static_configs:
+      - targets:
+          - nats-exporter:7777
+        labels:
+          service: nats
+          role: jetstream

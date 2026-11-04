@@ -98,11 +98,13 @@ The NATS queue listener is `worker.py`; it launches the pinned OMP job image.
 Inside the image, OMP runs the planner and delegates to the requested coder
 and reviewer agents. Both agents block until their results are complete.
 The planner performs an initial review and up to nine correction rounds (ten
-review attempts total); the worker's 600-second OMP timeout may stop a run
-sooner. If attempt ten is still rejected, the mission enters `needs_input` and
-asks the user one specific clarification question instead of failing or
-cancelling. A clarification resumes the same mission from its worker checkpoint
-with `reviewer_count` reset to zero for the new review cycle.
+review attempts total). OMP allows up to 1,200 seconds (20 minutes) internally.
+The worker allows 60 additional seconds for the container to shut down and
+output to be collected before it marks the run failed. If attempt ten is still
+rejected, the mission enters `needs_input` and asks the user one specific
+clarification question instead of failing or cancelling. A clarification
+resumes the same mission from its worker checkpoint with `reviewer_count` reset
+to zero for the new review cycle.
 
 `reviewer_count` counts individual reviewer verdicts marked `changes_requested`;
 it is not the attempt number. Wrapper-generated failures use `null` when no

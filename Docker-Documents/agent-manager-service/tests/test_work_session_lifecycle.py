@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException, Response
 
-from agent_manager.models import ActivityRecord, WorkSessionRecord
+from agent_manager.models import ActivityRecord, UserRecord, WorkSessionRecord
 from agent_manager.dashboard import activity_out
 from agent_manager.tracking import (
     WorkSessionDecision,
@@ -18,33 +18,49 @@ from agent_manager.tracking import (
     discard_work_session,
     edit_work_session,
     list_work_sessions,
+    auto_stop_overdue_work_sessions,
     start_work_session,
     stop_work_session,
     submit_work_session,
     undo_dashboard_action,
     work_session_snapshot,
+    work_session_out,
 )
 
 
 class FakeSession:
-    def __init__(self, record: SimpleNamespace) -> None:
+    def __init__(self, record: SimpleNamespace | None) -> None:
         self.record = record
         self.added: list[object] = []
         self.commits = 0
 
     async def get(self, model, record_id: str, **_kwargs):
+        if model is UserRecord:
+            return SimpleNamespace(id=record_id)
         if model is not WorkSessionRecord:
             raise AssertionError(f"unexpected model lookup: {model}")
-        return self.record if self.record.id == record_id else None
+        return self.record if self.record is not None and self.record.id == record_id else None
+
+    async def scalar(self, _statement):
+        return None
 
     def add(self, record: object) -> None:
         self.added.append(record)
+
+    async def flush(self) -> None:
+        return None
 
     async def commit(self) -> None:
         self.commits += 1
 
     async def refresh(self, _record: object) -> None:
         return None
+
+
+class OverdueSession(FakeSession):
+    async def execute(self, _statement):
+        records = [self.record] if self.record.status == "running" else []
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: records))
 
 
 def make_actor(*, user_id: str = "owner", role: str = "member") -> SimpleNamespace:
@@ -83,6 +99,57 @@ def make_record(
 def activity_events(session: FakeSession) -> list[ActivityRecord]:
     return [record for record in session.added if isinstance(record, ActivityRecord)]
 
+
+
+class WorkSessionAutoStopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_overdue_timer_stops_at_the_twelve_hour_boundary(self) -> None:
+        started_at = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        record = make_record(started_at=started_at)
+        session = OverdueSession(record)
+
+        stopped = await auto_stop_overdue_work_sessions(
+            session, now=started_at + timedelta(hours=13)
+        )
+
+        self.assertEqual(len(stopped), 1)
+        self.assertEqual(record.status, "stopped")
+        self.assertEqual(record.ended_at, started_at + timedelta(hours=12))
+        self.assertEqual(record.duration_seconds, 12 * 3600)
+        [activity] = activity_events(session)
+        self.assertEqual(activity.event_type, "time.auto_stopped")
+        self.assertIsNone(activity.actor_user_id)
+
+    async def test_timer_is_not_stopped_before_twelve_hours(self) -> None:
+        started_at = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        record = make_record(started_at=started_at)
+        session = OverdueSession(record)
+
+        stopped = await auto_stop_overdue_work_sessions(
+            session, now=started_at + timedelta(hours=11, minutes=59)
+        )
+
+        self.assertEqual(stopped, [])
+        self.assertEqual(record.status, "running")
+
+    async def test_running_duration_warns_at_eight_hours_and_keeps_nine_and_a_half(self) -> None:
+        started_at = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        record = make_record(started_at=started_at)
+
+        with patch(
+            "agent_manager.tracking.utcnow",
+            return_value=started_at + timedelta(hours=7, minutes=59),
+        ):
+            before_warning = work_session_out(record)
+        self.assertFalse(before_warning["overtime_warning"])
+
+        with patch(
+            "agent_manager.tracking.utcnow",
+            return_value=started_at + timedelta(hours=9, minutes=30),
+        ):
+            overtime = work_session_out(record)
+
+        self.assertTrue(overtime["overtime_warning"])
+        self.assertEqual(overtime["duration_seconds"], 9 * 3600 + 30 * 60)
 
 class WorkSessionDiscardTests(unittest.IsolatedAsyncioTestCase):
     async def test_owner_can_discard_running_timer_and_audit_is_retained_idempotently(self) -> None:
@@ -490,6 +557,122 @@ class WorkSessionEditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 403)
         self.assertEqual(record.status, "running")
         self.assertEqual(session.commits, 0)
+
+class TimerManagerAccessTests(unittest.IsolatedAsyncioTestCase):
+    def make_timer_manager(self) -> SimpleNamespace:
+        actor = make_actor(user_id="timer-manager")
+        actor.forgejo_login = "donatello"
+        return actor
+
+    async def test_configured_timer_manager_can_start_another_users_timer(self) -> None:
+        session = FakeSession(None)
+        activity = SimpleNamespace(id="activity-1")
+
+        with (
+            patch("agent_manager.tracking.settings.dashboard_time_managers_csv", "donatello"),
+            patch("agent_manager.tracking.record_activity", new_callable=AsyncMock, return_value=activity),
+            patch(
+                "agent_manager.tracking.work_session_out",
+                return_value={"id": "timer-1", "user_id": "worker", "status": "running"},
+            ),
+            patch("agent_manager.tracking.activity_out", return_value={}),
+            patch("agent_manager.tracking.live_broker.publish", new_callable=AsyncMock),
+        ):
+            result = await start_work_session(
+                WorkSessionStart(user_id="worker"),
+                actor=self.make_timer_manager(),
+                session=session,
+            )
+
+        self.assertEqual(result["user_id"], "worker")
+        self.assertEqual(session.added[0].user_id, "worker")
+        self.assertEqual(session.commits, 1)
+
+    async def test_configured_timer_manager_can_stop_another_users_timer(self) -> None:
+        record = make_record(user_id="worker")
+        session = FakeSession(record)
+        activity = SimpleNamespace(id="activity-1")
+
+        with (
+            patch("agent_manager.tracking.settings.dashboard_time_managers_csv", "donatello"),
+            patch(
+                "agent_manager.tracking.record_work_session_activity",
+                new_callable=AsyncMock,
+                return_value=activity,
+            ),
+            patch("agent_manager.tracking.work_session_out", return_value={"status": "stopped"}),
+            patch("agent_manager.tracking.activity_out", return_value={}),
+            patch("agent_manager.tracking.live_broker.publish", new_callable=AsyncMock),
+        ):
+            result = await stop_work_session(
+                "timer-1",
+                WorkSessionNotes(),
+                actor=self.make_timer_manager(),
+                session=session,
+            )
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(record.status, "stopped")
+        self.assertEqual(session.commits, 1)
+
+    async def test_configured_timer_manager_can_edit_another_users_timer(self) -> None:
+        record = make_record(status="stopped", user_id="worker")
+        record.ended_at = record.started_at + timedelta(hours=9)
+        record.duration_seconds = 9 * 3600
+        session = FakeSession(record)
+        activity = SimpleNamespace(id="activity-1")
+        corrected_end = record.started_at + timedelta(hours=8)
+
+        with (
+            patch("agent_manager.tracking.settings.dashboard_time_managers_csv", "donatello"),
+            patch(
+                "agent_manager.tracking.record_work_session_activity",
+                new_callable=AsyncMock,
+                return_value=activity,
+            ),
+            patch("agent_manager.tracking.work_session_out", return_value={"duration_seconds": 8 * 3600}),
+            patch("agent_manager.tracking.activity_out", return_value={}),
+            patch("agent_manager.tracking.live_broker.publish", new_callable=AsyncMock),
+            patch("agent_manager.tracking.utcnow", return_value=corrected_end + timedelta(minutes=1)),
+        ):
+            result = await edit_work_session(
+                "timer-1",
+                WorkSessionEdit(ended_at=corrected_end),
+                actor=self.make_timer_manager(),
+                session=session,
+            )
+
+        self.assertEqual(result["duration_seconds"], 8 * 3600)
+        self.assertEqual(record.duration_seconds, 8 * 3600)
+        self.assertEqual(session.commits, 1)
+
+    async def test_configured_timer_manager_sees_all_timers_but_regular_members_are_scoped(self) -> None:
+        for actor, expected_user_filter in (
+            (self.make_timer_manager(), None),
+            (make_actor(user_id="worker"), "worker"),
+        ):
+            session = SimpleNamespace(
+                execute=AsyncMock(
+                    return_value=SimpleNamespace(
+                        scalars=lambda: SimpleNamespace(all=lambda: []),
+                    )
+                )
+            )
+            with patch("agent_manager.tracking.settings.dashboard_time_managers_csv", "donatello"):
+                await list_work_sessions(
+                    session_status=None,
+                    limit=100,
+                    actor=actor,
+                    session=session,
+                )
+
+            query = session.execute.await_args.args[0]
+            sql = str(query.compile(compile_kwargs={"literal_binds": True}))
+            if expected_user_filter is None:
+                self.assertNotIn("user_id = 'timer-manager'", sql)
+            else:
+                self.assertIn(f"user_id = '{expected_user_filter}'", sql)
+
 
 class WorkSessionListFilterTests(unittest.IsolatedAsyncioTestCase):
     async def test_date_range_is_inclusive_in_utc_and_running_timers_remain_visible(self) -> None:

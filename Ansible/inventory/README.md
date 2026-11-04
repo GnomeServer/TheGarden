@@ -120,6 +120,29 @@ service and systemd egress policy after each successful playbook run. See
 `../README.md` for the complete procedure. Do not load
 `proxmox-guests.example.yml` beside `hosts.yml`.
 
+
+## Worker Node Exporter rollout
+
+`node_exporter_workers` now contains the five approved hosts: `naruto`,
+`raphael`, `donatello`, `michelangelo`, and `sammy`. `inkii` already has an
+exporter and remains scraped without reinstallation.
+
+From `Ansible/`, review the limited target set and deploy:
+
+```bash
+ansible node_exporter_workers --list-hosts
+ansible-playbook playbooks/node-exporters.yml --ask-become-pass
+```
+
+The playbook installs Node Exporter on the worker hosts and binds it to their
+Tailscale addresses. It verifies each installed worker's `/metrics` endpoint.
+Prometheus config is staged and validated with `promtool` before application;
+offline targets may show down/no data until their exporters are available.
+Only Prometheus restarts when the configuration changes. Node Exporter is
+unauthenticated; ensure Tailnet policy permits the monitoring VM and does not
+expose port `9100` to the public internet. Host metrics do not indicate agent
+worker-service availability.
+
 ## Proxmox guest template
 
 `proxmox-guests.example.yml` is not loaded by default. It documents VMID `100`, the Debian guest named `infra-lab-services`, and the connection values that must be confirmed before using SSH-based management.

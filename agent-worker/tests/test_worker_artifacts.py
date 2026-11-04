@@ -434,8 +434,10 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ca_file = root / "model-root.crt"
             ca_file.write_text("certificate", encoding="utf-8")
             observed_work_dir: list[Path] = []
+            docker_timeouts: list[object] = []
 
-            def fake_docker(command: list[str], **_kwargs: object) -> SimpleNamespace:
+            def fake_docker(command: list[str], **kwargs: object) -> SimpleNamespace:
+                docker_timeouts.append(kwargs.get("timeout"))
                 work_mount = next(
                     item
                     for item in command
@@ -531,6 +533,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertEqual(result["artifact"], descriptor)
+            self.assertEqual(docker_timeouts, [1260])
             self.assertNotIn("artifacts", result)
             self.assertNotIn("script", result)
             self.assertTrue(observed_work_dir)

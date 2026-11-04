@@ -1,0 +1,95 @@
+---
+- name: Install Node Exporter on approved worker hosts
+  hosts: node_exporter_workers
+  serial: 1
+  any_errors_fatal: true
+  gather_facts: true
+  become: false
+  vars:
+    ansible_pipelining: false
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/ansible-sudo"
+  pre_tasks:
+    - name: Create the become helper directory
+      ansible.builtin.file:
+        path: "{{ ansible_user_dir }}/.local/bin"
+        state: directory
+        mode: "0700"
+
+    - name: Install the sudo-rs become helper
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../roles/agent_worker/files/ansible-sudo"
+        dest: "{{ ansible_user_dir }}/.local/bin/ansible-sudo"
+        mode: "0700"
+
+    - name: Verify sudo access before changing a worker
+      ansible.builtin.command:
+        cmd: id -u
+      register: node_exporter_become_preflight
+      changed_when: false
+      failed_when: node_exporter_become_preflight.stdout != "0"
+      become: true
+
+  roles:
+    - role: node_exporter
+      become: true
+
+- name: Deploy and validate Prometheus worker targets
+  hosts: infra-lab-services
+  gather_facts: false
+  become: true
+  tasks:
+
+    - name: Validate and deploy the repository Prometheus configuration
+      block:
+        - name: Stage the repository config for validation
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../../Docker-Documents/grafana_services/prometheus/prometheus.yml"
+            dest: "{{ prometheus_compose_project }}/prometheus/prometheus.yml.candidate"
+            owner: infra-lab-user
+            group: infra-lab-user
+            mode: "0644"
+
+        - name: Validate staged config with the deployed Prometheus image
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - run
+              - --rm
+              - --no-deps
+              - --entrypoint
+              - /bin/promtool
+              - --volume
+              - "{{ prometheus_compose_project }}/prometheus/prometheus.yml.candidate:/tmp/prometheus.yml:ro"
+              - prometheus
+              - check
+              - config
+              - /tmp/prometheus.yml
+            chdir: "{{ prometheus_compose_project }}"
+          changed_when: false
+
+        - name: Apply the validated Prometheus config
+          ansible.builtin.copy:
+            src: "{{ prometheus_compose_project }}/prometheus/prometheus.yml.candidate"
+            dest: "{{ prometheus_compose_project }}/prometheus/prometheus.yml"
+            remote_src: true
+            owner: infra-lab-user
+            group: infra-lab-user
+            mode: "0644"
+          register: prometheus_config_deploy
+
+        - name: Restart Prometheus when its configuration changed
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - restart
+              - prometheus
+            chdir: "{{ prometheus_compose_project }}"
+          when: prometheus_config_deploy.changed
+          changed_when: true
+      always:
+        - name: Remove staged Prometheus config
+          ansible.builtin.file:
+            path: "{{ prometheus_compose_project }}/prometheus/prometheus.yml.candidate"
+            state: absent

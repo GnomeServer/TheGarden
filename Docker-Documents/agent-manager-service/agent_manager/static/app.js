@@ -11,6 +11,7 @@ const state = {
   workerExecution: null,
   dashboardActivity: null,
   workSessions: null,
+  workSessionsRevision: 0,
   nodeHealth: null,
   accessEvents: null,
   apiGuardIncidents: null,
@@ -295,6 +296,7 @@ function workSessionsQuery() {
 
 async function refreshAll() {
   if (!state.session) return;
+  const workSessionsRevision = state.workSessionsRevision;
   updateReportedTimeDateDefault();
   const dashboardFrom = $("dashboard-time-from").value;
   const dashboardTo = $("dashboard-time-to").value;
@@ -335,6 +337,8 @@ async function refreshAll() {
   ];
   results.forEach((result, index) => {
     const key = keys[index];
+    // A timer poll started before a mutation must not overwrite the saved state.
+    if (key === "workSessions" && workSessionsRevision !== state.workSessionsRevision) return;
     if (result.status === "fulfilled") {
       state[key] = result.value;
       state[`${key}Error`] = null;
@@ -1089,6 +1093,27 @@ function renderWorkSessions() {
   const ownRunning = (state.workSessions || []).find((entry) =>
     String(entry.user_id) === String(state.session.user.id) && entry.status === "running",
   );
+  const currentUserId = String(state.session.user.id);
+  const canManageOthersTime = Boolean(state.session.user.can_manage_work_sessions)
+    || ["admin", "manager"].includes(state.session.user.role);
+  const timerOwnerField = $("timer-owner-field");
+  const timerOwnerSelect = $("timer-owner");
+  const selectedOwnerId = timerOwnerSelect.value || currentUserId;
+  const timerUsers = (state.users || []).filter((user) => user.active !== false);
+  if (!timerUsers.some((user) => String(user.id) === currentUserId)) {
+    timerUsers.unshift(state.session.user);
+  }
+  timerOwnerField.classList.toggle("hidden", !canManageOthersTime);
+  timerOwnerSelect.innerHTML = timerUsers
+    .map((user) => `<option value="${esc(user.id)}">${esc(personLabel(user))}</option>`)
+    .join("");
+  timerOwnerSelect.value = timerUsers.some((user) => String(user.id) === selectedOwnerId)
+    ? selectedOwnerId
+    : currentUserId;
+  const targetTimerUserId = canManageOthersTime ? timerOwnerSelect.value : currentUserId;
+  const targetTimerRunning = (state.workSessions || []).some((entry) =>
+    String(entry.user_id) === targetTimerUserId && entry.status === "running",
+  );
 
   if (state.workSessionsError) {
     setError(current, "Reported-time entries could not be loaded.");
@@ -1099,19 +1124,21 @@ function renderWorkSessions() {
     target.innerHTML = '<p class="loading">Loading reported entries…</p>';
     startButton.disabled = true;
   } else {
+    const overtimeNotice = ownRunning?.overtime_warning
+      ? '<p class="notice"><strong>8-hour reminder:</strong> Overtime is allowed; the timer will stop automatically at 12 hours.</p>'
+      : "";
     current.innerHTML = ownRunning
-      ? `<p><strong>Timer running.</strong> ${esc(taskTitle(ownRunning.task_id))} · started ${esc(formatDate(ownRunning.started_at))}. Stop or discard it in the entries below.</p>`
+      ? `<p><strong>Timer running.</strong> ${esc(taskTitle(ownRunning.task_id))} · started ${esc(formatDate(ownRunning.started_at))}. Stop or discard it in the entries below.</p>${overtimeNotice}`
       : '<p class="muted">No reported-time timer is running.</p>';
-    startButton.disabled = Boolean(ownRunning);
+    startButton.disabled = targetTimerRunning;
     if (!state.workSessions.length) {
       const hasDateFilter = Boolean(state.reportedTimeFrom || state.reportedTimeTo);
       setEmpty(target, hasDateFilter ? "No reported-time entries match this UTC date range." : "No reported-time entries yet.");
     } else {
-      const currentUserId = String(state.session.user.id);
       const rows = state.workSessions.map((entry) => {
         const isOwner = String(entry.user_id) === currentUserId;
         const actions = [];
-        if (isOwner && entry.status === "running") {
+        if ((isOwner || canManageOthersTime) && entry.status === "running") {
           actions.push(`<button class="button secondary" type="button" data-time-action="stop" data-session-id="${esc(entry.id)}">Stop</button>`);
         }
         if (isOwner && ["stopped", "rejected"].includes(entry.status)) {
@@ -1119,9 +1146,11 @@ function renderWorkSessions() {
         }
         if (isOwner && entry.source === "timer" && ["running", "stopped", "rejected"].includes(entry.status)) {
           actions.push(`<button class="button danger" type="button" data-time-action="discard" data-session-id="${esc(entry.id)}">${entry.status === "rejected" ? "Delete" : "Discard"}</button>`);
+        }
+        if ((isOwner || canManageOthersTime) && entry.source === "timer" && ["running", "stopped", "rejected"].includes(entry.status)) {
           actions.push(`<button class="button ghost" type="button" data-time-action="edit" data-session-id="${esc(entry.id)}">Edit times</button>`);
         }
-        if (String(state.editingSessionId) === String(entry.id) && isOwner) {
+        if (String(state.editingSessionId) === String(entry.id) && (isOwner || canManageOthersTime)) {
           return `
             <tr>
               <td colspan="6">
@@ -1133,7 +1162,7 @@ function renderWorkSessions() {
                     <button class="button ghost" type="button" data-time-action="cancel-edit" data-session-id="${esc(entry.id)}">Cancel</button>
                   </div>
                 </form>
-                <p class="muted">Set the stop time if the timer was left running. Submitted and approved entries stay locked.</p>
+                <p class="muted">Timers stop automatically at 12 hours. Owners can edit their own unsubmitted timers; authorized timer managers can edit another person's unsubmitted timer. Submitted and approved entries stay locked.</p>
               </td>
             </tr>
           `;
@@ -1158,7 +1187,7 @@ function renderWorkSessions() {
     }
   }
 
-  form.classList.toggle("hidden", Boolean(ownRunning));
+  form.classList.toggle("hidden", Boolean(ownRunning) && !canManageOthersTime);
   const taskSelect = $("timer-task");
   const selectedTask = taskSelect.value;
   taskSelect.innerHTML = '<option value="">No linked task</option>' + (state.tasks || [])
@@ -1166,29 +1195,43 @@ function renderWorkSessions() {
     .map((task) => `<option value="${esc(task.id)}">${esc(task.title)}</option>`)
     .join("");
   taskSelect.value = selectedTask;
+  timerOwnerSelect.onchange = renderWorkSessions;
 }
 
 async function startReportedTimer(event) {
   event.preventDefault();
   const button = $("start-time");
+  const user = state.session.user;
+  const canManageOthersTime = Boolean(user.can_manage_work_sessions)
+    || ["admin", "manager"].includes(user.role);
+  const targetUserId = canManageOthersTime
+    ? $("timer-owner").value || String(user.id)
+    : String(user.id);
   button.disabled = true;
+  state.workSessionsRevision += 1;
   try {
     const result = await api("/v1/work-sessions/start", {
       method: "POST",
       body: JSON.stringify({
+        user_id: targetUserId,
         task_id: $("timer-task").value || null,
         notes: $("timer-notes").value.trim(),
       }),
     });
     $("timer-form").reset();
+    $("timer-owner").value = String(user.id);
     showToast("Reported-time timer started", result?.undo_id);
     state.workSessionsError = null;
+    state.workSessionsRevision += 1;
     await refreshAll();
   } catch (error) {
     if (!handleAuthError(error)) showToast(error.message);
   } finally {
+    const selectedUserId = canManageOthersTime
+      ? $("timer-owner").value || String(user.id)
+      : String(user.id);
     button.disabled = Boolean(state.workSessionsError || !state.workSessions || state.workSessions.some((entry) =>
-      String(entry.user_id) === String(state.session?.user?.id) && entry.status === "running",
+      String(entry.user_id) === selectedUserId && entry.status === "running",
     ));
   }
 }
@@ -1199,14 +1242,16 @@ async function handleWorkSessionAction(button) {
   const entry = (state.workSessions || []).find((item) => String(item.id) === String(sessionId));
   if (!entry) return;
   const isOwner = String(entry.user_id) === String(state.session.user.id);
+  const canManageOthersTime = Boolean(state.session.user.can_manage_work_sessions)
+    || ["admin", "manager"].includes(state.session.user.role);
   if (action === "discard") {
     if (!isOwner || entry.source !== "timer" || !["running", "stopped", "rejected"].includes(entry.status)) return;
     const verb = entry.status === "rejected" ? "Delete" : "Discard";
     if (!window.confirm(`${verb} this reported-time entry? It will no longer count as reported time.`)) return;
-  } else if (action === "stop" && (!isOwner || entry.status !== "running")) {
+  } else if (action === "stop" && ((!isOwner && !canManageOthersTime) || entry.status !== "running")) {
     return;
   } else if (action === "edit") {
-    if (!isOwner || entry.source !== "timer" || !["running", "stopped", "rejected"].includes(entry.status)) return;
+    if ((!isOwner && !canManageOthersTime) || entry.source !== "timer" || !["running", "stopped", "rejected"].includes(entry.status)) return;
     state.editingSessionId = sessionId;
     renderWorkSessions();
     return;
@@ -1220,6 +1265,7 @@ async function handleWorkSessionAction(button) {
     return;
   }
 
+  state.workSessionsRevision += 1;
   button.disabled = true;
   try {
     let result = null;
@@ -1246,6 +1292,7 @@ async function handleWorkSessionAction(button) {
       showToast(action === "approve" ? "Reported time approved" : "Reported time rejected", result?.undo_id);
     }
     state.workSessionsError = null;
+    state.workSessionsRevision += 1;
     await refreshAll();
   } catch (error) {
     if (!handleAuthError(error)) showToast(error.message);
@@ -1269,6 +1316,7 @@ async function saveEditedTimer(form) {
     return;
   }
   const saveButton = form.querySelector("button[type=submit]");
+  const workSessionsRevision = ++state.workSessionsRevision;
   if (saveButton) saveButton.disabled = true;
   try {
     const body = { started_at: started };
@@ -1277,9 +1325,16 @@ async function saveEditedTimer(form) {
       method: "PATCH",
       body: JSON.stringify(body),
     });
-    state.editingSessionId = null;
+    if (state.workSessionsRevision === workSessionsRevision) {
+      state.workSessions = state.workSessions.map((item) =>
+        String(item.id) === String(result.id) ? { ...item, ...result } : item,
+      );
+      state.workSessionsRevision += 1;
+      state.editingSessionId = null;
+      state.workSessionsError = null;
+      renderWorkSessions();
+    }
     showToast("Reported time updated", result?.undo_id);
-    state.workSessionsError = null;
     await refreshAll();
   } catch (error) {
     if (!handleAuthError(error)) showToast(error.message);

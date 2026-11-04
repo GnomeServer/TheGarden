@@ -45,6 +45,9 @@ class Settings(BaseSettings):
         validation_alias="DASHBOARD_MEMBERS",
     )
     bootstrap_admins: str = Field(default="", validation_alias="DASHBOARD_ADMINS")
+    dashboard_time_managers_csv: str = Field(
+        default="donatello", validation_alias="DASHBOARD_TIME_MANAGERS"
+    )
     dashboard_idle_window_seconds: int = Field(
         default=120, ge=30, le=900, validation_alias="DASHBOARD_IDLE_WINDOW_SECONDS"
     )
@@ -158,6 +161,15 @@ class Settings(BaseSettings):
             for item in self.dashboard_members_csv.split(",")
             if item.strip()
         }
+
+    @property
+    def dashboard_time_managers(self) -> set[str]:
+        return {
+            item.strip().lower()
+            for item in self.dashboard_time_managers_csv.split(",")
+            if item.strip()
+        }
+
 
     @property
     def oauth_configured(self) -> bool:

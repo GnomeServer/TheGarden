@@ -31,3 +31,5 @@ docker_compose_projects:
   - name: api-guard-dashboard
     path: /home/infra-lab-user/TheGarden/Docker-Documents/api-guard-dashboard
     build: always
+
+prometheus_compose_project: /home/infra-lab-user/grafana-service

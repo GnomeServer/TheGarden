@@ -203,11 +203,13 @@ pinned image and perform normal code generation and review. Only the separate
 `create-python-script` operation is blocked; it runs generated code unsandboxed
 if explicitly enabled.
 
-Only onboard workers after their owners opt in. Do not run the playbook against
-`michelangelo` or `dell-drd17c4` (Sammy) until their owners approve and provide
-SSH login. For Keybroker enrollment, add each worker's Tailnet source IP to the
-server-side `worker_ip_map` with its unique `worker_id`: Sammy is `worker-05`
-at `100.79.110.117`, and Michelangelo is `worker-06` at `100.70.246.104`.
+Only deploy agent-worker services after owner opt-in. The owners of
+`michelangelo` and `dell-drd17c4` (Sammy) have approved Node Exporter
+monitoring; that approval is separate from agent-worker service deployment and
+Keybroker enrollment. For Keybroker enrollment, add each worker's Tailnet source
+IP to the server-side `worker_ip_map` with its unique `worker_id`: Sammy is
+`worker-05` at `100.79.110.117`, and Michelangelo is `worker-06` at
+`100.70.246.104`.
 Ensure the Tailnet-only Caddy route injects trusted source-IP and proxy-token
 headers. For a new worker, prepare an apt-based Linux/systemd host with SSH,
 Python 3, Docker access, and Tailscale reachability to NATS and Keybroker/LiteLLM.
@@ -232,3 +234,46 @@ returned `worker_id` to match inventory before removing any legacy local key.
 After confirming the worker uses per-run Keybroker credentials, an
 administrator must separately revoke any old LiteLLM key. Do not commit key
 files.
+
+## Worker host metrics
+
+The Grafana node-health panel reads CPU, memory, and disk metrics from
+Prometheus Node Exporter. The `node_exporter_workers` group contains five
+approved hosts: Naruto, Raphael, Donatello, Michelangelo, and Sammy. Inkii
+already has an exporter and remains in the Prometheus scrape configuration.
+
+From `Ansible/`, deploy the exporter and the repository's Prometheus scrape
+configuration:
+
+```bash
+ansible-playbook playbooks/node-exporters.yml --ask-become-pass
+```
+
+The playbook checks SSH and sudo access before package or systemd changes. It
+binds port `9100` only to each host's Tailscale address, enables the exporter
+after `tailscaled`, and verifies `/metrics`. Prometheus config is staged and
+checked with the deployed `promtool` before it is applied; only Prometheus is
+restarted when the config changes. A worker that is offline or fails SSH/sudo
+remains unconfigured and may show down/no data until its exporter is installed.
+That does not block the other configured targets or services.
+
+`--ask-become-pass` supplies one sudo password per run. If worker hosts use
+different passwords, install them individually, then apply the scrape config
+from the service host:
+
+```bash
+WORKER_HOST=raphael # replace with each approved host in turn
+ansible-playbook playbooks/node-exporters.yml --limit "$WORKER_HOST" --ask-become-pass
+ansible-playbook playbooks/node-exporters.yml --limit infra-lab-services --ask-become-pass
+```
+
+The host-only runs do not deploy Prometheus config. The service-host run applies
+all approved targets, including offline hosts; Prometheus marks those targets
+down until they return and export metrics. Keep Tailscale ACLs or a host
+firewall limited to the monitoring VM; Node Exporter itself has no
+authentication. The panel's `host` labels show hostnames such as `raphael`,
+not Keybroker worker IDs.
+
+Node Exporter reports operating-system health, not Agent Manager worker
+heartbeats. Check worker service status separately with
+`systemctl is-active dark-factory-agent-worker`.

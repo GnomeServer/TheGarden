@@ -832,6 +832,10 @@ async def get_session_info(request: Request, user: UserRecord = Depends(session_
             "display_name": user.display_name or user.forgejo_login,
             "avatar_url": user.avatar_url,
             "role": user.role,
+            "can_manage_work_sessions": (
+                user.role in {"admin", "manager"}
+                or user.forgejo_login.strip().lower() in settings.dashboard_time_managers
+            ),
         },
         "csrf_token": payload.get("csrf"),
     }

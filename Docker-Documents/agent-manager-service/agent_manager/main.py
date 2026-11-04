@@ -36,7 +36,13 @@ from .exposure_delivery import omp_exposure_delivery_loop
 from .incidents import incident_delivery_loop, router as incidents_router
 from .models import ActivityRecord, RunRecord, UserRecord, WorkerRecord
 from .settings import settings
-from .tracking import router as tracking_router, scan_deadline_notifications
+from .tracking import (
+    WORK_SESSION_AUTOSTOP_INTERVAL_SECONDS,
+    auto_stop_overdue_work_sessions,
+    router as tracking_router,
+    scan_deadline_notifications,
+    work_session_out,
+)
 from .omp import router as omp_router
 from .missions import (
     CONTRACT_VERSION,
@@ -815,6 +821,25 @@ async def artifact_retention_loop() -> None:
         await asyncio.sleep(24 * 60 * 60)
 
 
+
+async def work_session_autostop_loop() -> None:
+    while True:
+        try:
+            async with SessionLocal() as session:
+                stopped = await auto_stop_overdue_work_sessions(session)
+                if stopped:
+                    await session.commit()
+                    for record, activity in stopped:
+                        await live_broker.publish("time", work_session_out(record))
+                        await live_broker.publish("activity", activity_out(activity))
+                    logger.info(
+                        "automatically stopped %d work timers at twelve hours",
+                        len(stopped),
+                    )
+        except Exception:
+            logger.exception("work-session auto-stop scan failed")
+        await asyncio.sleep(WORK_SESSION_AUTOSTOP_INTERVAL_SECONDS)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await initialise_database()
@@ -847,6 +872,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(refresh_operational_gauges()),
         asyncio.create_task(stale_run_reconciliation_loop()),
         asyncio.create_task(artifact_retention_loop()),
+        asyncio.create_task(work_session_autostop_loop()),
         asyncio.create_task(deadline_notification_loop()),
         asyncio.create_task(omp_exposure_delivery_loop()),
         asyncio.create_task(incident_delivery_loop()),

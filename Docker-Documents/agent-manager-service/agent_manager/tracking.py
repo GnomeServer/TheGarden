@@ -57,6 +57,10 @@ from .settings import settings
 router = APIRouter()
 ACCESS_SOURCES = {"ssh", "sshd", "sudo", "tailscale", "systemd", "caddy", "forgejo", "proxmox"}
 WORK_SESSION_STATUSES = {"running", "stopped", "submitted", "approved", "rejected"}
+MAX_WORK_SESSION_SECONDS = 12 * 60 * 60
+WORK_SESSION_OVERTIME_WARNING_SECONDS = 8 * 60 * 60
+WORK_SESSION_AUTOSTOP_INTERVAL_SECONDS = 30
+
 
 
 def utcnow() -> datetime:
@@ -220,7 +224,10 @@ def access_out(record: AccessEventRecord) -> dict[str, Any]:
 def work_session_out(record: WorkSessionRecord) -> dict[str, Any]:
     duration = record.duration_seconds
     if record.status == "running":
-        duration = max(0, int((utcnow() - record.started_at).total_seconds()))
+        duration = min(
+            MAX_WORK_SESSION_SECONDS,
+            max(0, int((utcnow() - record.started_at).total_seconds())),
+        )
     return {
         "id": record.id,
         "user_id": record.user_id,
@@ -228,6 +235,10 @@ def work_session_out(record: WorkSessionRecord) -> dict[str, Any]:
         "started_at": iso(record.started_at),
         "ended_at": iso(record.ended_at),
         "duration_seconds": duration,
+        "overtime_warning": (
+            record.status == "running"
+            and duration >= WORK_SESSION_OVERTIME_WARNING_SECONDS
+        ),
         "source": record.source,
         "status": record.status,
         "approved_by": record.approved_by,
@@ -799,7 +810,7 @@ async def start_work_session(
 ) -> dict[str, Any]:
     require_time_entry_member(actor)
     user_id = body.user_id or actor.id
-    if user_id != actor.id and actor.role not in {"admin", "manager"}:
+    if user_id != actor.id and not can_manage_work_sessions(actor):
         raise HTTPException(status_code=403, detail="Cannot start another user's timer")
     if await session.get(UserRecord, user_id) is None:
         raise HTTPException(status_code=422, detail="Unknown user")
@@ -854,6 +865,11 @@ def require_time_entry_member(actor: UserRecord) -> None:
     if actor.role not in {"admin", "manager", "member"}:
         raise HTTPException(status_code=403, detail="Member access required")
 
+def can_manage_work_sessions(actor: UserRecord) -> bool:
+    login = (actor.forgejo_login or "").strip().lower()
+    return actor.role in {"admin", "manager"} or login in settings.dashboard_time_managers
+
+
 
 async def load_owned_session(
     session: AsyncSession, session_id: str, actor: UserRecord, manager_allowed: bool = True
@@ -861,7 +877,7 @@ async def load_owned_session(
     record = await session.get(WorkSessionRecord, session_id, with_for_update=True)
     if record is None:
         raise HTTPException(status_code=404, detail="Work session not found")
-    if record.user_id != actor.id and not (manager_allowed and actor.role in {"admin", "manager"}):
+    if record.user_id != actor.id and not (manager_allowed and can_manage_work_sessions(actor)):
         raise HTTPException(status_code=403, detail="Work session is not owned by this user")
     return record
 
@@ -905,6 +921,55 @@ async def record_work_session_activity(
 
 
 
+
+async def auto_stop_overdue_work_sessions(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    user_id: str | None = None,
+) -> list[tuple[WorkSessionRecord, ActivityRecord]]:
+    event_time = now or utcnow()
+    cutoff = event_time - timedelta(seconds=MAX_WORK_SESSION_SECONDS)
+    query = select(WorkSessionRecord).where(
+        WorkSessionRecord.status == "running",
+        WorkSessionRecord.started_at <= cutoff,
+    )
+    if user_id is not None:
+        query = query.where(WorkSessionRecord.user_id == user_id)
+    records = (
+        await session.execute(
+            query.order_by(WorkSessionRecord.started_at).with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    stopped: list[tuple[WorkSessionRecord, ActivityRecord]] = []
+    for record in records:
+        if record.status != "running" or record.started_at > cutoff:
+            continue
+        record.ended_at = record.started_at + timedelta(seconds=MAX_WORK_SESSION_SECONDS)
+        record.duration_seconds = MAX_WORK_SESSION_SECONDS
+        record.status = "stopped"
+        activity = await record_activity(
+            session,
+            source="time",
+            source_event_id=f"timer-auto-stopped:{record.id}",
+            event_type="time.auto_stopped",
+            summary="A work timer was automatically stopped at the twelve-hour limit",
+            occurred_at=record.ended_at,
+            task_id=record.task_id,
+            payload={
+                "work_session_id": record.id,
+                "user_id": record.user_id,
+                "task_id": record.task_id,
+                "status": record.status,
+                "previous_status": "running",
+                "started_at": iso(record.started_at),
+                "ended_at": iso(record.ended_at),
+                "duration_seconds": record.duration_seconds,
+            },
+        )
+        stopped.append((record, activity))
+    return stopped
+
 @router.post("/v1/work-sessions/{session_id}/stop")
 async def stop_work_session(
     session_id: str,
@@ -918,7 +983,10 @@ async def stop_work_session(
         raise HTTPException(status_code=409, detail="Only a running timer can be stopped")
     before = work_session_snapshot(record)
     event_time = utcnow()
-    record.ended_at = event_time
+    record.ended_at = min(
+        event_time,
+        record.started_at + timedelta(seconds=MAX_WORK_SESSION_SECONDS),
+    )
     record.duration_seconds = max(0, int((record.ended_at - record.started_at).total_seconds()))
     record.status = "stopped"
     if body.notes:
@@ -959,8 +1027,11 @@ async def discard_work_session(
     event_time = utcnow()
     previous_status = record.status
     if previous_status == "running":
-        record.ended_at = event_time
-        record.duration_seconds = max(0, int((event_time - record.started_at).total_seconds()))
+        record.ended_at = min(
+            event_time,
+            record.started_at + timedelta(seconds=MAX_WORK_SESSION_SECONDS),
+        )
+        record.duration_seconds = max(0, int((record.ended_at - record.started_at).total_seconds()))
     record.status = "deleted"
     activity = await record_work_session_activity(
         session,
@@ -982,7 +1053,6 @@ async def discard_work_session(
     return Response(status_code=204, headers={"X-Undo-ID": activity.id})
 
 
-MAX_EDITED_DURATION_SECONDS = 7 * 24 * 3600
 
 
 @router.patch("/v1/work-sessions/{session_id}")
@@ -993,7 +1063,7 @@ async def edit_work_session(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     require_time_entry_member(actor)
-    record = await load_owned_session(session, session_id, actor, manager_allowed=False)
+    record = await load_owned_session(session, session_id, actor)
     if record.source != "timer":
         raise HTTPException(status_code=409, detail="Only a self-reported timer can be edited")
     if record.status not in {"running", "stopped", "rejected"}:
@@ -1012,8 +1082,8 @@ async def edit_work_session(
         if ended < started:
             raise HTTPException(status_code=422, detail="End time cannot be before start time")
         duration = max(0, int((ended - started).total_seconds()))
-        if duration > MAX_EDITED_DURATION_SECONDS:
-            raise HTTPException(status_code=422, detail="Edited duration cannot exceed 7 days")
+        if duration > MAX_WORK_SESSION_SECONDS:
+            raise HTTPException(status_code=422, detail="Edited duration cannot exceed 12 hours")
         record.ended_at = ended
         record.duration_seconds = duration
         if record.status == "running":
@@ -1021,8 +1091,13 @@ async def edit_work_session(
     else:
         if record.status != "running":
             raise HTTPException(status_code=422, detail="Stopped time needs an end time")
-        record.ended_at = None
-        record.duration_seconds = None
+        if (now - started).total_seconds() >= MAX_WORK_SESSION_SECONDS:
+            record.ended_at = started + timedelta(seconds=MAX_WORK_SESSION_SECONDS)
+            record.duration_seconds = MAX_WORK_SESSION_SECONDS
+            record.status = "stopped"
+        else:
+            record.ended_at = None
+            record.duration_seconds = None
     record.started_at = started
     if body.notes is not None:
         record.notes = body.notes
@@ -1134,7 +1209,7 @@ async def list_work_sessions(
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     query = select(WorkSessionRecord).where(WorkSessionRecord.status != "deleted")
-    if actor.role not in {"admin", "manager"}:
+    if not can_manage_work_sessions(actor):
         query = query.where(WorkSessionRecord.user_id == actor.id)
     elif user_id:
         query = query.where(WorkSessionRecord.user_id == user_id)

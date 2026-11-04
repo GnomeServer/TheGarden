@@ -44,6 +44,7 @@ WORKER_CONSUMER = os.getenv(
 
 OMP_JOB_TIMEOUT_SECONDS = 1200
 MISSION_ACK_WAIT_SECONDS = 1500
+OMP_PROCESS_TIMEOUT_SECONDS = OMP_JOB_TIMEOUT_SECONDS + 60
 
 KEYBROKER_URL = os.getenv(
     "KEYBROKER_URL",
@@ -1374,7 +1375,7 @@ async def run_mission_image(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=660,
+                    timeout=OMP_PROCESS_TIMEOUT_SECONDS,
                     check=False,
                 )
             except subprocess.TimeoutExpired as exc:
@@ -1398,7 +1399,7 @@ async def run_mission_image(
                     }
                 return {
                     "status": "failed",
-                    "summary": "The worker OMP image exceeded its 660-second limit.",
+                    "summary": f"The worker OMP image exceeded its {OMP_JOB_TIMEOUT_SECONDS}-second limit.",
                 }
             if inspect_text is not None:
                 await inspect_text(completed.stdout or "")

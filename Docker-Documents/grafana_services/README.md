@@ -72,7 +72,20 @@ sudo docker compose logs --tail=100 grafana
 
 Docker DNS names on the shared Caddy network are `prometheus:9090`, `node-exporter:9100`, and `grafana:3000`. Compose does not publish those ports. Node Exporter uses `pid: host` and `--path.rootfs=/host`. It does not set `network_mode: host` or `extra_hosts`.
 
-`prometheus/prometheus.yml` does not scrape `node-exporter:9100`. It scrapes `host.docker.internal:9100` for this VM, `100.98.125.127:9100` for `inkii`, and `agent-manager:8000` at `/metrics/`. The host-gateway target is not defined by this Compose file.
+`prometheus/prometheus.yml` scrapes `host.docker.internal:9100` for
+`infra-lab-services`, `agent-manager:8000/metrics`, `nats-exporter:7777`, and
+the worker Tailscale addresses on port `9100`. Their `host` labels are
+`inkii`, `naruto`, `raphael`, `donatello`, `michelangelo`, and `sammy`, so
+node-health cards use hostnames rather than worker IDs. The NATS JetStream
+scrape is preserved in the same configuration.
+
+`node-exporter:9100` is not used for the VM host target. Run
+`Ansible/playbooks/node-exporters.yml` to install Node Exporter on the
+approved workers and copy, validate, and apply this Prometheus configuration.
+The Ansible role binds each worker exporter to its Tailscale address only.
+Node Exporter has no authentication: Tailscale policy or host firewall rules
+must limit access to the monitoring VM. These OS metrics do not replace the
+Agent Manager worker heartbeat.
 
 Grafana is provisioned automatically with Prometheus as its default data source.
 

@@ -166,6 +166,41 @@ their start date falls outside the selected range, so they remain available to
 stop, edit, or discard. The list endpoint accepts `from`, `to`, and `limit`;
 date filtering does not change the existing edit or approval rules.
 
+Timers can continue as overtime after the dashboard's 8-hour reminder. Agent
+Manager automatically stops them at 12 hours and records the end time at that
+boundary; the check runs every 30 seconds. Owners can start, stop, and edit
+their own unsubmitted timers. The Forgejo login in `DASHBOARD_TIME_MANAGERS`
+(default: `donatello`) can start and stop another person's timer and edit that
+person's unsubmitted timer; this narrow permission does not grant general
+administrator access. Managers and administrators retain the same timer
+controls. Edited durations are capped at 12 hours. Submitted and approved
+entries remain locked.
+Saved edits appear immediately. An older in-flight dashboard refresh cannot
+restore stale times.
+
+The checked-in setting defaults to `donatello`. If overriding it, put
+`DASHBOARD_TIME_MANAGERS=donatello` in the live project's `.env` and ensure
+`compose.yml` passes that variable into the container. The Ansible playbook
+deploys the existing project directory; it does not copy source files. To
+deploy these changes without replacing live secrets or database data:
+
+```bash
+cd ~/TheGarden
+cp Docker-Documents/agent-manager-service/agent_manager/settings.py ~/agent-manager-service/agent_manager/settings.py
+cp Docker-Documents/agent-manager-service/agent_manager/dashboard.py ~/agent-manager-service/agent_manager/dashboard.py
+cp Docker-Documents/agent-manager-service/agent_manager/tracking.py ~/agent-manager-service/agent_manager/tracking.py
+cp Docker-Documents/agent-manager-service/agent_manager/static/app.js ~/agent-manager-service/agent_manager/static/app.js
+cp Docker-Documents/agent-manager-service/agent_manager/static/index.html ~/agent-manager-service/agent_manager/static/index.html
+cd ~/agent-manager-service
+sudo docker compose up -d --build --force-recreate agent-manager
+```
+
+Do not replace the live `.env`, Compose overrides, or database volumes. Sign in
+as Donatello. The Reported time form shows a **Start timer for** user selector,
+and other users' running timers expose **Stop** and **Edit times**. Do not grant
+this permission through `DASHBOARD_ADMINS` unless general administrator access
+is intended.
+
 
 Queued and running runs are reconciled after
 `WORKER_RUN_STALE_AFTER_SECONDS` (default 1800). A running run is retained if
@@ -495,7 +530,7 @@ The manager defaults to LiteLLM's internal URL rather than taking this external
 proxy path; an existing `.env` override must be changed deliberately to use the
 new default.
 
-Prometheus scrapes the manager at `http://agent-manager:8000/metrics/` and the
+Prometheus scrapes the manager at `http://agent-manager:8000/metrics` and the
 exporter at `http://nats-exporter:7777/metrics`. Neither metrics endpoint is
 added as a public Caddy route. The exporter is part of this Compose project,
 while its scrape job lives in `../grafana_services/prometheus/prometheus.yml`.
@@ -513,14 +548,19 @@ cd "$REPO_ROOT/Docker-Documents/agent-manager-service"
 sudo docker compose \
   -f compose.yml \
   -f compose.worker-test.yml \
+  up -d --force-recreate nats
+sudo docker compose \
+  -f compose.yml \
+  -f compose.worker-test.yml \
   ps nats
 sudo ss -ltnp | grep ':4222'
 printf '' | nc -v 100.94.49.45 4222
 ```
 
-A working NATS endpoint sends an `INFO` line. `Connection refused` means the
-port is not published or NATS is not listening. An empty response while
-expecting `INFO` is a handshake/endpoint problem, not an empty queue.
+A working NATS endpoint sends an `INFO` line. `Connection refused` means there
+is no listener at that address/port or a firewall is actively rejecting it.
+An empty response while expecting `INFO` is a handshake/endpoint problem, not
+an empty queue.
 
 ### Inspect NATS clients and consumers
 
