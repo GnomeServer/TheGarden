@@ -1341,7 +1341,7 @@ async def delete_task(
     )
     event = await record_activity(
         session,
-        source="task", source_event_id=f"task-archived:{task.id}", event_type="task.archived",
+        source="task", source_event_id=f"task-archived:{task.id}:{task.version}", event_type="task.archived",
         actor_user_id=actor.id, task_id=task.id,
         summary="A shared task was archived",
         payload={"undo": {"kind": "task", "before": before, "after": {"deleted": True, "version": task.version}}},

@@ -13,6 +13,7 @@ from agent_manager.dashboard import (
     TaskUpdate,
     canonical_worker_id,
     canonical_worker_out,
+    delete_task,
     list_workers,
     task_snapshot,
     update_task,
@@ -91,6 +92,39 @@ class SharedTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.version, 2)
         self.assertIn(TaskAuditRecord, {type(item) for item in session.add.call_args_list[0].args})
         session.commit.assert_awaited_once()
+
+    async def test_rearchiving_restored_task_records_a_new_archive_event(self):
+        now = datetime.now(timezone.utc)
+        task = SimpleNamespace(
+            id="task-1", title="Shared task", description="", status="todo", priority="normal",
+            due_at=None, assignee_user_id="author", assignee_worker_id=None, repository=None,
+            forgejo_issue_number=None, run_id=None, created_by="author", completed_at=None,
+            version=1, created_at=now, updated_at=now, deleted_at=None,
+        )
+        session = SimpleNamespace(
+            get=AsyncMock(side_effect=[task, task]),
+            add=Mock(),
+            commit=AsyncMock(),
+        )
+        actor = SimpleNamespace(id="actor", role="member")
+
+        with patch("agent_manager.dashboard.live_broker.publish", new_callable=AsyncMock):
+            first = await delete_task("task-1", actor, session)
+            task.deleted_at = None
+            task.version += 1
+            second = await delete_task("task-1", actor, session)
+
+        archive_events = [
+            call.args[0] for call in session.add.call_args_list
+            if isinstance(call.args[0], ActivityRecord)
+        ]
+        self.assertEqual(
+            [event.source_event_id for event in archive_events],
+            ["task-archived:task-1:2", "task-archived:task-1:4"],
+        )
+        self.assertNotEqual(first.headers["X-Undo-ID"], second.headers["X-Undo-ID"])
+        self.assertEqual(session.commit.await_count, 2)
+
 
 
 class ActivityEstimateTests(unittest.IsolatedAsyncioTestCase):

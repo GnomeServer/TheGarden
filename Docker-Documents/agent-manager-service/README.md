@@ -217,6 +217,8 @@ and audit history. This README covers the manager's dashboard, OAuth, webhook,
 task, and worker behavior. The Ansible
 [`Docker Compose deployment guide`](../../Ansible/README.md#docker-compose-deployment)
 covers deployment paths and operations.
+On the Work board, open a task to archive it; archived tasks leave the active
+boards, and restored tasks can be archived again.
 
 The Agents view presents the six canonical host names (Raphael, Inkii,
 Donatello, Naruto, Sammy, and Michelangelo) rather than duplicate historical
