@@ -452,6 +452,34 @@ select {
   border-color: #9bb8a4;
   box-shadow: 0 4px 12px #263b2e0d;
 }
+
+.task-trash-list {
+  display: grid;
+  gap: .55rem;
+}
+.task-trash-item {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: .75rem .9rem;
+}
+.task-trash-copy {
+  min-width: 0;
+}
+.task-trash-copy strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.task-trash-copy .task-meta {
+  margin-top: .35rem;
+}
+.task-trash-item .task-description {
+  margin: .35rem 0 0;
+}
 .task-open {
   background: none;
   border: 0;
@@ -901,6 +929,14 @@ dialog footer {
   }
   .task-column {
     min-height: auto;
+  }
+
+  .task-trash-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .task-trash-item .button {
+    width: 100%;
   }
   .estimate-list,.worker-grid {
     grid-template-columns: 1fr;

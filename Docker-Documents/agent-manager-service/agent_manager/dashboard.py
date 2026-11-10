@@ -1242,6 +1242,28 @@ async def create_task(
     return {**output, "undo_id": event.id}
 
 
+@router.delete("/v1/tasks/trash")
+async def empty_cancelled_task_trash(
+    actor: UserRecord = Depends(require_session_csrf),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, int]:
+    ensure_task_permission(actor)
+    result = await session.execute(
+        select(TaskRecord)
+        .where(TaskRecord.status == "cancelled", TaskRecord.deleted_at.is_(None))
+        .with_for_update()
+    )
+    tasks = [
+        task for task in result.scalars().all()
+        if task.status == "cancelled" and task.deleted_at is None
+    ]
+    for task in tasks:
+        await session.delete(task)
+    if tasks:
+        await session.commit()
+    return {"deleted_count": len(tasks)}
+
+
 @router.get("/v1/tasks/{task_id}")
 async def get_task(
     task_id: str,

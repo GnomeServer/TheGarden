@@ -4,6 +4,7 @@ const state = {
   session: null,
   summary: null,
   tasks: [],
+  cancelledTasks: null,
   workers: [],
   users: [],
   runs: [],
@@ -303,6 +304,7 @@ async function refreshAll() {
   const results = await Promise.allSettled([
     api("/v1/dashboard/summary"),
     api(taskQuery()),
+    api("/v1/tasks?status=cancelled&limit=500"),
     api("/v1/users"),
     api("/v1/workers"),
     api("/v1/dashboard/runs?limit=100"),
@@ -325,6 +327,7 @@ async function refreshAll() {
   const keys = [
     "summary",
     "tasks",
+    "cancelledTasks",
     "users",
     "workers",
     "runs",
@@ -384,6 +387,8 @@ async function refreshAll() {
 function render() {
   renderSummary();
   renderTasks();
+
+  renderTaskTrash();
   renderAgentTasks();
   renderExternalLinks();
   populateAssignments();
@@ -645,7 +650,7 @@ function renderTasks() {
     target.innerHTML = '<p class="loading">Loading tasks…</p>';
     return;
   }
-  const visible = state.tasks.filter((task) => !task.assignee_worker_id);
+  const visible = state.tasks.filter((task) => !task.assignee_worker_id && task.status !== "cancelled");
   if (!visible.length) {
     setEmpty(target, "No human tasks match this view. Create a task to get started.");
     return;
@@ -655,8 +660,7 @@ function renderTasks() {
     ["todo", "To do"],
     ["in_progress", "In progress"],
     ["blocked", "Blocked"],
-    ["done", "Done"],
-    ["cancelled", "Cancelled"],
+    ["done", "Complete"],
   ];
   target.innerHTML = columns.map(([status, label]) => {
     const tasks = visible.filter((task) => task.status === status);
@@ -695,7 +699,11 @@ function renderAgentTasks() {
     return;
   }
   const statusFilter = $("agent-task-status-filter")?.value || "";
-  const visible = state.tasks.filter((task) => task.assignee_worker_id && (!statusFilter || task.status === statusFilter));
+  const visible = state.tasks.filter((task) =>
+    task.status !== "cancelled"
+    && task.assignee_worker_id
+    && (!statusFilter || task.status === statusFilter)
+  );
   if (!visible.length) {
     setEmpty(target, "No agent tasks match this filter. Assign a worker on the TODO board to route a task here.");
     return;
@@ -705,7 +713,6 @@ function renderAgentTasks() {
     ["in_progress", "In progress"],
     ["blocked", "Blocked"],
     ["done", "Complete"],
-    ["cancelled", "Cancelled"],
   ];
   target.innerHTML = columns.map(([status, label]) => {
     const tasks = visible.filter((task) => task.status === status);
@@ -733,6 +740,46 @@ function renderAgentTasks() {
     `;
   }).join("");
 }
+
+function renderTaskTrash() {
+  const target = $("task-trash-list");
+  const emptyButton = $("empty-task-trash");
+  const count = $("task-trash-count");
+  if (state.cancelledTasksError) {
+    setError(target, "Cancelled tasks could not be loaded.");
+    count.textContent = "—";
+    emptyButton.disabled = true;
+    return;
+  }
+  if (!state.cancelledTasks) {
+    target.innerHTML = '<p class="loading">Loading cancelled tasks…</p>';
+    emptyButton.disabled = true;
+    return;
+  }
+  const tasks = state.cancelledTasks;
+  count.textContent = String(tasks.length);
+  emptyButton.disabled = tasks.length === 0;
+  if (!tasks.length) {
+    setEmpty(target, "No cancelled tasks. Cancelled tasks will appear here.");
+    return;
+  }
+  target.innerHTML = tasks.map((task) => `
+    <article class="task-trash-item">
+      <div class="task-trash-copy">
+        <strong>${esc(task.title)}</strong>
+        <span class="task-meta">
+          <span class="badge">Cancelled</span>
+          <span>${esc(memberName(task.assignee_user_id))}</span>
+          ${task.assignee_worker_id ? `<span>Worker ${esc(workerDisplayLabel(task.assignee_worker_id))}</span>` : ""}
+          ${task.due_at ? `<time datetime="${esc(task.due_at)}">Due ${esc(formatDate(task.due_at))}</time>` : ""}
+        </span>
+        ${task.description ? `<p class="task-description">${esc(task.description)}</p>` : ""}
+      </div>
+      <button class="button secondary" type="button" data-restore-cancelled-task="${esc(task.id)}" aria-label="Restore ${esc(task.title)} to To do">Restore to To do</button>
+    </article>
+  `).join("");
+}
+
 
 function safeHttpUrl(value) {
   try {
@@ -871,6 +918,52 @@ async function archiveTask() {
     $("task-error").textContent = error.message;
   }
 }
+
+async function restoreCancelledTask(taskId, button) {
+  const task = (state.cancelledTasks || []).find((item) => String(item.id) === String(taskId));
+  if (!task || button.disabled) return;
+  button.disabled = true;
+  try {
+    const result = await api(`/v1/tasks/${encodeURIComponent(task.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ version: task.version, status: "todo" }),
+    });
+    showToast("Task restored to To do", result?.undo_id);
+    await refreshAll();
+  } catch (error) {
+    if (!handleAuthError(error)) showToast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openEmptyTaskTrash() {
+  const count = state.cancelledTasks?.length || 0;
+  if (!count) return;
+  $("empty-task-trash-count").textContent = String(count);
+  $("empty-task-trash-error").textContent = "";
+  $("empty-task-trash-dialog").showModal();
+}
+
+async function emptyCancelledTaskTrash() {
+  const button = $("confirm-empty-task-trash");
+  if (button.disabled || !state.cancelledTasks?.length) return;
+  button.disabled = true;
+  try {
+    const result = await api("/v1/tasks/trash", { method: "DELETE" });
+    $("empty-task-trash-dialog").close();
+    const count = Number(result?.deleted_count) || 0;
+    showToast(count
+      ? `Permanently deleted ${count} cancelled task${count === 1 ? "" : "s"}`
+      : "Trash was already empty");
+    await refreshAll();
+  } catch (error) {
+    if (!handleAuthError(error)) $("empty-task-trash-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function admissionInfo(worker) {
   const value = worker.admission_status;
   if (value == null || value === "") {
@@ -1590,6 +1683,13 @@ $("close-task").addEventListener("click", () => $("task-dialog").close());
 $("cancel-task").addEventListener("click", () => $("task-dialog").close());
 $("task-form").addEventListener("submit", saveTask);
 $("archive-task").addEventListener("click", archiveTask);
+$("task-trash-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-restore-cancelled-task]");
+  if (button) restoreCancelledTask(button.dataset.restoreCancelledTask, button);
+});
+$("empty-task-trash").addEventListener("click", openEmptyTaskTrash);
+$("cancel-empty-task-trash").addEventListener("click", () => $("empty-task-trash-dialog").close());
+$("confirm-empty-task-trash").addEventListener("click", emptyCancelledTaskTrash);
 $("timer-form").addEventListener("submit", startReportedTimer);
 $("work-sessions").addEventListener("click", (event) => {
   const button = event.target.closest("[data-time-action]");

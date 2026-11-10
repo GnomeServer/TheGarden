@@ -220,6 +220,10 @@ covers deployment paths and operations.
 On the Work board, open a task to archive it; archived tasks leave the active
 boards, and restored tasks can be archived again.
 
+Cancelled tasks leave the active and agent boards and appear in the Work page's
+Trash bin. Restore returns a task to **To do**; **Empty trash** permanently
+deletes all cancelled tasks after an in-app confirmation.
+
 The Agents view presents the six canonical host names (Raphael, Inkii,
 Donatello, Naruto, Sammy, and Michelangelo) rather than duplicate historical
 worker IDs. Legacy heartbeat IDs are grouped under a known host or placed in a

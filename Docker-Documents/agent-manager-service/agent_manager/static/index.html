@@ -6,7 +6,7 @@
   <meta name="theme-color" id="theme-color" content="#12151c">
   <title>TheGarden — Team dashboard</title>
   <link rel="stylesheet" href="/dashboard/static/styles.css?v=1.5.16">
-  <script src="/dashboard/static/app.js?v=1.5.24" defer></script>
+  <script src="/dashboard/static/app.js?v=1.5.25" defer></script>
 </head>
 <body>
   <section id="login" class="login-shell hidden" aria-labelledby="login-title">
@@ -54,10 +54,19 @@
         <div id="people-channels" class="team-widget" aria-label="People" aria-live="polite"><p class="loading">Loading people…</p></div>
         <section class="work-summary" aria-label="Team work summary"><div id="summary" class="metric-grid" aria-live="polite"><p class="loading">Loading team summary…</p></div></section>
         <section class="content-section" aria-labelledby="tasks-title">
-          <div class="section-heading"><div><p class="eyebrow">SHARED BOARD</p><h2 id="tasks-title">Problems and tasks</h2></div><div class="filters"><label class="visually-hidden" for="task-status-filter">Filter tasks by status</label><select id="task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select><button id="new-task" class="button primary" type="button">＋ New task</button></div></div>
+          <div class="section-heading"><div><p class="eyebrow">SHARED BOARD</p><h2 id="tasks-title">Problems and tasks</h2></div><div class="filters"><label class="visually-hidden" for="task-status-filter">Filter tasks by status</label><select id="task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option></select><button id="new-task" class="button primary" type="button">＋ New task</button></div></div>
           <p class="section-note">Team members can create, edit, reassign, and move these tasks. Assign a worker to send a task to the agent board.</p>
           <p class="notice assignment-note">This board is manual. It does not start an agent run by itself.</p>
           <div id="task-board" class="task-board" aria-live="polite"><p class="loading">Loading tasks…</p></div>
+        </section>
+
+        <section class="content-section" aria-labelledby="task-trash-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">TRASH BIN</p><h2 id="task-trash-title">Cancelled tasks <span id="task-trash-count" class="count">0</span></h2></div>
+            <button id="empty-task-trash" class="button danger" type="button" disabled>Empty trash</button>
+          </div>
+          <p class="section-note">Cancelled tasks leave the active boards. Restore moves a task to To do; Empty trash permanently deletes all cancelled tasks.</p>
+          <div id="task-trash-list" class="task-trash-list" aria-live="polite"><p class="loading">Loading cancelled tasks…</p></div>
         </section>
 
         <section class="content-section" aria-labelledby="dashboard-time-title">
@@ -71,7 +80,7 @@
         <header class="page-heading"><div><p class="eyebrow">AGENT EXECUTION</p><h1 id="operations-title">Agent channels</h1><p class="muted">Open WebUI requests, the step each worker is on, and who is currently active.</p></div></header>
         <div id="worker-channels" class="channel-row" aria-label="Agents" aria-live="polite"><p class="loading">Loading agents…</p></div>
         <section class="content-section" aria-labelledby="agent-assignments-title">
-          <div class="section-heading"><div><p class="eyebrow">WORKER ASSIGNMENTS</p><h2 id="agent-assignments-title">Agent tasks</h2></div><div class="filters"><label class="visually-hidden" for="agent-task-status-filter">Filter agent tasks by status</label><select id="agent-task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option><option value="cancelled">Cancelled</option></select></div></div>
+          <div class="section-heading"><div><p class="eyebrow">WORKER ASSIGNMENTS</p><h2 id="agent-assignments-title">Agent tasks</h2></div><div class="filters"><label class="visually-hidden" for="agent-task-status-filter">Filter agent tasks by status</label><select id="agent-task-status-filter"><option value="">All statuses</option><option value="todo">To do</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="done">Complete</option></select></div></div>
           <p class="section-note">Only tasks with a worker assignment appear here.</p>
           <div id="agent-task-board" class="task-board" aria-live="polite"><p class="loading">Loading agent tasks…</p></div>
         </section>
@@ -136,6 +145,16 @@
       <footer><button id="archive-task" type="button" class="button danger hidden">Archive task</button><span class="spacer"></span><button type="button" id="cancel-task" class="button secondary">Cancel</button><button id="save-task" type="submit" class="button primary">Save task</button></footer>
     </form>
   </dialog>
+
+  <dialog id="empty-task-trash-dialog" aria-labelledby="empty-task-trash-title">
+    <form>
+      <header class="dialog-heading"><div><p class="eyebrow">TRASH BIN</p><h2 id="empty-task-trash-title">Empty trash?</h2></div></header>
+      <p>Delete all <strong id="empty-task-trash-count">0</strong> cancelled tasks permanently? This cannot be undone.</p>
+      <p id="empty-task-trash-error" class="error" role="alert"></p>
+      <footer><button id="cancel-empty-task-trash" type="button" class="button secondary">Cancel</button><span class="spacer"></span><button id="confirm-empty-task-trash" type="button" class="button danger">Delete permanently</button></footer>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast hidden" role="status" aria-live="polite"><span id="toast-message"></span><button id="toast-undo" class="button ghost hidden" type="button">Undo</button></div>
 </body>
 </html>

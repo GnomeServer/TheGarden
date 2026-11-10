@@ -14,6 +14,7 @@ from agent_manager.dashboard import (
     canonical_worker_id,
     canonical_worker_out,
     delete_task,
+    empty_cancelled_task_trash,
     list_workers,
     task_snapshot,
     update_task,
@@ -125,6 +126,37 @@ class SharedTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first.headers["X-Undo-ID"], second.headers["X-Undo-ID"])
         self.assertEqual(session.commit.await_count, 2)
 
+
+
+
+    async def test_empty_cancelled_task_trash_deletes_only_active_cancelled_tasks(self):
+        cancelled = SimpleNamespace(status="cancelled", deleted_at=None)
+        completed = SimpleNamespace(status="done", deleted_at=None)
+        archived = SimpleNamespace(status="cancelled", deleted_at=datetime.now(timezone.utc))
+        session = SimpleNamespace(
+            execute=AsyncMock(return_value=Result([cancelled, completed, archived])),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+
+        result = await empty_cancelled_task_trash(SimpleNamespace(role="member"), session)
+
+        self.assertEqual(result, {"deleted_count": 1})
+        session.delete.assert_awaited_once_with(cancelled)
+        session.commit.assert_awaited_once()
+
+    async def test_only_board_members_can_empty_cancelled_task_trash(self):
+        session = SimpleNamespace(
+            execute=AsyncMock(),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+
+        with self.assertRaises(HTTPException) as caught:
+            await empty_cancelled_task_trash(SimpleNamespace(role="viewer"), session)
+
+        self.assertEqual(caught.exception.status_code, 403)
+        session.execute.assert_not_awaited()
 
 
 class ActivityEstimateTests(unittest.IsolatedAsyncioTestCase):
