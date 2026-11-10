@@ -860,7 +860,7 @@ async function saveTask(event) {
 
 async function archiveTask() {
   const id = $("task-id").value;
-  if (!id || !window.confirm("Archive this task?")) return;
+  if (!id) return;
   try {
     const result = await api(`/v1/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
     $("task-dialog").close();
