@@ -281,6 +281,39 @@ class WorkSessionActivityTests(unittest.IsolatedAsyncioTestCase):
             ["time", "activity"] * 3,
         )
 
+    async def test_stop_after_undo_uses_a_new_activity_event_id(self) -> None:
+        record = make_record()
+        session = FakeSession(record)
+        owner = make_actor()
+        activity = SimpleNamespace(id="activity-1")
+        transition_times = [
+            datetime(2026, 10, 13, 12, 1, tzinfo=timezone.utc),
+            datetime(2026, 10, 13, 12, 2, tzinfo=timezone.utc),
+        ]
+
+        with (
+            patch("agent_manager.tracking.utcnow", side_effect=transition_times),
+            patch(
+                "agent_manager.tracking.record_work_session_activity",
+                new_callable=AsyncMock,
+                return_value=activity,
+            ) as record_activity,
+            patch("agent_manager.tracking.work_session_out", return_value={"status": "stopped"}),
+            patch("agent_manager.tracking.activity_out", return_value={}),
+            patch("agent_manager.tracking.live_broker.publish", new_callable=AsyncMock),
+        ):
+            await stop_work_session("timer-1", WorkSessionNotes(), actor=owner, session=session)
+            record.status = "running"
+            record.ended_at = None
+            record.duration_seconds = None
+            await stop_work_session("timer-1", WorkSessionNotes(), actor=owner, session=session)
+
+        event_ids = [call.kwargs["source_event_id"] for call in record_activity.await_args_list]
+        self.assertEqual(len(event_ids), 2)
+        self.assertNotEqual(event_ids[0], event_ids[1])
+        self.assertEqual(session.commits, 2)
+
+
     async def test_rejection_is_recorded_in_activity(self) -> None:
         record = make_record(status="submitted")
         session = FakeSession(record)

@@ -158,7 +158,21 @@ async function api(path, options = {}) {
   }
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    const error = new Error(`Request failed (${response.status})`);
+    const detail = typeof data?.detail === "string"
+      ? data.detail
+      : Array.isArray(data?.detail)
+        ? data.detail.map((issue) => {
+          const location = Array.isArray(issue?.loc)
+            ? issue.loc.filter((part) => part !== "body").join(".")
+            : "";
+          const message = typeof issue?.msg === "string" ? issue.msg : "";
+          return [location, message].filter(Boolean).join(": ");
+        }).filter(Boolean).join("; ")
+        : "";
+    const message = detail
+      ? `Request failed (${response.status}): ${detail}`
+      : `Request failed (${response.status})`;
+    const error = new Error(message.slice(0, 500));
     error.status = response.status;
     throw error;
   }

@@ -996,7 +996,7 @@ async def stop_work_session(
         record,
         actor,
         event_type="time.stopped",
-        source_event_id=f"timer-stopped:{record.id}",
+        source_event_id=f"timer-stopped:{record.id}:{uuid.uuid4()}",
         summary="stopped a work timer",
         occurred_at=event_time,
         undo={"kind": "work_session", "before": before, "after": work_session_snapshot(record)},
