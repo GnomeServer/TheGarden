@@ -156,6 +156,13 @@ artifact paths and commands, and expected results. Agent Manager exposes these
 steps in mission status, and the OpenWebUI Pipe renders them as a numbered list.
 Neither the worker nor the embedded preview executes generated artifacts.
 
+Successful results may include `usage_instructions`. The worker validates up to
+eight short, single-line steps; runnable script artifacts require at least two.
+The planner and reviewer require safe, ordered steps with prerequisites, exact
+artifact paths and commands, and expected results. Agent Manager exposes these
+steps in mission status, and the OpenWebUI Pipe renders them as a numbered list.
+Neither the worker nor the embedded preview executes generated artifacts.
+
 For an artifact modification, the Manager creates a new child mission and
 supplies its parent ZIP as a signed, TLS-verified worker download. The worker
 checks its size and checksum, rejects unsafe ZIP paths, and extracts it into
