@@ -26,6 +26,20 @@ When the user leaves the example open, choose a benign example satisfying the re
 
 The worker wrapper requires the final assistant message to be exactly one JSON object, with no code fence or extra prose. Do not use `pending` or a progress summary as the final status.
 
+For every successful result, include `usage_instructions` as a JSON array.
+When an artifact is an executable script or runnable source file, provide 2–8
+ordered, user-facing steps, one step per array item without list numbering:
+prerequisites, where to open a terminal, exact relative paths and commands,
+and what success looks like. Match commands to files that actually exist.
+Never tell the user to use elevated privileges, run destructive commands, or
+supply credentials in command arguments. Do not claim a command was tested
+unless a reviewer observed that check. For a non-runnable deliverable, use an
+empty array.
+
+For browser-viewable results, prefer one root `index.html` and relative local
+asset paths so the Manager can serve the page as a sandboxed static preview.
+Do not claim the preview executes JavaScript.
+
 On success, emit this schema with the exact `completed` status:
 
 ```json
@@ -34,6 +48,7 @@ On success, emit this schema with the exact `completed` status:
   "reviewer_approved": true,
   "reviewer_count": 0,
   "summary": "Concise result and bounded local checks performed.",
+  "usage_instructions": [],
   "artifacts": ["relative/path/under/work"]
 }
 ```

@@ -1,6 +1,7 @@
 """Open WebUI Pipe that sends a chat turn to OMP and returns its reply."""
 
 import asyncio
+import html
 import inspect
 import logging
 import re
@@ -8,6 +9,7 @@ import secrets
 import time
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, Field
@@ -100,18 +102,95 @@ class Pipe:
         return goal, project_name
 
     @staticmethod
-    def _format_artifacts(artifact: Any) -> str:
+    def _escape_markdown(value: str) -> str:
+        escaped = ""
+        for character in value:
+            if character in "\\`*_{}[]()#+-.!|>":
+                escaped += "\\"
+            escaped += character
+        return escaped
+
+    @staticmethod
+    def _format_artifacts(
+        artifact: Any, usage_instructions: Any = None
+    ) -> str:
         if not isinstance(artifact, dict):
             return "The mission completed, but no downloadable artifact was reported."
         filename = artifact.get("filename")
         download_url = artifact.get("download_url")
         size_bytes = artifact.get("size_bytes")
-        if not isinstance(filename, str) or not filename or not isinstance(download_url, str) or not download_url:
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or not isinstance(download_url, str)
+            or not download_url
+        ):
             return "The mission completed, but no downloadable artifact was reported."
-        # Escape Markdown label metacharacters without modifying the signed URL.
-        safe_filename = filename.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-        size = f"{size_bytes:,} bytes" if isinstance(size_bytes, int) and size_bytes >= 0 else "size unknown"
-        return f"Download the completed work:\n- [{safe_filename}]({download_url}) ({size})"
+        try:
+            download_parts = urlsplit(download_url)
+        except ValueError:
+            return "The mission completed, but no downloadable artifact was reported."
+        if (
+            download_parts.scheme.casefold() not in {"http", "https"}
+            or not download_parts.netloc
+            or download_parts.hostname is None
+            or download_parts.username is not None
+            or download_parts.password is not None
+        ):
+            return "The mission completed, but no downloadable artifact was reported."
+
+        safe_filename = Pipe._escape_markdown(filename)
+        size = (
+            f"{size_bytes:,} bytes"
+            if isinstance(size_bytes, int) and size_bytes >= 0
+            else "size unknown"
+        )
+        preview_url = artifact.get("preview_url")
+        preview_embed = ""
+        links = []
+        if isinstance(preview_url, str) and preview_url:
+            try:
+                preview_parts = urlsplit(preview_url)
+            except ValueError:
+                preview_parts = None
+            if (
+                preview_parts is not None
+                and preview_parts.scheme.casefold() in {"http", "https"}
+                and preview_parts.netloc
+                and preview_parts.scheme.casefold() == download_parts.scheme.casefold()
+                and preview_parts.netloc.casefold() == download_parts.netloc.casefold()
+                and preview_parts.username is None
+                and preview_parts.password is None
+            ):
+                links.append(f"[Open preview]({preview_url})")
+                preview_embed = (
+                    "\n\n<iframe src=\""
+                    + html.escape(preview_url, quote=True)
+                    + '" title="Generated artifact preview" width="100%"></iframe>'
+                )
+        links.append(f"[Download ZIP]({download_url})")
+        message = (
+            f"Completed work:\n- {safe_filename} ({size}) — {' · '.join(links)}"
+            f"{preview_embed}"
+        )
+        if isinstance(usage_instructions, list):
+            steps = [
+                Pipe._escape_markdown(step.strip())
+                for step in usage_instructions[:8]
+                if (
+                    isinstance(step, str)
+                    and step.strip()
+                    and len(step) <= 500
+                    and "\n" not in step
+                    and "\r" not in step
+                    and all(character.isprintable() for character in step)
+                )
+            ]
+            if steps:
+                message += "\n\n**How to use the files**\n" + "\n".join(
+                    f"{index}. {step}" for index, step in enumerate(steps, 1)
+                )
+        return message
 
     @staticmethod
     async def _emit_status(
@@ -283,7 +362,9 @@ class Pipe:
         if isinstance(security_notice, str) and security_notice.strip():
             reply += f"\n\nSecurity notice: {security_notice.strip()[:500]}"
         if status == "completed":
-            reply += cls._format_artifacts(state.get("artifact"))
+            reply += cls._format_artifacts(
+                state.get("artifact"), state.get("usage_instructions")
+            )
         return reply
 
     @staticmethod
@@ -600,7 +681,9 @@ class Pipe:
                 if isinstance(security_notice, str) and security_notice.strip():
                     body += f"\n\nSecurity notice: {security_notice.strip()[:500]}"
                 if status == "completed":
-                    body += self._format_artifacts(state.get("artifact"))
+                    body += self._format_artifacts(
+                        state.get("artifact"), state.get("usage_instructions")
+                    )
                 return body
             await asyncio.sleep(self.valves.POLL_INTERVAL_SECONDS)
         return f"{summary}{project}. Mission `{mission_id}` (status: `{last_status}`). Polling timed out before completion."

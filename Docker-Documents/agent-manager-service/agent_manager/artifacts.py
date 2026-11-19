@@ -3,15 +3,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import io
 import re
 import secrets
+import stat
 import uuid
 import weakref
+import zipfile
+import zlib
 from datetime import datetime, timedelta, timezone
+from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +32,35 @@ CONTENT_TYPE_PATTERN = re.compile(
     r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+"
     r"(?:;[ \t]*[A-Za-z0-9!#$&^_.+-]+=(?:[A-Za-z0-9!#$&^_.+-]+|\"[A-Za-z0-9!#$&^_.+-]*\"))*$"
 )
+HTML_SUFFIXES = frozenset({".html", ".htm"})
+PREVIEW_MEDIA_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json",
+    ".txt": "text/plain; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+}
+PREVIEW_CSP = (
+    "default-src 'none'; script-src 'none'; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+    "font-src 'self' data:; media-src 'self' data: blob:; "
+    "connect-src 'none'; object-src 'none'; frame-src 'none'; "
+    "base-uri 'none'; form-action 'none'"
+)
+MAX_PREVIEW_FILES = 100
 # Weak values discard idle per-run locks while active callers retain their lock.
 UPLOAD_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
@@ -114,8 +149,126 @@ def artifact_download_url(run_id: str, artifact: dict[str, Any]) -> str:
         f"{artifact['id']}/download?{query}"
     )
 
+def artifact_preview_url(run_id: str, artifact: dict[str, Any]) -> str:
+    expires = int(datetime.now(timezone.utc).timestamp()) + DOWNLOAD_TTL_SECONDS
+    signature = artifact_signature(run_id, str(artifact["id"]), expires)
+    return (
+        f"{settings.public_url.rstrip('/')}/v1/omp/missions/{run_id}/artifacts/"
+        f"{artifact['id']}/preview/{expires}/{signature}/"
+    )
 
-def mission_artifact(metadata: dict[str, Any], run_id: str) -> dict[str, Any] | None:
+
+def _safe_archive_path(value: str) -> bool:
+    if not value or "\x00" in value or "\\" in value or any(c in value for c in "\r\n"):
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == value
+        and bool(path.parts)
+        and not any(part in {"", ".", ".."} for part in path.parts)
+        and not re.match(r"^[A-Za-z]:", path.parts[0])
+    )
+
+
+def html_preview_entrypoint(paths: Any) -> str | None:
+    if not isinstance(paths, list):
+        return None
+    candidates = {
+        path
+        for path in paths
+        if isinstance(path, str)
+        and _safe_archive_path(path)
+        and PurePosixPath(path).suffix.casefold() in HTML_SUFFIXES
+    }
+    root_indexes = [
+        path for path in candidates
+        if "/" not in path and PurePosixPath(path).name.casefold() in {"index.html", "index.htm"}
+    ]
+    if len(root_indexes) == 1:
+        return root_indexes[0]
+    index_files = [
+        path for path in candidates
+        if PurePosixPath(path).name.casefold() in {"index.html", "index.htm"}
+    ]
+    if len(index_files) == 1:
+        return index_files[0]
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
+def _preview_archive(content: bytes) -> tuple[zipfile.ZipFile, dict[str, zipfile.ZipInfo]]:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(content))
+        infos = archive.infolist()
+    except (OSError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise HTTPException(status_code=422, detail="artifact is not a previewable ZIP") from exc
+    if len(infos) > MAX_PREVIEW_FILES:
+        archive.close()
+        raise HTTPException(status_code=422, detail="artifact has too many preview files")
+    files: dict[str, zipfile.ZipInfo] = {}
+    total_size = 0
+    for info in infos:
+        name = info.filename[:-1] if info.is_dir() else info.filename
+        if not _safe_archive_path(name):
+            archive.close()
+            raise HTTPException(status_code=422, detail="artifact contains an unsafe preview path")
+        if info.is_dir():
+            continue
+        mode = stat.S_IFMT(info.external_attr >> 16)
+        if (
+            mode not in {0, stat.S_IFREG}
+            or info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+            or name in files
+        ):
+            archive.close()
+            raise HTTPException(status_code=422, detail="artifact contains an unsupported preview entry")
+        total_size += info.file_size
+        if info.file_size < 0 or total_size > MAX_ARTIFACT_BYTES:
+            archive.close()
+            raise HTTPException(status_code=413, detail="preview exceeds the artifact size limit")
+        files[name] = info
+    return archive, files
+
+
+def _preview_response(content: bytes, media_type: str, *, html_page: bool = False) -> Response:
+    headers = {
+        "Cache-Control": "private, no-store",
+        "Content-Disposition": "inline",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if html_page:
+        headers["Content-Security-Policy"] = PREVIEW_CSP
+    return Response(content=content, media_type=media_type, headers=headers)
+
+
+async def _signed_preview_artifact(
+    run_id: str,
+    artifact_id: str,
+    expires: int,
+    signature: str,
+    session: AsyncSession,
+) -> ArtifactBlobRecord:
+    if not validate_artifact_id(artifact_id) or not verify_artifact_signature(
+        run_id, artifact_id, expires, signature
+    ):
+        raise HTTPException(status_code=403, detail="artifact preview link is invalid or expired")
+    artifact = await session.get(ArtifactBlobRecord, artifact_id)
+    if artifact is None or artifact.run_id != run_id:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    if artifact.content_type != "application/zip":
+        raise HTTPException(status_code=415, detail="only ZIP artifacts can be previewed")
+    return artifact
+
+
+def mission_artifact(
+    metadata: dict[str, Any],
+    run_id: str,
+    *,
+    preview_paths: Any = None,
+) -> dict[str, Any] | None:
     artifact = metadata.get("artifact")
     if not isinstance(artifact, dict):
         return None
@@ -126,6 +279,11 @@ def mission_artifact(metadata: dict[str, Any], run_id: str) -> dict[str, Any] | 
     if not validate_artifact_id(descriptor["id"]):
         return None
     descriptor["download_url"] = artifact_download_url(run_id, artifact)
+    if (
+        descriptor["content_type"] == "application/zip"
+        and html_preview_entrypoint(preview_paths) is not None
+    ):
+        descriptor["preview_url"] = artifact_preview_url(run_id, artifact)
     return descriptor
 
 
@@ -280,6 +438,90 @@ async def download_artifact(
             "X-Content-Type-Options": "nosniff",
             "Content-Disposition": f'attachment; filename="{artifact.filename}"',
         },
+    )
+
+
+@router.get(
+    "/v1/omp/missions/{run_id}/artifacts/{artifact_id}/preview/{expires}/{signature}/",
+    response_class=Response,
+)
+async def preview_artifact(
+    run_id: str,
+    artifact_id: str,
+    expires: int,
+    signature: str,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    artifact = await _signed_preview_artifact(
+        run_id, artifact_id, expires, signature, session
+    )
+    archive, files = _preview_archive(artifact.content)
+    try:
+        entrypoint = html_preview_entrypoint(list(files))
+    finally:
+        archive.close()
+    if entrypoint is None:
+        return _preview_response(
+            b"<!doctype html><meta charset=utf-8><title>Preview unavailable</title>"
+            b"<p>This ZIP has no unambiguous HTML entry point. Use its download link.</p>",
+            "text/html; charset=utf-8",
+            html_page=True,
+        )
+    return RedirectResponse(quote(entrypoint, safe="/"), status_code=307)
+
+
+@router.get(
+    "/v1/omp/missions/{run_id}/artifacts/{artifact_id}/preview/{expires}/{signature}/{path:path}",
+    response_class=Response,
+)
+async def preview_artifact_file(
+    run_id: str,
+    artifact_id: str,
+    expires: int,
+    signature: str,
+    path: str,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    if not _safe_archive_path(path):
+        raise HTTPException(status_code=404, detail="preview file not found")
+    artifact = await _signed_preview_artifact(
+        run_id, artifact_id, expires, signature, session
+    )
+    archive, files = _preview_archive(artifact.content)
+    try:
+        info = files.get(path)
+        media_type = PREVIEW_MEDIA_TYPES.get(PurePosixPath(path).suffix.casefold())
+        if info is None or media_type is None or info.flag_bits & 1:
+            raise HTTPException(status_code=404, detail="preview file not found")
+        try:
+            with archive.open(info) as stream:
+                content = stream.read(info.file_size + 1)
+        except (OSError, RuntimeError, EOFError, zlib.error, zipfile.BadZipFile) as exc:
+            raise HTTPException(status_code=422, detail="preview file is invalid") from exc
+        if len(content) != info.file_size or len(content) > MAX_ARTIFACT_BYTES:
+            raise HTTPException(status_code=422, detail="preview file size is invalid")
+    finally:
+        archive.close()
+    return _preview_response(
+        content,
+        media_type,
+        html_page=PurePosixPath(path).suffix.casefold() in HTML_SUFFIXES,
+    )
+
+
+@router.get(
+    "/v1/omp/missions/{run_id}/artifacts/{artifact_id}/preview/{expires}/{signature}",
+    include_in_schema=False,
+)
+async def redirect_preview_slash(
+    run_id: str,
+    artifact_id: str,
+    expires: int,
+    signature: str,
+) -> RedirectResponse:
+    return RedirectResponse(
+        f"/v1/omp/missions/{run_id}/artifacts/{artifact_id}/preview/{expires}/{signature}/",
+        status_code=307,
     )
 
 

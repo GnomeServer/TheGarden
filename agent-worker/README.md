@@ -15,7 +15,10 @@ run, and the trusted Caddy certificate; it has no Docker socket. The host worker
 validates the artifact manifest, packages every result as a ZIP, including
 single-file results, and uploads it over verified TLS to Agent Manager using a
 run-scoped capability. Agent Manager stores the bytes in PostgreSQL and returns
-a signed download link; the temporary OMP workspace is removed after upload.
+a signed ZIP download link; when the manifest identifies an eligible HTML entry
+point, mission status also carries a signed static-preview URL. The preview
+serves safe relative assets but disables scripts. The temporary OMP workspace
+is removed after upload.
 The worker does not clone or push the configured Forgejo repository, and
 mission artifacts are not executed.
 
@@ -145,6 +148,13 @@ cancelled. Final success still requires explicit reviewer approval and a
 complete artifact manifest. On success, the worker uploads the ZIP and removes
 its temporary workspace. Artifacts are retained for 30 days by default; signed
 links expire after seven days.
+
+Successful results may include `usage_instructions`. The worker validates up to
+eight short, single-line steps; runnable script artifacts require at least two.
+The planner and reviewer require safe, ordered steps with prerequisites, exact
+artifact paths and commands, and expected results. Agent Manager exposes these
+steps in mission status, and the OpenWebUI Pipe renders them as a numbered list.
+Neither the worker nor the embedded preview executes generated artifacts.
 
 For an artifact modification, the Manager creates a new child mission and
 supplies its parent ZIP as a signed, TLS-verified worker download. The worker

@@ -554,7 +554,20 @@ async def mission_status(
         "worker_id": record.worker_id,
         "reviewer_count": reviewer_count,
         "parent_mission_id": metadata.get("parent_mission_id"),
-        "artifact": mission_artifact(metadata, record.id) if record.status == "completed" else None,
+        "artifact": (
+            mission_artifact(
+                metadata,
+                record.id,
+                preview_paths=evidence.get("artifacts") if evidence else None,
+            )
+            if record.status == "completed"
+            else None
+        ),
+        "usage_instructions": (
+            result.get("usage_instructions")
+            if isinstance(result.get("usage_instructions"), list)
+            else []
+        ),
         "security_notice": (
             result.get("security_notice")
             if isinstance(result.get("security_notice"), str)

@@ -45,6 +45,7 @@ WORKER_CONSUMER = os.getenv(
 OMP_JOB_TIMEOUT_SECONDS = 1200
 MISSION_ACK_WAIT_SECONDS = 1500
 OMP_PROCESS_TIMEOUT_SECONDS = OMP_JOB_TIMEOUT_SECONDS + 60
+MISSION_ARTIFACT_RUN_ID = re.compile(r"[A-Za-z0-9-]{1,128}")
 
 KEYBROKER_URL = os.getenv(
     "KEYBROKER_URL",
@@ -654,8 +655,10 @@ async def inspect_mission_files(
 
 
 def package_artifacts(
-    work_dir: Path, artifact_paths: Any
+    work_dir: Path, artifact_paths: Any, run_id: str
 ) -> tuple[str, str, bytes]:
+    if not MISSION_ARTIFACT_RUN_ID.fullmatch(run_id):
+        raise ValueError("mission run ID cannot be used in an artifact filename")
     files = sorted(
         collect_artifact_files(work_dir, artifact_paths),
         key=lambda artifact: artifact[0],
@@ -693,7 +696,7 @@ def package_artifacts(
         raise ValueError(
             f"ZIP artifact exceeds the {MAX_ARTIFACT_BYTES}-byte upload limit"
         )
-    return "artifacts.zip", "application/zip", payload
+    return f"mission-{run_id}.zip", "application/zip", payload
 
 
 def _checkpoint_file_paths(work_dir: Path) -> list[str]:
@@ -1490,8 +1493,12 @@ async def run_mission_image(
                         work_dir, result.get("artifacts"), inspect_text
                     )
                 filename, content_type, content = await asyncio.to_thread(
-                    package_artifacts, work_dir, result.get("artifacts")
+                    package_artifacts, work_dir, result.get("artifacts"), run_id
                 )
+                evidence = result.get("evidence")
+                evidence = dict(evidence) if isinstance(evidence, dict) else {}
+                evidence["artifacts"] = list(result["artifacts"])
+                result["evidence"] = evidence
                 descriptor = await asyncio.to_thread(
                     upload_artifact,
                     upload_url,

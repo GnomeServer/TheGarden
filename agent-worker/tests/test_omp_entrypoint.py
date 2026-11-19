@@ -224,6 +224,37 @@ class MissionResultTests(unittest.TestCase):
         self.assertNotIn("script", result)
         self.assertEqual(result["reviewer_count"], 2)
         self.assertEqual(result["steps"], ["coder implemented", "reviewer approved"])
+        self.assertEqual(result["usage_instructions"], [])
+
+    def test_runnable_artifacts_require_ordered_usage_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work_dir = Path(directory)
+            (work_dir / "report.py").write_text("print('ok')", encoding="utf-8")
+            result = {
+                "status": "completed",
+                "reviewer_approved": True,
+                "reviewer_count": 0,
+                "summary": "Reviewer approved the script.",
+                "artifacts": ["report.py"],
+                "usage_instructions": [
+                    "Extract the ZIP and open a terminal in its folder.",
+                    "Run `python3 report.py`; it writes report.json.",
+                ],
+            }
+            with patch.object(entrypoint, "WORK_DIR", work_dir):
+                normalized = entrypoint.normalize_result(result, "mission-1")
+                self.assertEqual(
+                    normalized["usage_instructions"],
+                    [
+                        "Extract the ZIP and open a terminal in its folder.",
+                        "Run `python3 report.py`; it writes report.json.",
+                    ],
+                )
+                with self.assertRaisesRegex(RuntimeError, "step-by-step usage"):
+                    entrypoint.normalize_result(
+                        {**result, "usage_instructions": ["Run the script."]},
+                        "mission-1",
+                    )
 
     def test_success_requires_explicit_reviewer_approval(self) -> None:
         result = entrypoint.normalize_result(

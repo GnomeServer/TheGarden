@@ -215,12 +215,35 @@ specific clarification question. Your answer resumes the same mission from its
 worker checkpoint and resets the review counter to zero. Other execution errors
 remain failures; only the reviewer-limit case pauses for clarification.
 
-Completed work is returned as Manager-hosted artifact downloads, not inline
-source. Every mission's output is packaged as a ZIP, even if it contains just
-one file. Download links are signed and expire after seven days. Completed or
-cancelled runs clean their workspaces; `needs_input` preserves a worker-local
-checkpoint until the user clarifies or cancels. Download completed artifacts
-before their links expire.
+Completed work appears in the assistant chat with a sandboxed inline preview
+when a ZIP contains one unambiguous HTML entrypoint. The preview serves HTML
+and safe relative static assets; Open WebUI's embedded iframe disables scripts.
+Every completion also retains a signed ZIP-download fallback, named
+`mission-<mission-id>.zip` even for one-file results, so separate runs have
+distinct filenames. Preview and download links expire after seven days.
+Runnable script artifacts include 2–8 safe steps with prerequisites, exact
+paths, commands, and expected results. Never put API keys in files or commands.
+The display path does not provision Google Vertex AI or Model Garden access;
+future access should follow the proposed WIF and per-mission gateway design in
+[`docs/direct-google-architecture.md`](../../docs/direct-google-architecture.md).
+Never put provider credentials in artifact files, chat messages, or usage
+instructions. Manager-issued signed links are bearer artifact capabilities,
+separate from provider API credentials.
+Completed or cancelled runs clean their workspaces; `needs_input` preserves a
+worker-local checkpoint until the user clarifies or cancels. Download completed
+artifacts before their links expire.
+
+### Current rollout checkpoint
+
+At the current checkpoint, only the Agent Manager backend has been deployed;
+its readiness endpoint reports `status`, `database`, and `nats` as `ok`.
+See the [Manager rollout record](../agent-manager-service/README.md#artifact-preview-rollout-checkpoint)
+for the exact copy, rebuild, and verification commands. The saved Pipe source
+in OpenWebUI and the worker source/image have not yet been updated. Therefore,
+the new inline preview and script-instruction display have not yet been
+verified in a live chat. Replace the saved source through **Admin Panel >
+Functions**, preserve existing valve values, and deploy worker changes only to
+owner-approved hosts before testing one HTML mission and one script mission.
 
 To modify a delivered product, continue in the same conversation and start the
 request with an instruction such as “Add a dark mode to the app.” The Pipe uses

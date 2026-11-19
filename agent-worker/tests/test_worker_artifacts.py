@@ -44,10 +44,10 @@ class ArtifactPackagingTests(unittest.TestCase):
             (work_dir / "reports" / "summary.txt").write_bytes(b"single file")
 
             filename, content_type, payload = worker.package_artifacts(
-                work_dir, ["reports/summary.txt"]
+                work_dir, ["reports/summary.txt"], "run-1"
             )
 
-        self.assertEqual(filename, "artifacts.zip")
+        self.assertEqual(filename, "mission-run-1.zip")
         self.assertEqual(content_type, "application/zip")
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             self.assertEqual(archive.namelist(), ["reports/summary.txt"])
@@ -61,13 +61,17 @@ class ArtifactPackagingTests(unittest.TestCase):
             (work_dir / "README.txt").write_bytes(b"project")
 
             filename, content_type, payload = worker.package_artifacts(
-                work_dir, ["src/app.py", "README.txt"]
+                work_dir, ["src/app.py", "README.txt"], "run-1"
             )
-            _same_filename, _same_content_type, reordered_payload = (
-                worker.package_artifacts(work_dir, ["README.txt", "src/app.py"])
+            second_filename, _second_content_type, reordered_payload = (
+                worker.package_artifacts(
+                    work_dir, ["README.txt", "src/app.py"], "run-2"
+                )
             )
 
-        self.assertEqual(filename, "artifacts.zip")
+        self.assertEqual(filename, "mission-run-1.zip")
+        self.assertEqual(second_filename, "mission-run-2.zip")
+        self.assertNotEqual(filename, second_filename)
         self.assertEqual(content_type, "application/zip")
         self.assertEqual(payload, reordered_payload)
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
@@ -83,12 +87,19 @@ class ArtifactPackagingTests(unittest.TestCase):
                 self.assertEqual(info.create_system, 3)
                 self.assertEqual(info.compress_type, zipfile.ZIP_DEFLATED)
 
+    def test_rejects_unsafe_mission_ids_for_archive_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work_dir = Path(directory)
+            (work_dir / "result.txt").write_bytes(b"result")
+            with self.assertRaisesRegex(ValueError, "mission run ID"):
+                worker.package_artifacts(work_dir, ["result.txt"], "../run-1")
+
     def test_rejects_absolute_and_parent_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             work_dir = Path(directory)
             for path in ("/etc/passwd", "../outside.txt", "folder/../outside.txt"):
                 with self.subTest(path=path), self.assertRaises(ValueError):
-                    worker.package_artifacts(work_dir, [path])
+                    worker.package_artifacts(work_dir, [path], "run-1")
 
     def test_rejects_symlinked_files_and_parents(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -101,7 +112,7 @@ class ArtifactPackagingTests(unittest.TestCase):
 
             for path in ("file-link.txt", "dir-link/nested.txt"):
                 with self.subTest(path=path), self.assertRaisesRegex(ValueError, "symlink"):
-                    worker.package_artifacts(work_dir, [path])
+                    worker.package_artifacts(work_dir, [path], "run-1")
 
     def test_rejects_artifact_sets_over_total_size_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -111,7 +122,7 @@ class ArtifactPackagingTests(unittest.TestCase):
                 artifact_file.truncate(worker.MAX_ARTIFACT_BYTES + 1)
 
             with self.assertRaisesRegex(ValueError, "total limit"):
-                worker.package_artifacts(work_dir, ["large.bin"])
+                worker.package_artifacts(work_dir, ["large.bin"], "run-1")
 
     def test_rejects_more_than_one_hundred_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -123,7 +134,7 @@ class ArtifactPackagingTests(unittest.TestCase):
                 paths.append(name)
 
             with self.assertRaisesRegex(ValueError, "100 files"):
-                worker.package_artifacts(work_dir, paths)
+                worker.package_artifacts(work_dir, paths, "run-1")
 
     def test_upload_uses_bearer_header_and_verified_tls_without_token_payload(self) -> None:
         descriptor = {
@@ -422,8 +433,8 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_workspace_is_removed_only_after_upload_finishes(self) -> None:
         descriptor = {
             "id": "artifact-1",
-            "filename": "result.txt",
-            "content_type": "text/plain",
+            "filename": "mission-run-1.zip",
+            "content_type": "application/zip",
             "size_bytes": 6,
             "sha256": "digest",
         }
@@ -492,7 +503,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(upload_token, secret)
                 self.assertEqual(run_id, "run-1")
-                self.assertEqual(filename, "artifacts.zip")
+                self.assertEqual(filename, "mission-run-1.zip")
                 self.assertEqual(content_type, "application/zip")
                 self.assertNotIn(secret.encode(), content)
                 self.assertTrue(observed_work_dir[0].is_dir())
@@ -720,7 +731,10 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     worker,
                     "upload_artifact",
-                    return_value={"id": "artifact-1", "filename": "artifacts.zip"},
+                    return_value={
+                        "id": "artifact-1",
+                        "filename": f"mission-{run_id}.zip",
+                    },
                 ),
             ):
                 first = await worker.run_mission_image(
@@ -807,6 +821,10 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "reviewer_approved": True,
                     "reviewer_count": 0,
                     "summary": "The requested change passed review.",
+                    "usage_instructions": [
+                        "Extract the ZIP and open the app folder.",
+                        "Open app/index.html in a web browser.",
+                    ],
                     "artifacts": ["app/index.html", "app/style.css"],
                 }
                 return SimpleNamespace(stdout=json.dumps(result), stderr=None, returncode=0)
@@ -821,7 +839,7 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 _ca_file: Path,
             ) -> dict:
                 self.assertEqual(run_id, child_id)
-                self.assertEqual(filename, "artifacts.zip")
+                self.assertEqual(filename, f"mission-{child_id}.zip")
                 self.assertEqual(content_type, "application/zip")
                 with zipfile.ZipFile(io.BytesIO(content)) as archive:
                     self.assertEqual(
@@ -870,7 +888,18 @@ class MissionArtifactLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["artifact"]["filename"], "artifacts.zip")
+        self.assertEqual(result["artifact"]["filename"], f"mission-{child_id}.zip")
+        self.assertEqual(
+            result["evidence"]["artifacts"],
+            ["app/index.html", "app/style.css"],
+        )
+        self.assertEqual(
+            result["usage_instructions"],
+            [
+                "Extract the ZIP and open the app folder.",
+                "Open app/index.html in a web browser.",
+            ],
+        )
         self.assertFalse(observed_work_dir[0].exists())
 
 

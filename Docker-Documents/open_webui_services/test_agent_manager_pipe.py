@@ -82,8 +82,52 @@ class ArtifactFormattingTests(unittest.TestCase):
             }
         )
 
-        self.assertIn(f"[report \\[final\\].zip]({signed_url})", result)
+        self.assertIn("report \\[final\\].zip", result)
+        self.assertIn(f"[Download ZIP]({signed_url})", result)
         self.assertIn("2,048 bytes", result)
+
+    def test_preview_embed_and_script_steps_are_rendered(self) -> None:
+        download_url = (
+            "https://manager.example/v1/omp/missions/run-1/artifacts/id/download"
+            "?expires=123&signature=abc"
+        )
+        preview_url = (
+            "https://manager.example/v1/omp/missions/run-1/artifacts/id/preview/"
+            "123/abc/"
+        )
+        result = Pipe._format_artifacts(
+            {
+                "filename": "report.zip",
+                "download_url": download_url,
+                "preview_url": preview_url,
+                "size_bytes": 2048,
+            },
+            [
+                "Extract report.zip and open a terminal in its folder.",
+                "Run `python3 report.py` to create report.json.",
+            ],
+        )
+
+        self.assertIn(f"[Open preview]({preview_url})", result)
+        self.assertIn(f'<iframe src="{preview_url}"', result)
+        self.assertIn(f"[Download ZIP]({download_url})", result)
+        self.assertIn("**How to use the files**", result)
+        self.assertIn("1. Extract report\\.zip", result)
+        self.assertIn("2. Run \\`python3 report\\.py\\`", result)
+
+    def test_cross_origin_preview_is_not_embedded(self) -> None:
+        result = Pipe._format_artifacts(
+            {
+                "filename": "report.zip",
+                "download_url": "https://manager.example/download",
+                "preview_url": "https://attacker.example/preview",
+                "size_bytes": 12,
+            }
+        )
+
+        self.assertNotIn("<iframe", result)
+        self.assertNotIn("[Open preview]", result)
+        self.assertIn("[Download ZIP](https://manager.example/download)", result)
 
     def test_missing_artifact_has_an_explicit_user_message(self) -> None:
         result = Pipe._format_artifacts(None)
@@ -108,6 +152,10 @@ class FakeAgentManagerClient:
     signed_url = (
         "https://manager.example/v1/omp/missions/mission-1/artifacts/"
         "b2123ee9-84f6-4c12-9f07-11e023b1702c/download?expires=123&signature=abc"
+    )
+    preview_url = (
+        "https://manager.example/v1/omp/missions/mission-1/artifacts/"
+        "b2123ee9-84f6-4c12-9f07-11e023b1702c/preview/123/abc/"
     )
 
     def __init__(self) -> None:
@@ -152,10 +200,15 @@ class FakeAgentManagerClient:
                     ],
                 },
                 "artifact": {
-                    "filename": "calculator.html",
+                    "filename": "mission-1.zip",
                     "download_url": self.signed_url,
+                    "preview_url": self.preview_url,
                     "size_bytes": 2048,
                 },
+                "usage_instructions": [
+                    "Open calculator.html in a web browser.",
+                    "Use the download link for the complete source files.",
+                ],
                 "artifacts": [
                     {"path": "calculator.html", "content": "PRIVATE-PRODUCT-SOURCE"},
                 ],
@@ -267,9 +320,13 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.request_body["goal"], "Write a short status note for the lab.")
         self.assertIn("Reviewer verdicts: 2/2 approved.", result)
         self.assertIn("Artifacts produced: 1.", result)
-        self.assertIn(f"[calculator.html]({client.signed_url})", result)
+        self.assertIn(f"[Download ZIP]({client.signed_url})", result)
+        self.assertIn(f"[Open preview]({client.preview_url})", result)
+        self.assertIn(f'<iframe src="{client.preview_url}"', result)
         self.assertIn("Attempts: 1.", result)
         self.assertNotIn("PRIVATE-PRODUCT-SOURCE", result)
+        self.assertIn("**How to use the files**", result)
+        self.assertIn("1. Open calculator\\.html", result)
         progress = [
             call.args[0]["data"]["description"]
             for call in event_emitter.await_args_list
@@ -343,7 +400,7 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
-        self.assertIn(f"[product.zip]({client.signed_url})", result)
+        self.assertIn(f"[Download ZIP]({client.signed_url})", result)
 
     async def test_stopping_mission_requests_backend_cancellation(self) -> None:
         pipe = self.configured_pipe()
@@ -398,7 +455,7 @@ class PipeSubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             client.request_body["goal"], "Can you add a dark mode to the app?"
         )
-        self.assertIn(f"[calculator.html]({client.signed_url})", result)
+        self.assertIn(f"[Download ZIP]({client.signed_url})", result)
 
     async def test_modification_without_a_downloaded_artifact_does_not_start_a_run(self) -> None:
         pipe = self.configured_pipe()

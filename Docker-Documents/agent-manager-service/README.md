@@ -334,6 +334,40 @@ Expected response:
 {"status":"ok","database":"ok","nats":"ok"}
 ```
 
+### Artifact-preview rollout checkpoint
+
+The following source-only deployment was run on `infra-lab-services`; it
+replaces only the two Manager Python modules and leaves `.env`, Compose
+overrides, and database volumes untouched:
+
+```bash
+cd ~/TheGarden
+cp Docker-Documents/agent-manager-service/agent_manager/artifacts.py \
+   ~/agent-manager-service/agent_manager/artifacts.py
+cp Docker-Documents/agent-manager-service/agent_manager/omp.py \
+   ~/agent-manager-service/agent_manager/omp.py
+cd ~/agent-manager-service
+sudo docker compose up -d --build --force-recreate agent-manager
+curl -sS http://127.0.0.1:8090/readyz
+```
+
+The first readiness request immediately after startup was refused while the
+container was starting. These read-only diagnostics were then run:
+
+```bash
+sudo docker compose ps agent-manager
+sudo docker compose logs --tail=100 agent-manager
+curl -sS http://127.0.0.1:8090/readyz
+```
+
+Compose reported the Manager `Up (healthy)` with
+`127.0.0.1:8090->8000/tcp`; the logs reported application startup complete.
+The readiness request then returned
+`{"status":"ok","database":"ok","nats":"ok"}`. This verifies the Manager
+backend only. The saved OpenWebUI Pipe and the worker source/image have not
+yet been updated, so inline chat previews and script instructions have not
+been verified end to end.
+
 Check logs:
 
 ```bash

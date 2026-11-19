@@ -23,6 +23,10 @@ OMP_AGENT_DIR = Path("/opt/omp-worker/agents")
 OMP_MODELS = Path("/opt/omp-worker/models.yml")
 OMP_MODEL = os.environ.get("OMP_MODEL", "worker-litellm/luna")
 OMP_TIMEOUT_SECONDS = max(60, int(os.environ.get("OMP_TIMEOUT_SECONDS", "1200")))
+EXECUTABLE_SCRIPT_SUFFIXES = frozenset({
+    ".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts",
+    ".ps1", ".bat", ".cmd", ".rb", ".pl", ".php",
+})
 
 
 def emit(result: dict[str, Any], exit_code: int = 0) -> None:
@@ -200,6 +204,33 @@ def validate_artifact_paths(value: Any) -> list[str]:
         paths.append(raw_path)
     return paths
 
+def validate_usage_instructions(value: Any, artifact_paths: list[str]) -> list[str]:
+    if not isinstance(value, list) or len(value) > 8:
+        raise RuntimeError("OMP success must provide at most eight usage instructions")
+    instructions: list[str] = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > 500
+            or "\n" in item
+            or "\r" in item
+            or any(not character.isprintable() for character in item)
+        ):
+            raise RuntimeError("OMP usage instructions must be short, single-line steps")
+        instructions.append(item.strip())
+
+    has_script = any(
+        PurePosixPath(path).suffix.casefold() in EXECUTABLE_SCRIPT_SUFFIXES
+        for path in artifact_paths
+    )
+    if has_script and len(instructions) < 2:
+        raise RuntimeError(
+            "OMP success with runnable artifacts must include step-by-step usage instructions"
+        )
+    return instructions
+
+
 
 def normalize_result(result: dict[str, Any], mission_id: str) -> dict[str, Any]:
     if result.get("mission_id") not in (None, mission_id):
@@ -225,6 +256,9 @@ def normalize_result(result: dict[str, Any], mission_id: str) -> dict[str, Any]:
         result["artifacts"] = []
     elif reported_status in {"accepted", "completed"} and approved:
         result["artifacts"] = validate_artifact_paths(result.get("artifacts"))
+        result["usage_instructions"] = validate_usage_instructions(
+            result.get("usage_instructions", []), result["artifacts"]
+        )
         result["status"] = "completed"
     else:
         result["status"] = "failed"

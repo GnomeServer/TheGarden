@@ -334,6 +334,10 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
                 "ledger": {},
                 "result": {
                     "evidence": {"artifacts": ["result.py"]},
+                    "usage_instructions": [
+                        "Extract result.zip and open a terminal in its folder.",
+                        "Run `python3 result.py` to create report.json.",
+                    ],
                     "artifacts": [{"path": "result.py", "content": "PRIVATE-SOURCE-CONTENT"}],
                 },
             },
@@ -347,6 +351,14 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_out["artifact"]["filename"], "result.zip")
         self.assertNotIn("script", status_out)
         self.assertEqual(status_out["evidence"], {"artifacts": ["result.py"]})
+        self.assertNotIn("preview_url", status_out["artifact"])
+        self.assertEqual(
+            status_out["usage_instructions"],
+            [
+                "Extract result.zip and open a terminal in its folder.",
+                "Run `python3 result.py` to create report.json.",
+            ],
+        )
         self.assertNotIn("artifacts", status_out)
         self.assertNotIn("PRIVATE-SOURCE-CONTENT", str(status_out))
         query = parse_qs(urlparse(status_out["artifact"]["download_url"]).query)
@@ -355,6 +367,31 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(verify_artifact_signature(
             "run-1", artifact["id"], expires, query["signature"][0]
         ))
+
+    def test_html_preview_requires_one_safe_manifest_entrypoint(self):
+        self.assertEqual(
+            artifacts.html_preview_entrypoint(["index.html", "assets/app.js"]),
+            "index.html",
+        )
+        self.assertIsNone(
+            artifacts.html_preview_entrypoint(["one.html", "two.html"])
+        )
+        self.assertIsNone(
+            artifacts.html_preview_entrypoint(["../index.html"])
+        )
+        descriptor = artifacts.mission_artifact(
+            {"artifact": {
+                "id": "47e03d42-1a02-4ccf-8e1f-006d53f5ddde",
+                "filename": "result.zip",
+                "content_type": "application/zip",
+                "size_bytes": 10,
+                "sha256": "a" * 64,
+            }},
+            "run-1",
+            preview_paths=["index.html"],
+        )
+        self.assertIsNotNone(descriptor)
+        self.assertTrue(descriptor["preview_url"].endswith("/"))
 
     async def test_upload_capability_is_only_in_event_metadata(self):
         record = SimpleNamespace(id="run-1", run_metadata={"operation": "mission"})
@@ -450,6 +487,11 @@ class ArtifactHttpRoundTripTests(unittest.TestCase):
         ) as archive:
             archive.writestr("src/main.py", b"print('project')\n")
             archive.writestr("README.md", b"project files")
+            archive.writestr(
+                "index.html",
+                b"<!doctype html><h1>Project preview</h1><script src='app.js'></script>",
+            )
+            archive.writestr("app.js", b"console.log('project preview');")
 
         cases = (
             (
@@ -509,10 +551,30 @@ class ArtifactHttpRoundTripTests(unittest.TestCase):
                     if content_type == "application/zip":
                         with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
                             self.assertEqual(
-                                archive.namelist(), ["src/main.py", "README.md"]
+                                archive.namelist(),
+                                ["src/main.py", "README.md", "index.html", "app.js"],
                             )
                             self.assertEqual(
                                 archive.read("src/main.py"), b"print('project')\n"
                             )
+                        preview_url = artifacts.artifact_preview_url(run_id, descriptor)
+                        preview_path = urlparse(preview_url).path
+                        preview = client.get(preview_path, follow_redirects=True)
+                        self.assertEqual(preview.status_code, 200)
+                        self.assertIn(b"<h1>Project preview</h1>", preview.content)
+                        self.assertIn(
+                            "script-src 'none'",
+                            preview.headers["content-security-policy"],
+                        )
+                        self.assertEqual(
+                            preview.headers["content-disposition"], "inline"
+                        )
+                        asset = client.get(f"{preview_path}app.js")
+                        self.assertEqual(asset.status_code, 200)
+                        self.assertEqual(
+                            asset.headers["content-type"],
+                            "text/javascript; charset=utf-8",
+                        )
+                        self.assertEqual(asset.content, b"console.log('project preview');")
 if __name__ == "__main__":
     unittest.main()
