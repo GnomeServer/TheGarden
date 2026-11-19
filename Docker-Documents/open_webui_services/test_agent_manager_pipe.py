@@ -151,6 +151,28 @@ class ArtifactFormattingTests(unittest.TestCase):
         self.assertNotIn("[Open preview]", result)
         self.assertIn("[Download ZIP](https://manager.example/download)", result)
 
+
+        self.assertIn(f"[Open preview]({preview_url})", result)
+        self.assertIn(f'<iframe src="{preview_url}"', result)
+        self.assertIn(f"[Download ZIP]({download_url})", result)
+        self.assertIn("**How to use the files**", result)
+        self.assertIn("1. Extract report\\.zip", result)
+        self.assertIn("2. Run \\`python3 report\\.py\\`", result)
+
+    def test_cross_origin_preview_is_not_embedded(self) -> None:
+        result = Pipe._format_artifacts(
+            {
+                "filename": "report.zip",
+                "download_url": "https://manager.example/download",
+                "preview_url": "https://attacker.example/preview",
+                "size_bytes": 12,
+            }
+        )
+
+        self.assertNotIn("<iframe", result)
+        self.assertNotIn("[Open preview]", result)
+        self.assertIn("[Download ZIP](https://manager.example/download)", result)
+
     def test_missing_artifact_has_an_explicit_user_message(self) -> None:
         result = Pipe._format_artifacts(None)
 
