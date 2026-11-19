@@ -6,8 +6,8 @@ This is the deliberately small first version of the lab.
 
 Current lab description:
 
-- One Proxmox VE 9 server laptop, converted in-place from Debian 13
-- Four worker hosts are in the Ansible inventory (`inkii`, `naruto`, `raphael`, `donatello`); the hardware plan is five Ubuntu laptops
+- One Proxmox VE 6 server laptop, converted in-place from Debian 13
+- Four worker hosts are in the Ansible inventory (`inkii`, `naruto`, `raphael`, `donatello`, `michelangelo`,`sammy`); the hardware plan is 6 Ubuntu laptops
 - Approximately 32 GB RAM and 512 GB SSD per laptop
 - Intel integrated Arc graphics on the laptops
 - Tailscale tailnet already configured
