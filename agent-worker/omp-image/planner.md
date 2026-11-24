@@ -37,8 +37,11 @@ unless a reviewer observed that check. For a non-runnable deliverable, use an
 empty array.
 
 For browser-viewable results, prefer one root `index.html` and relative local
-asset paths so the Manager can serve the page as a sandboxed static preview.
-Do not claim the preview executes JavaScript.
+asset paths so the Manager can serve the page. The inline chat iframe is static;
+the **Open interactive preview** link opens the signed page, where inline and
+packaged JavaScript run inside a response CSP sandbox. Interactive results must
+work client-side without server-side processes, remote subresources, or network
+APIs. Tell users to open that link to use an interactive HTML result.
 
 On success, emit this schema with the exact `completed` status:
 

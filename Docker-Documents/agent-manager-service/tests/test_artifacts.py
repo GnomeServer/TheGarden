@@ -489,9 +489,16 @@ class ArtifactHttpRoundTripTests(unittest.TestCase):
             archive.writestr("README.md", b"project files")
             archive.writestr(
                 "index.html",
-                b"<!doctype html><h1>Project preview</h1><script src='app.js'></script>",
+                b"<!doctype html><h1>Project preview</h1>"
+                b"<button id='score'>Score 0</button>"
+                b"<script>let score=0;document.querySelector('#score').onclick=()=>"
+                b"document.querySelector('#score').textContent='Score '+(++score);"
+                b"</script><script src='app.js'></script>",
             )
-            archive.writestr("app.js", b"console.log('project preview');")
+            archive.writestr(
+                "app.js",
+                b"document.querySelector('#score').dataset.ready='true';",
+            )
 
         cases = (
             (
@@ -563,9 +570,20 @@ class ArtifactHttpRoundTripTests(unittest.TestCase):
                         self.assertEqual(preview.status_code, 200)
                         self.assertIn(b"<h1>Project preview</h1>", preview.content)
                         self.assertIn(
-                            "script-src 'none'",
-                            preview.headers["content-security-policy"],
+                            b"<button id='score'>Score 0</button>", preview.content
                         )
+                        self.assertIn(
+                            b"document.querySelector('#score').onclick",
+                            preview.content,
+                        )
+                        csp = preview.headers["content-security-policy"]
+                        self.assertIn(
+                            "script-src 'self' 'unsafe-inline'", csp
+                        )
+                        self.assertIn("connect-src 'none'", csp)
+                        self.assertIn("worker-src 'none'", csp)
+                        self.assertIn("sandbox allow-scripts", csp)
+                        self.assertNotIn("allow-same-origin", csp)
                         self.assertEqual(
                             preview.headers["content-disposition"], "inline"
                         )
@@ -575,6 +593,9 @@ class ArtifactHttpRoundTripTests(unittest.TestCase):
                             asset.headers["content-type"],
                             "text/javascript; charset=utf-8",
                         )
-                        self.assertEqual(asset.content, b"console.log('project preview');")
+                        self.assertEqual(
+                            asset.content,
+                            b"document.querySelector('#score').dataset.ready='true';",
+                        )
 if __name__ == "__main__":
     unittest.main()

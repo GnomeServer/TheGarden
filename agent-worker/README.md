@@ -15,12 +15,16 @@ run, and the trusted Caddy certificate; it has no Docker socket. The host worker
 validates the artifact manifest, packages every result as a ZIP, including
 single-file results, and uploads it over verified TLS to Agent Manager using a
 run-scoped capability. Agent Manager stores the bytes in PostgreSQL and returns
-a signed ZIP download link; when the manifest identifies an eligible HTML entry
-point, mission status also carries a signed static-preview URL. The preview
-serves safe relative assets but disables scripts. The temporary OMP workspace
-is removed after upload.
-The worker does not clone or push the configured Forgejo repository, and
-mission artifacts are not executed.
+a signed ZIP download link. If the manifest identifies an eligible HTML
+entrypoint, mission status also carries a signed HTML-preview URL. The preview
+serves safe relative assets. OpenWebUI's inline chat iframe remains
+script-disabled; the **Open interactive preview** link opens a standalone page
+where inline and packaged JavaScript run inside a response CSP sandbox with an
+opaque origin. This enables client-side games and GUIs, not a server-side
+runtime; `fetch`, XHR, WebSocket connections, remote subresources, forms,
+nested frames, and workers are blocked. The worker does not clone or push the
+configured Forgejo repository or execute mission artifacts. The temporary OMP
+workspace is removed after upload.
 
 The separate legacy `create-python-script` operation remains disabled by
 default. If explicitly enabled, it executes generated Python unsandboxed as the

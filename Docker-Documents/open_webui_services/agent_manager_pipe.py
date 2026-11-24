@@ -162,7 +162,7 @@ class Pipe:
                 and preview_parts.username is None
                 and preview_parts.password is None
             ):
-                links.append(f"[Open preview]({preview_url})")
+                links.append(f"[Open interactive preview]({preview_url})")
                 preview_embed = (
                     "\n\n<iframe src=\""
                     + html.escape(preview_url, quote=True)

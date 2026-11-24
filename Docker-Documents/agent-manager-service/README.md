@@ -364,9 +364,10 @@ Compose reported the Manager `Up (healthy)` with
 `127.0.0.1:8090->8000/tcp`; the logs reported application startup complete.
 The readiness request then returned
 `{"status":"ok","database":"ok","nats":"ok"}`. This verifies the Manager
-backend only. The saved OpenWebUI Pipe and the worker source/image have not
-yet been updated, so inline chat previews and script instructions have not
-been verified end to end.
+backend only. On the live host, the saved OpenWebUI Pipe and worker source/image
+have not been updated to this repository revision, so the interactive preview
+has not been verified end to end. GitHub commits are source-only and do not
+deploy or change the live services.
 
 Check logs:
 

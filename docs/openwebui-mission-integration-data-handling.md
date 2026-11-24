@@ -116,7 +116,12 @@ The 7-day URL expiry is not artifact deletion. The 30-day artifact cleanup is no
 - [ ] Review access to Open WebUI chat exports/database backups, Agent Manager PostgreSQL, the `/v1/runs` APIs, NATS, worker disks, artifact endpoints, and LiteLLM logs.
 - [ ] Set explicit retention/deletion requirements for chat transcripts, mission goals/project briefs, NATS events, artifacts, checkpoints, logs, and backups; test deletion end to end with synthetic data.
 - [ ] Confirm the user-facing notice/approval for sending prompts, project context, images, or generated artifacts to an external model provider.
-- [ ] Confirm generated artifacts are treated as untrusted files; the current mission path does not execute them or modify Forgejo, and preview rendering disables scripts.
+- [ ] Confirm generated artifacts are treated as untrusted files; the worker
+  does not execute them or modify Forgejo. HTML previews are inert in chat, but
+  the **Open interactive preview** link runs client-side JavaScript in a
+  standalone response-CSP sandbox with an opaque origin. Review blocked
+  network APIs, remote subresources, forms, nested frames, and workers; it is
+  not a server-side runtime or an inert file.
 - [ ] Record any live configuration differences and the owner for each unresolved retention/access decision.
 
 ## Repository references

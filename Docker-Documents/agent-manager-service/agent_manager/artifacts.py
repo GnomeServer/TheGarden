@@ -53,12 +53,15 @@ PREVIEW_MEDIA_TYPES = {
     ".ttf": "font/ttf",
     ".otf": "font/otf",
 }
+# Permit interactive artifacts without exposing the embedding origin or
+# allowing external connections.
 PREVIEW_CSP = (
-    "default-src 'none'; script-src 'none'; "
+    "default-src 'none'; script-src 'self' 'unsafe-inline'; "
     "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
     "font-src 'self' data:; media-src 'self' data: blob:; "
     "connect-src 'none'; object-src 'none'; frame-src 'none'; "
-    "base-uri 'none'; form-action 'none'"
+    "base-uri 'none'; form-action 'none'; worker-src 'none'; "
+    "sandbox allow-scripts"
 )
 MAX_PREVIEW_FILES = 100
 # Weak values discard idle per-run locks while active callers retain their lock.

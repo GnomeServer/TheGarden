@@ -217,8 +217,13 @@ remain failures; only the reviewer-limit case pauses for clarification.
 
 Completed work appears in the assistant chat with a sandboxed inline preview
 when a ZIP contains one unambiguous HTML entrypoint. The preview serves HTML
-and safe relative static assets; Open WebUI's embedded iframe disables scripts.
-Every completion also retains a signed ZIP-download fallback, named
+and safe relative assets. OpenWebUI's chat iframe remains script-disabled; use
+the **Open interactive preview** link to open the HTML in a standalone page.
+There, inline and packaged JavaScript run inside a response CSP sandbox with
+an opaque origin, enabling client-side games and GUIs. The policy blocks
+`fetch`, XHR, WebSocket connections, remote subresources, forms, nested frames,
+and workers; this is not a server-side runtime or API. Every completion
+retains a signed ZIP-download fallback, named
 `mission-<mission-id>.zip` even for one-file results, so separate runs have
 distinct filenames. Preview and download links expire after seven days.
 Runnable script artifacts include 2–8 safe steps with prerequisites, exact
@@ -238,12 +243,13 @@ artifacts before their links expire.
 At the current checkpoint, only the Agent Manager backend has been deployed;
 its readiness endpoint reports `status`, `database`, and `nats` as `ok`.
 See the [Manager rollout record](../agent-manager-service/README.md#artifact-preview-rollout-checkpoint)
-for the exact copy, rebuild, and verification commands. The saved Pipe source
-in OpenWebUI and the worker source/image have not yet been updated. Therefore,
-the new inline preview and script-instruction display have not yet been
-verified in a live chat. Replace the saved source through **Admin Panel >
-Functions**, preserve existing valve values, and deploy worker changes only to
-owner-approved hosts before testing one HTML mission and one script mission.
+for the exact copy, rebuild, and verification commands. The saved OpenWebUI
+Pipe and worker source/image on the live host have not been updated to this
+repository revision. The interactive preview remains unverified in live chat.
+These GitHub changes are source-only and do not deploy or change live services.
+Replace the saved source through **Admin Panel > Functions**, preserve existing
+valve values, and deploy worker changes only to owner-approved hosts before
+testing one HTML mission and one script mission.
 
 To modify a delivered product, continue in the same conversation and start the
 request with an instruction such as “Add a dark mode to the app.” The Pipe uses

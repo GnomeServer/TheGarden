@@ -108,7 +108,7 @@ class ArtifactFormattingTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn(f"[Open preview]({preview_url})", result)
+        self.assertIn(f"[Open interactive preview]({preview_url})", result)
         self.assertIn(f'<iframe src="{preview_url}"', result)
         self.assertIn(f"[Download ZIP]({download_url})", result)
         self.assertIn("**How to use the files**", result)
