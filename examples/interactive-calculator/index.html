@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101826">
+  <title>Interactive Calculator</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./calculator.js" defer></script>
+</head>
+<body>
+  <main class="page">
+    <section class="calculator" aria-labelledby="calculator-title">
+      <h1 id="calculator-title">Calculator</h1>
+      <output id="display" class="display" role="status" aria-live="polite" aria-atomic="true">0</output>
+      <div class="keys" role="group" aria-label="Calculator controls">
+        <button type="button" class="function" data-action="clear" aria-label="All clear">AC</button>
+        <button type="button" class="function" data-action="backspace" aria-label="Backspace">⌫</button>
+        <button type="button" class="function" data-operator="%" aria-label="Modulo remainder">%</button>
+        <button type="button" class="operator" data-operator="/" aria-label="Divide">÷</button>
+
+        <button type="button" data-digit="7" aria-label="7">7</button>
+        <button type="button" data-digit="8" aria-label="8">8</button>
+        <button type="button" data-digit="9" aria-label="9">9</button>
+        <button type="button" class="operator" data-operator="*" aria-label="Multiply">×</button>
+
+        <button type="button" data-digit="4" aria-label="4">4</button>
+        <button type="button" data-digit="5" aria-label="5">5</button>
+        <button type="button" data-digit="6" aria-label="6">6</button>
+        <button type="button" class="operator" data-operator="-" aria-label="Subtract">−</button>
+
+        <button type="button" data-digit="1" aria-label="1">1</button>
+        <button type="button" data-digit="2" aria-label="2">2</button>
+        <button type="button" data-digit="3" aria-label="3">3</button>
+        <button type="button" class="operator" data-operator="+" aria-label="Add">+</button>
+
+        <button type="button" class="zero" data-digit="0" aria-label="0">0</button>
+        <button type="button" data-action="decimal" aria-label="Decimal point">.</button>
+        <button type="button" class="operator equals" data-action="equals" aria-label="Equals">=</button>
+      </div>
+      <p class="keyboard-hint">Keyboard: digits, <kbd>+</kbd> <kbd>−</kbd> <kbd>*</kbd> <kbd>/</kbd> <kbd>%</kbd>, <kbd>Enter</kbd>, <kbd>Esc</kbd>, <kbd>Backspace</kbd>, and <kbd>.</kbd>.</p>
+    </section>
+  </main>
+</body>
+</html>
